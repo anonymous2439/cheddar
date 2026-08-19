@@ -12,6 +12,7 @@ class ApiKey(Base):
     application_id = Column(BIGINT(unsigned=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
     key_prefix = Column(String(12), nullable=False)
     key_hash = Column(CHAR(64), nullable=False, unique=True)
+    description = Column(String(255), nullable=True)
     scopes = Column(String(255), nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     expires_at = Column(DateTime, nullable=True)
