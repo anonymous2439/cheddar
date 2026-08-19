@@ -1,0 +1,78 @@
+{
+  "name": "cheddar",
+  "displayName": "Cheddar",
+  "description": "VS Code extension with a custom bottom panel tab",
+  "version": "0.0.7",
+  "engines": {
+    "vscode": "^1.108.1"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "cheddarPanel",
+          "title": "Cheddar",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "cheddarPanel": [
+        {
+          "type": "webview",
+          "id": "cheddarPanel.view",
+          "name": "My Custom Tab",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "cheddar.helloWorld",
+        "title": "Hello World"
+      }
+    ],
+    "configuration": {
+      "title": "Cheddar",
+      "properties": {
+        "cheddar.apiBaseUrl": {
+          "type": "string",
+          "default": "http://109.123.234.69/api/cheddar",
+          "description": "Base URL of the Cheddar API (REST + WebSocket)."
+        },
+        "cheddar.apiKey": {
+          "type": "string",
+          "default": "ched_XZivKSUSfElK5BPK0DZO_oX3ZWBnBpEfqp8B5Dg60ug",
+          "description": "Application API key identifying this extension to the Cheddar API."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/vscode": "^1.108.1",
+    "@types/ws": "^8.18.1",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.27.1",
+    "eslint": "^9.39.1",
+    "glob": "^13.0.0",
+    "mocha": "^11.7.5",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
+  }
+}
