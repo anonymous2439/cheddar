@@ -93,6 +93,7 @@ const styles = StyleSheet.create({
   title: { fontSize: 20, fontWeight: "600", color: "#171717", marginBottom: 24 },
   label: { fontSize: 13, color: "#525252", marginBottom: 4 },
   input: {
+    color: "#171717",
     borderWidth: 1,
     borderColor: "#d4d4d4",
     borderRadius: 6,

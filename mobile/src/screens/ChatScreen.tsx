@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   FlatList,
   Image,
@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
+import { useFocusEffect } from "@react-navigation/native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useAuth } from "../context/AuthContext";
 import { useChatDataContext } from "../context/ChatDataContext";
@@ -44,6 +45,7 @@ export function ChatScreen({ route, navigation }: Props) {
     sendMessage,
     sendTyping,
     markRead,
+    setActiveConversationId,
   } = useChatDataContext();
 
   const currentUserId = user!.id;
@@ -72,6 +74,13 @@ export function ChatScreen({ route, navigation }: Props) {
   useEffect(() => {
     loadHistory(conversation.id);
   }, [conversation.id, loadHistory]);
+
+  useFocusEffect(
+    useCallback(() => {
+      setActiveConversationId(conversation.id);
+      return () => setActiveConversationId(null);
+    }, [conversation.id, setActiveConversationId]),
+  );
 
   useEffect(() => {
     const last = messages[messages.length - 1];

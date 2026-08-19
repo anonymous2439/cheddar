@@ -3,6 +3,7 @@ import * as conversationsApi from "../api/conversations";
 import * as friendsApi from "../api/friends";
 import { useWebSocket } from "../context/WebSocketContext";
 import { useAuth } from "../context/AuthContext";
+import { initNotifications, notifyFriendRequestAccepted, notifyNewMessage } from "../notifications";
 import type { Conversation, FriendRequest, Message, User } from "../types";
 
 export function useChatData() {
@@ -23,6 +24,27 @@ export function useChatData() {
   const HISTORY_PAGE_SIZE = 50;
 
   const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  // Kept in refs (rather than read from state) because the WS subscribe effect below
+  // only re-runs when `subscribe` changes, so its closure would otherwise see stale values.
+  const userRef = useRef(user);
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+
+  const conversationsRef = useRef(conversations);
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  const activeConversationIdRef = useRef<number | null>(null);
+  const setActiveConversationId = useCallback((conversationId: number | null) => {
+    activeConversationIdRef.current = conversationId;
+  }, []);
+
+  useEffect(() => {
+    if (user) initNotifications();
+  }, [user]);
 
   const refreshAll = useCallback(async () => {
     if (!user) return;
@@ -71,6 +93,20 @@ export function useChatData() {
           const rest = prev.filter((_, i) => i !== idx);
           return [updated, ...rest];
         });
+
+        const currentUser = userRef.current;
+        const isOwnMessage = currentUser && message.sender_id === currentUser.id;
+        const isOpenConversation = message.conversation_id === activeConversationIdRef.current;
+        if (!isOwnMessage && !isOpenConversation) {
+          const conversation = conversationsRef.current.find((c) => c.id === message.conversation_id);
+          const sender = conversation?.participants.find((p) => p.id === message.sender_id);
+          notifyNewMessage(sender?.display_name ?? "New message", message.content ?? "", message.conversation_id);
+        }
+      } else if (event.type === "friend_request.accepted") {
+        const request = event.data;
+        setOutgoingRequests((prev) => prev.filter((r) => r.id !== request.id));
+        setFriends((prev) => (prev.some((f) => f.id === request.user.id) ? prev : [...prev, request.user]));
+        notifyFriendRequestAccepted(request.user.display_name);
       } else if (event.type === "typing") {
         const { conversation_id, user_id, state } = event.data;
         const key = `${conversation_id}:${user_id}`;
@@ -183,6 +219,7 @@ export function useChatData() {
     onlineUserIds,
     hasMoreByConversation,
     loadingMoreByConversation,
+    setActiveConversationId,
     refreshAll,
     loadHistory,
     loadMoreHistory,

@@ -59,4 +59,5 @@ export type WsEvent =
   | { type: "typing"; data: { conversation_id: number; user_id: number; state: "start" | "stop" } }
   | { type: "message.read"; data: { conversation_id: number; user_id: number; message_id: number } }
   | { type: "presence"; data: { user_id: number; status: "online" | "offline" } }
+  | { type: "friend_request.accepted"; data: FriendRequest }
   | { type: "error"; data: { message: string } };

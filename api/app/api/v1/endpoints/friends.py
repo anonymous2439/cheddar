@@ -11,6 +11,7 @@ from app.models.user import User
 from app.models.user_block import UserBlock
 from app.schemas.friendship import FriendRequestCreate, FriendRequestOut
 from app.schemas.user import UserOut
+from app.websocket.manager import manager
 
 router = APIRouter()
 
@@ -126,7 +127,7 @@ def list_friend_requests(
 
 
 @router.post("/requests/{request_id}/accept", response_model=FriendRequestOut)
-def accept_friend_request(
+async def accept_friend_request(
     request_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -143,6 +144,14 @@ def accept_friend_request(
     db.refresh(row)
 
     other = db.get(User, row.requester_id)
+
+    # Notify the original requester in realtime — they're the "other" party from
+    # their own perspective, so reuse _to_request_out with roles swapped.
+    await manager.send_to_user(
+        row.requester_id,
+        {"type": "friend_request.accepted", "data": _to_request_out(row, row.requester_id, user).model_dump(mode="json")},
+    )
+
     return _to_request_out(row, user.id, other)
 
 
