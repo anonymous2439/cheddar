@@ -33,6 +33,12 @@
           }
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "84136f56-5a14-481a-b8b5-7a20638dda04"
+      }
+    },
+    "owner": "revelation2439"
   }
 }
