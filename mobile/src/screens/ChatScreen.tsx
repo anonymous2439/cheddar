@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   FlatList,
   Image,
-  KeyboardAvoidingView,
   Linking,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   Platform,
   Pressable,
   StyleSheet,
@@ -12,8 +13,8 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import * as DocumentPicker from "expo-document-picker";
-import { useFocusEffect } from "@react-navigation/native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useAuth } from "../context/AuthContext";
 import { useChatDataContext } from "../context/ChatDataContext";
@@ -45,7 +46,6 @@ export function ChatScreen({ route, navigation }: Props) {
     sendMessage,
     sendTyping,
     markRead,
-    setActiveConversationId,
   } = useChatDataContext();
 
   const currentUserId = user!.id;
@@ -60,8 +60,13 @@ export function ChatScreen({ route, navigation }: Props) {
   const [emojiPickerVisible, setEmojiPickerVisible] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const typingStopTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastMarkedReadId = useRef<number | null>(null);
+  const listRef = useRef<FlatList<Message>>(null);
+  // Inverted list: content offset 0 is the bottom (latest message).
+  const isNearBottomRef = useRef(true);
+  const lastMessageIdRef = useRef<number | null>(null);
 
   const peer = conversation.participants.find((p) => p.id !== currentUserId);
 
@@ -75,13 +80,6 @@ export function ChatScreen({ route, navigation }: Props) {
     loadHistory(conversation.id);
   }, [conversation.id, loadHistory]);
 
-  useFocusEffect(
-    useCallback(() => {
-      setActiveConversationId(conversation.id);
-      return () => setActiveConversationId(null);
-    }, [conversation.id, setActiveConversationId]),
-  );
-
   useEffect(() => {
     const last = messages[messages.length - 1];
     if (last && last.id !== lastMarkedReadId.current) {
@@ -89,6 +87,46 @@ export function ChatScreen({ route, navigation }: Props) {
       markRead(conversation.id, last.id);
     }
   }, [messages, conversation.id, markRead]);
+
+  // Reset scroll tracking when switching conversations.
+  useEffect(() => {
+    lastMessageIdRef.current = null;
+    isNearBottomRef.current = true;
+    setShowScrollToBottom(false);
+  }, [conversation.id]);
+
+  function scrollToBottom(animated: boolean) {
+    listRef.current?.scrollToOffset({ offset: 0, animated });
+    setShowScrollToBottom(false);
+  }
+
+  function handleScroll(event: NativeSyntheticEvent<NativeScrollEvent>) {
+    const nearBottom = event.nativeEvent.contentOffset.y < 120;
+    isNearBottomRef.current = nearBottom;
+    if (nearBottom) setShowScrollToBottom(false);
+  }
+
+  // Auto-scroll to the latest message when it's our own or we're already at the
+  // bottom (Messenger-style); otherwise surface a "scroll to latest" button instead
+  // of yanking the view out from under someone reading older messages.
+  useEffect(() => {
+    const last = messages[messages.length - 1];
+    if (!last || last.id === lastMessageIdRef.current) return;
+
+    const isFirstLoad = lastMessageIdRef.current === null;
+    lastMessageIdRef.current = last.id;
+
+    if (isFirstLoad) {
+      scrollToBottom(false);
+      return;
+    }
+
+    if (last.sender_id === currentUserId || isNearBottomRef.current) {
+      scrollToBottom(true);
+    } else {
+      setShowScrollToBottom(true);
+    }
+  }, [messages, currentUserId]);
 
   function notifyTyping() {
     sendTyping(conversation.id, "start");
@@ -112,6 +150,7 @@ export function ChatScreen({ route, navigation }: Props) {
     sendMessage(conversation.id, content);
     setDraft("");
     sendTyping(conversation.id, "stop");
+    scrollToBottom(true);
   }
 
   async function handlePickAttachment() {
@@ -172,28 +211,38 @@ export function ChatScreen({ route, navigation }: Props) {
     <SafeAreaView style={styles.screen} edges={["bottom"]}>
       <KeyboardAvoidingView
         style={styles.flex}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={Platform.OS === "ios" ? 88 : 0}
       >
-        <FlatList
-          data={[...messages].reverse()}
-          keyExtractor={(m) => String(m.id)}
-          renderItem={renderMessage}
-          inverted
-          contentContainerStyle={styles.listContent}
-          maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
-          onEndReachedThreshold={0.3}
-          onEndReached={() => {
-            if (hasMore && !loadingMore) loadMoreHistory(conversation.id);
-          }}
-          ListFooterComponent={
-            loadingMore ? (
-              <Text style={styles.paginationHint}>Loading earlier messages...</Text>
-            ) : !hasMore && messages.length > 0 ? (
-              <Text style={styles.paginationHint}>Beginning of conversation</Text>
-            ) : null
-          }
-        />
+        <View style={styles.flex}>
+          <FlatList
+            ref={listRef}
+            data={[...messages].reverse()}
+            keyExtractor={(m) => String(m.id)}
+            renderItem={renderMessage}
+            inverted
+            contentContainerStyle={styles.listContent}
+            onScroll={handleScroll}
+            scrollEventThrottle={16}
+            onEndReachedThreshold={0.3}
+            onEndReached={() => {
+              if (hasMore && !loadingMore) loadMoreHistory(conversation.id);
+            }}
+            ListFooterComponent={
+              loadingMore ? (
+                <Text style={styles.paginationHint}>Loading earlier messages...</Text>
+              ) : !hasMore && messages.length > 0 ? (
+                <Text style={styles.paginationHint}>Beginning of conversation</Text>
+              ) : null
+            }
+          />
+
+          {showScrollToBottom && (
+            <Pressable style={styles.scrollToBottomButton} onPress={() => scrollToBottom(true)}>
+              <Text style={styles.scrollToBottomText}>↓ New messages</Text>
+            </Pressable>
+          )}
+        </View>
 
         <View style={styles.statusBar}>
           <Text style={styles.statusText} numberOfLines={1}>
@@ -235,6 +284,23 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   listContent: { padding: 16 },
   paginationHint: { textAlign: "center", fontSize: 12, color: "#a3a3a3", paddingVertical: 8 },
+  scrollToBottomButton: {
+    position: "absolute",
+    bottom: 12,
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#171717",
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  scrollToBottomText: { color: "#fff", fontSize: 13, fontWeight: "600" },
   messageRow: { marginBottom: 8, flexDirection: "row" },
   messageRowMine: { justifyContent: "flex-end" },
   messageRowTheirs: { justifyContent: "flex-start" },

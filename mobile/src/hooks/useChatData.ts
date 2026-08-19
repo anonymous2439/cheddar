@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AppState, type AppStateStatus } from "react-native";
 import * as conversationsApi from "../api/conversations";
 import * as friendsApi from "../api/friends";
 import { useWebSocket } from "../context/WebSocketContext";
@@ -37,9 +38,14 @@ export function useChatData() {
     conversationsRef.current = conversations;
   }, [conversations]);
 
-  const activeConversationIdRef = useRef<number | null>(null);
-  const setActiveConversationId = useCallback((conversationId: number | null) => {
-    activeConversationIdRef.current = conversationId;
+  // Notifications should only fire while the app is backgrounded — if it's in the
+  // foreground the user can already see the in-app UI update, so a notification is redundant.
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      appStateRef.current = state;
+    });
+    return () => subscription.remove();
   }, []);
 
   useEffect(() => {
@@ -96,8 +102,8 @@ export function useChatData() {
 
         const currentUser = userRef.current;
         const isOwnMessage = currentUser && message.sender_id === currentUser.id;
-        const isOpenConversation = message.conversation_id === activeConversationIdRef.current;
-        if (!isOwnMessage && !isOpenConversation) {
+        const isBackgrounded = appStateRef.current !== "active";
+        if (!isOwnMessage && isBackgrounded) {
           const conversation = conversationsRef.current.find((c) => c.id === message.conversation_id);
           const sender = conversation?.participants.find((p) => p.id === message.sender_id);
           notifyNewMessage(sender?.display_name ?? "New message", message.content ?? "", message.conversation_id);
@@ -106,7 +112,9 @@ export function useChatData() {
         const request = event.data;
         setOutgoingRequests((prev) => prev.filter((r) => r.id !== request.id));
         setFriends((prev) => (prev.some((f) => f.id === request.user.id) ? prev : [...prev, request.user]));
-        notifyFriendRequestAccepted(request.user.display_name);
+        if (appStateRef.current !== "active") {
+          notifyFriendRequestAccepted(request.user.display_name);
+        }
       } else if (event.type === "typing") {
         const { conversation_id, user_id, state } = event.data;
         const key = `${conversation_id}:${user_id}`;
@@ -219,7 +227,6 @@ export function useChatData() {
     onlineUserIds,
     hasMoreByConversation,
     loadingMoreByConversation,
-    setActiveConversationId,
     refreshAll,
     loadHistory,
     loadMoreHistory,
