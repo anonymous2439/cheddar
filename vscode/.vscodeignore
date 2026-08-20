@@ -23,6 +23,7 @@ dist/test/**
 webpack.config.js
 esbuild.js
 deploy.sh
+vendor-games.sh
 .yarnrc
 .vsc-extension-quickstart.md
 

@@ -14,6 +14,7 @@ const lobbyStartBtn = document.getElementById('lobby-start');
 const lobbyLeaveBtn = document.getElementById('lobby-leave');
 const lobbyHintEl = document.getElementById('lobby-hint');
 const chatTitleEl = document.getElementById('chat-title');
+const gameStageEl = document.getElementById('game-stage');
 
 // Receive messages from extension
 window.addEventListener('message', event => {
@@ -34,7 +35,35 @@ window.addEventListener('message', event => {
         chatTitleEl.textContent = msg.text ?? '';
         chatTitleEl.title = msg.text ?? '';
     }
+    else if (msg.type === 'game.mount') {
+        mountGame(msg);
+    }
 });
+
+function mountGame(msg) {
+    const game = window.CheddarGames && window.CheddarGames[msg.gameKey];
+    if (!game) {
+        console.error(`no vendored module for game "${msg.gameKey}" — was vendor-games.sh run before packaging?`);
+        return;
+    }
+    gameStageEl.style.display = 'block';
+    gameStageEl.dataset.mountedKey = msg.gameKey;
+    game.mount(gameStageEl, {
+        gameKey: msg.gameKey,
+        gameName: msg.gameName,
+        lobbyId: msg.lobbyId,
+        selfId: msg.selfId,
+        participants: msg.participants ?? [],
+    });
+}
+
+function unmountGame() {
+    if (gameStageEl.style.display === 'none') return;
+    const key = gameStageEl.dataset.mountedKey;
+    const game = key && window.CheddarGames && window.CheddarGames[key];
+    if (game) game.unmount(gameStageEl);
+    gameStageEl.style.display = 'none';
+}
 
 function renderCatalog(games) {
     gameCatalogEl.innerHTML = '';
@@ -49,11 +78,15 @@ function renderLobby(lobby, selfId) {
     if (!lobby) {
         lobbyViewEl.style.display = 'none';
         gameHintEl.style.display = 'block';
+        unmountGame();
         return;
     }
 
     gameHintEl.style.display = 'none';
     lobbyViewEl.style.display = 'block';
+    if (lobby.status === 'waiting') {
+        unmountGame();
+    }
     lobbyTitleEl.textContent = `${lobby.game_name} — ${lobby.status}`;
 
     const me = lobby.participants.find(p => p.user.id === selfId);

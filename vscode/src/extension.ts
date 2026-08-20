@@ -903,6 +903,21 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         });
     }
 
+    // Hands a vendored game module (media/games/<key>/game.js, registered on
+    // window.CheddarGames) everything it needs to render without it ever
+    // touching the Cheddar API itself.
+    private mountGame(gameKey: string, gameName: string) {
+        if (!this.currentLobby) return;
+        this.webviewView?.webview.postMessage({
+            type: 'game.mount',
+            gameKey,
+            gameName,
+            lobbyId: this.currentLobby.id,
+            selfId: this.userId,
+            participants: this.currentLobby.participants.map((p) => p.user),
+        });
+    }
+
     // -----------------------------
     // 🔹 CHEDDAR CHAT SOCKET
     // -----------------------------
@@ -965,8 +980,15 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                     this.renderLobby();
                 }
             } else if (event.type === 'game.started') {
-                if (this.currentLobby?.id === event.data?.lobby_id) {
+                const lobby = this.currentLobby;
+                if (lobby && lobby.id === event.data?.lobby_id) {
+                    // start_lobby only broadcasts game.started/message.new, not
+                    // lobby.updated — reflect the status change locally so a
+                    // non-leader's Ready/Start buttons hide correctly too.
+                    this.currentLobby = { ...lobby, status: 'in_progress' };
                     this.log(`— ${event.data.game_name} has started! —`);
+                    this.renderLobby();
+                    this.mountGame(event.data.game_key, event.data.game_name);
                 }
             } else if (event.type === 'conversation.invited') {
                 const name = event.data?.name ?? `conversation #${event.data?.id}`;
@@ -1048,6 +1070,27 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         };
     }
 
+    // Vendored game modules (media/games/<key>/game.js) are dropped in by
+    // vendor-games.sh from each game's own independent build — this just
+    // discovers whatever landed there and gives each one a <script> tag so
+    // it can register itself on window.CheddarGames before chat.js needs it.
+    private getGameScriptTags(): string {
+        const gamesDir = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'games');
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(gamesDir.fsPath, { withFileTypes: true });
+        } catch {
+            return '';
+        }
+
+        return entries
+            .filter((e) => e.isDirectory())
+            .map((e) => vscode.Uri.joinPath(gamesDir, e.name, 'game.js'))
+            .filter((uri) => fs.existsSync(uri.fsPath))
+            .map((uri) => `<script src="${this.webviewView!.webview.asWebviewUri(uri).toString()}"></script>`)
+            .join('\n    ');
+    }
+
     private getHtml(): string {
         const html_path = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.html');
         const css_path = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.css');
@@ -1060,6 +1103,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
 
         return html
             .replace('{{styleUri}}', cssUri.toString())
+            .replace('{{gameScripts}}', this.getGameScriptTags())
             .replace('{{scriptUri}}', scriptUri.toString());
     }
 }

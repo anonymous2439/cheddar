@@ -7,6 +7,9 @@ BUILDS_DIR="/var/www/html/cheddar-builds"
 VERSION=$(node -p "require('./package.json').version")
 VSIX_NAME="cheddar-${VERSION}.vsix"
 
+echo "vendoring game modules..."
+./vendor-games.sh
+
 echo "building v${VERSION}..."
 rm -f "$VSIX_NAME"
 npm run vsix
