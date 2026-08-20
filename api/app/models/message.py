@@ -12,7 +12,7 @@ class Message(Base):
     id = Column(BIGINT(unsigned=True), primary_key=True, autoincrement=True)
     conversation_id = Column(BIGINT(unsigned=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
     sender_id = Column(BIGINT(unsigned=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    type = Column(Enum("text", "image", "file", "system"), nullable=False, default="text")
+    type = Column(Enum("text", "image", "file", "system", "lobby_invite"), nullable=False, default="text")
     content = Column(Text, nullable=True)
     metadata_ = Column("metadata", JSON, nullable=True)
     reply_to_id = Column(BIGINT(unsigned=True), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)

@@ -28,6 +28,7 @@ class LobbyOut(BaseModel):
     game_name: str
     status: str
     leader_id: int | None
+    invite_code: str | None = None
     participants: list[LobbyParticipantOut]
     created_at: datetime
     updated_at: datetime
@@ -40,6 +41,10 @@ class LobbyCreate(BaseModel):
 
 class LobbyInvite(BaseModel):
     user_id: int
+
+
+class LobbyJoinByCode(BaseModel):
+    invite_code: str
 
 
 class LobbyReadyUpdate(BaseModel):

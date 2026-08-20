@@ -21,11 +21,18 @@
                         <ul id="lobby-actions">
                             <li><button type="button" id="lobby-ready">Ready</button></li>
                             <li><button type="button" id="lobby-start" style="display:none">Start</button></li>
+                            <li><button type="button" id="lobby-invite-btn">Invite</button></li>
                             <li><button type="button" id="lobby-leave">Leave</button></li>
                         </ul>
+                        <div id="lobby-invite-row" style="display:none">
+                            <input type="text" id="lobby-invite-input" placeholder="username" autocomplete="off" spellcheck="false" />
+                            <button type="button" id="lobby-invite-send">Send</button>
+                        </div>
                         <p id="lobby-hint"></p>
                     </div>
+                    <button type="button" id="lobby-rejoin" style="display:none">Rejoin Game in Progress</button>
                     <div id="game-stage" style="display:none"></div>
+                    <button type="button" id="lobby-restart" style="display:none">Back to Lobby</button>
                 </div>
             </div>
             <div id="msg-users">

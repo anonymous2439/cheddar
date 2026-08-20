@@ -1,3 +1,5 @@
+import secrets
+import string
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -18,6 +20,7 @@ from app.schemas.game import (
     GameCatalogEntry,
     LobbyCreate,
     LobbyInvite,
+    LobbyJoinByCode,
     LobbyKick,
     LobbyLeaderTransfer,
     LobbyOut,
@@ -28,6 +31,9 @@ from app.websocket.handlers import _serialize_message
 from app.websocket.manager import manager
 
 router = APIRouter()
+
+_CODE_ALPHABET = string.ascii_uppercase + string.digits
+_CODE_LENGTH = 6
 
 
 def _now() -> datetime:
@@ -91,6 +97,7 @@ def _serialize_lobby(db: Session, lobby: GameLobby) -> LobbyOut:
         game_name=game["name"],
         status=lobby.status,
         leader_id=lobby.leader_id,
+        invite_code=lobby.invite_code,
         participants=[
             {
                 "user": UserOut.model_validate(users_by_id[p.user_id]),
@@ -110,6 +117,43 @@ def _serialize_lobby(db: Session, lobby: GameLobby) -> LobbyOut:
 async def _broadcast_lobby(db: Session, lobby: GameLobby) -> None:
     payload = {"type": "lobby.updated", "data": _serialize_lobby(db, lobby).model_dump(mode="json")}
     await manager.broadcast(_active_participant_ids(db, lobby.id), payload)
+
+
+def _find_or_create_direct_conversation(db: Session, user_a_id: int, user_b_id: int) -> Conversation:
+    """A command-based /invite is delivered as a real message in the
+    inviter/invitee's own DM — same conversation /add + messaging already
+    use, found the same way conversations.py's own create_conversation does."""
+    user_conversation_ids = db.query(ConversationParticipant.conversation_id).filter(
+        ConversationParticipant.user_id == user_a_id
+    )
+    existing = (
+        db.query(Conversation)
+        .join(ConversationParticipant)
+        .filter(
+            Conversation.type == "direct",
+            Conversation.id.in_(user_conversation_ids),
+            ConversationParticipant.user_id == user_b_id,
+        )
+        .first()
+    )
+    if existing is not None:
+        return existing
+
+    conversation = Conversation(type="direct", created_by=user_a_id)
+    db.add(conversation)
+    db.flush()
+    db.add(ConversationParticipant(conversation_id=conversation.id, user_id=user_a_id))
+    db.add(ConversationParticipant(conversation_id=conversation.id, user_id=user_b_id))
+    db.flush()
+    return conversation
+
+
+def _generate_invite_code(db: Session) -> str:
+    for _ in range(10):
+        code = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LENGTH))
+        if db.query(GameLobby).filter(GameLobby.invite_code == code).first() is None:
+            return code
+    raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Could not generate a unique invite code, try again")
 
 
 @router.get("/catalog", response_model=list[GameCatalogEntry])
@@ -230,13 +274,95 @@ async def invite_to_lobby(
     else:
         db.add(GameLobbyParticipant(lobby_id=lobby.id, user_id=target.id, is_ready=False))
 
+    # Delivered as a real message in the inviter/invitee's own DM, not just a
+    # silent add + a log line — the invitee can click straight into the
+    # lobby from their chat history, same as any other message.
+    direct_conversation = _find_or_create_direct_conversation(db, user.id, target.id)
+    invite_message = Message(
+        conversation_id=direct_conversation.id,
+        sender_id=user.id,
+        type="lobby_invite",
+        content=f"🎮 invited you to play {game.get('name', lobby.game_key)}",
+        metadata_={"lobby_id": lobby.id, "game_key": lobby.game_key, "game_name": game.get("name", lobby.game_key)},
+    )
+    db.add(invite_message)
+
     db.commit()
     db.refresh(lobby)
+    db.refresh(invite_message)
 
     out = _serialize_lobby(db, lobby)
+    invite_message_out = _serialize_message(invite_message)
+    await manager.broadcast([user.id, target.id], {"type": "message.new", "data": invite_message_out})
     await manager.send_to_user(target.id, {"type": "lobby.invited", "data": out.model_dump(mode="json")})
     await _broadcast_lobby(db, lobby)
     return out
+
+
+@router.post("/lobbies/{lobby_id}/invite-code", response_model=LobbyOut)
+def get_invite_code(lobby_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Anyone already in the lobby can pull its code to paste into any chat —
+    unlike /invite, joining with it doesn't require being friends with
+    anyone there first. Generated once and reused after that."""
+    lobby = _get_lobby_or_404(db, lobby_id)
+    _require_participant(db, lobby, user)
+
+    if lobby.invite_code is None:
+        lobby.invite_code = _generate_invite_code(db)
+        db.commit()
+        db.refresh(lobby)
+
+    return _serialize_lobby(db, lobby)
+
+
+@router.post("/lobbies/join", response_model=LobbyOut)
+async def join_lobby_by_code(
+    payload: LobbyJoinByCode,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    lobby = db.query(GameLobby).filter(GameLobby.invite_code == payload.invite_code.strip().upper()).first()
+    if lobby is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invalid invite code")
+    if lobby.status != "waiting":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Lobby is no longer accepting players")
+
+    if _get_active_participant(db, lobby.id, user.id) is not None:
+        return _serialize_lobby(db, lobby)
+
+    game = GAMES_BY_KEY.get(lobby.game_key, {"max_players": 99})
+    if len(_active_participants(db, lobby.id)) >= game.get("max_players", 99):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Lobby is full")
+
+    conv_participant = (
+        db.query(ConversationParticipant)
+        .filter(
+            ConversationParticipant.conversation_id == lobby.conversation_id,
+            ConversationParticipant.user_id == user.id,
+        )
+        .first()
+    )
+    if conv_participant is not None:
+        conv_participant.left_at = None
+    else:
+        db.add(ConversationParticipant(conversation_id=lobby.conversation_id, user_id=user.id))
+
+    lobby_participant = (
+        db.query(GameLobbyParticipant)
+        .filter(GameLobbyParticipant.lobby_id == lobby.id, GameLobbyParticipant.user_id == user.id)
+        .first()
+    )
+    if lobby_participant is not None:
+        lobby_participant.left_at = None
+        lobby_participant.is_ready = False
+    else:
+        db.add(GameLobbyParticipant(lobby_id=lobby.id, user_id=user.id, is_ready=False))
+
+    db.commit()
+    db.refresh(lobby)
+
+    await _broadcast_lobby(db, lobby)
+    return _serialize_lobby(db, lobby)
 
 
 @router.post("/lobbies/{lobby_id}/ready", response_model=LobbyOut)
@@ -387,5 +513,39 @@ async def start_lobby(lobby_id: int, db: Session = Depends(get_db), user: User =
             "data": {"lobby_id": lobby.id, "game_key": lobby.game_key, "game_name": game.get("name", lobby.game_key)},
         },
     )
+    return _serialize_lobby(db, lobby)
 
+
+@router.post("/lobbies/{lobby_id}/restart", response_model=LobbyOut)
+async def restart_lobby(lobby_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Leader-only: takes a lobby back to "waiting" after a game session so
+    everyone can ready up and play again, without having to leave and
+    re-invite everyone into a brand new lobby."""
+    lobby = _get_lobby_or_404(db, lobby_id)
+    _require_participant(db, lobby, user)
+    _require_leader(lobby, user)
+
+    if lobby.status != "in_progress":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Lobby isn't in a game right now")
+
+    lobby.status = "waiting"
+    lobby.started_at = None
+    for participant in _active_participants(db, lobby.id):
+        participant.is_ready = False
+
+    game = GAMES_BY_KEY.get(lobby.game_key, {"name": lobby.game_key})
+    message = Message(
+        conversation_id=lobby.conversation_id,
+        sender_id=user.id,
+        type="system",
+        content=f"\U0001f501 Back to the lobby — ready up to play {game.get('name', lobby.game_key)} again!",
+    )
+    db.add(message)
+    db.commit()
+    db.refresh(lobby)
+    db.refresh(message)
+
+    participant_ids = _active_participant_ids(db, lobby.id)
+    await manager.broadcast(participant_ids, {"type": "message.new", "data": _serialize_message(message)})
+    await _broadcast_lobby(db, lobby)
     return _serialize_lobby(db, lobby)

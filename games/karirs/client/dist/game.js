@@ -1,8 +1,9 @@
 // Karirs — a Philippine "karera" (video horse-racing betting) style game.
 // Racers are a fixed roster the Karirs API deals out itself (not the lobby's
 // players), betting is anonymous (only aggregate pool totals are visible),
-// and the race resolves on its own 30s after it's created — there's no
-// "start"/"resolve" action here at all, just polling for state to change.
+// and once the 30s betting window closes the race runs and animates live
+// over its own websocket (see extension.ts's ensureKarirsRaceSocket) — no
+// "start"/"resolve" action here at all.
 (function () {
     let ctx = null;
     let container = null;
@@ -15,6 +16,24 @@
     let pollTimer = null;
     let tickTimer = null;
 
+    // Live animation state, driven entirely by 'race_step' events over the
+    // race socket — independent of the REST-polled `race` above, which can
+    // lag a couple of seconds behind. Receiving a single step is treated as
+    // "racing has started" regardless of what the last poll said.
+    let stepPositions = null;
+    let currentStep = 0;
+    let totalSteps = 100;
+
+    // The track's own DOM persists across step updates (see ensureTrackDom/
+    // updateTrackDots below) — a CSS transition only animates a property
+    // change on an element that already existed with the old value; tearing
+    // the dots down and recreating them every 0.3s (which a full innerHTML
+    // rebuild would do) means each one just appears at its new spot with no
+    // interpolation, however long a `transition` is declared for.
+    let trackWrapperEl = null;
+    let trackDots = {};
+    let trackRaceId = null;
+
     function mount(el, mountCtx) {
         container = el;
         ctx = mountCtx;
@@ -24,6 +43,11 @@
         myBet = null;
         selectedRacer = null;
         errorText = '';
+        stepPositions = null;
+        currentStep = 0;
+        trackWrapperEl = null;
+        trackDots = {};
+        trackRaceId = null;
         render();
 
         window.CheddarHost.send('sync_race', { lobbyId: ctx.lobbyId });
@@ -38,13 +62,16 @@
         if (tickTimer) clearInterval(tickTimer);
         pollTimer = null;
         tickTimer = null;
+        trackWrapperEl = null;
+        trackDots = {};
+        trackRaceId = null;
         if (container) container.innerHTML = '';
         container = null;
         ctx = null;
     }
 
     function poll() {
-        if (!race || race.status !== 'betting_open') return;
+        if (stepPositions || !race || race.status !== 'betting_open') return;
         window.CheddarHost.send('sync_race', { lobbyId: ctx.lobbyId });
         window.CheddarHost.send('pool', { raceId: race.id });
     }
@@ -67,10 +94,6 @@
                 window.CheddarHost.send('pool', { raceId: race.id });
                 window.CheddarHost.send('my_bet', { raceId: race.id });
             }
-            if (justResolved && pollTimer) {
-                clearInterval(pollTimer);
-                pollTimer = null;
-            }
         } else if (event === 'wallet') {
             wallet = data;
         } else if (event === 'pool') {
@@ -85,6 +108,18 @@
             myBet = data;
             window.CheddarHost.send('wallet', {});
             window.CheddarHost.send('pool', { raceId: race.id });
+        } else if (event === 'race_step') {
+            if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }
+            stepPositions = data.positions;
+            currentStep = data.step;
+            totalSteps = data.total_steps;
+        } else if (event === 'race_finished') {
+            race = data.race;
+            pool = data.pool;
+            window.CheddarHost.send('my_bet', { raceId: race.id });
         } else if (event === 'error') {
             errorText = data.message;
         }
@@ -98,39 +133,168 @@
         return Math.max(0, Math.round((closesAt - Date.now()) / 1000));
     }
 
+    // Everything except the track is cheap to fully rebuild every render and
+    // never needs to animate, so it lives in its own wrapper that gets wiped
+    // each time. trackWrapperEl is different: it's created once and never
+    // wiped while a race's dots are live — see ensureTrackDom/updateTrackDots.
+    let chromeTopEl = null;
+    let chromeBottomEl = null;
+
+    function ensureLayout() {
+        if (trackWrapperEl && trackWrapperEl.parentNode === container) return;
+        container.innerHTML = '';
+        chromeTopEl = document.createElement('div');
+        trackWrapperEl = document.createElement('div');
+        chromeBottomEl = document.createElement('div');
+        container.appendChild(chromeTopEl);
+        container.appendChild(trackWrapperEl);
+        container.appendChild(chromeBottomEl);
+        trackDots = {};
+        trackRaceId = null;
+    }
+
+    function clearTrack() {
+        if (trackWrapperEl) trackWrapperEl.innerHTML = '';
+        trackDots = {};
+        trackRaceId = null;
+    }
+
     function render() {
         if (!container) return;
-        container.innerHTML = '';
+        ensureLayout();
+        chromeTopEl.innerHTML = '';
+        chromeBottomEl.innerHTML = '';
 
         const walletLine = document.createElement('p');
         walletLine.textContent = wallet ? `💰 ${wallet.coins} coins` : '💰 …';
-        container.appendChild(walletLine);
+        chromeTopEl.appendChild(walletLine);
 
         if (!race) {
             const p = document.createElement('p');
             p.textContent = 'loading race…';
-            container.appendChild(p);
+            chromeTopEl.appendChild(p);
+            clearTrack();
             return;
         }
 
-        if (race.status === 'betting_open') {
+        const isRacing = !!stepPositions && race.status !== 'resolved';
+        const isResolved = race.status === 'resolved';
+
+        if (!isRacing && !isResolved) {
             const title = document.createElement('p');
             title.textContent = `🏇 betting closes in ${secondsLeft()}s`;
-            container.appendChild(title);
+            chromeTopEl.appendChild(title);
+            clearTrack();
             renderBetting();
         } else {
             const title = document.createElement('p');
-            title.textContent = `🏁 ${race.winning_name} wins!`;
-            container.appendChild(title);
-            renderResolved();
+            title.textContent = isResolved
+                ? `🏁 ${race.winning_name} wins!`
+                : `🏇 racing… (${currentStep}/${totalSteps})`;
+            chromeTopEl.appendChild(title);
+            if (stepPositions) {
+                ensureTrackDom();
+                updateTrackDots();
+            }
+            if (isResolved) renderResult();
         }
 
         if (errorText) {
             const e = document.createElement('p');
             e.textContent = `⚠ ${errorText}`;
             e.style.color = '#ff8080';
-            container.appendChild(e);
+            chromeBottomEl.appendChild(e);
         }
+    }
+
+    // Builds each racer's row/lane/dot exactly once per race — never torn
+    // down and rebuilt on every step, since that's what was silently
+    // defeating the dot's CSS transition (a transition only animates a style
+    // change on an element that already existed with the old value; a
+    // freshly-created element just appears at its target position with no
+    // interpolation, no matter how the transition is declared).
+    function ensureTrackDom() {
+        if (trackRaceId === race.id && trackWrapperEl.childElementCount === race.racer_names.length) return;
+        trackWrapperEl.innerHTML = '';
+        trackDots = {};
+        trackRaceId = race.id;
+
+        race.racer_names.forEach((name) => {
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.gap = '6px';
+            row.style.margin = '3px 0';
+
+            // Fixed-width label, ellipsized — a longer name must never affect
+            // how far along its racer looks. The dot is what actually moves,
+            // always the same size regardless of the name next to it.
+            const label = document.createElement('span');
+            label.style.width = '90px';
+            label.style.flex = 'none';
+            label.style.overflow = 'hidden';
+            label.style.textOverflow = 'ellipsis';
+            label.style.whiteSpace = 'nowrap';
+            label.style.fontSize = '9px';
+            row.appendChild(label);
+
+            const lane = document.createElement('div');
+            lane.style.position = 'relative';
+            lane.style.flex = '1';
+            lane.style.height = '14px';
+            lane.style.background = '#ffffff14';
+            lane.style.borderRadius = '3px';
+
+            const dot = document.createElement('span');
+            dot.style.position = 'absolute';
+            dot.style.top = '50%';
+            dot.style.left = '0%';
+            dot.style.width = '8px';
+            dot.style.height = '8px';
+            dot.style.borderRadius = '50%';
+            dot.style.transform = 'translate(-50%, -50%)';
+            dot.style.transition = 'left 0.3s linear';
+            lane.appendChild(dot);
+            row.appendChild(lane);
+
+            trackWrapperEl.appendChild(row);
+            trackDots[name] = { label, dot };
+        });
+    }
+
+    // Only mutates the existing dots/labels built above — this is what
+    // actually lets the CSS transition on `left` animate smoothly.
+    function updateTrackDots() {
+        race.racer_names.forEach((name) => {
+            const els = trackDots[name];
+            if (!els) return;
+            const isMine = myBet && myBet.racer_name === name;
+            const isWinner = race.status === 'resolved' && name === race.winning_name;
+            const pct = Math.max(0, Math.min(100, stepPositions[name] ?? 0));
+
+            els.label.textContent = `${isMine ? '★ ' : ''}${name}${isWinner ? ' 🏆' : ''}`;
+            els.label.style.color = isWinner ? '#ffd76a' : '#ffffffcc';
+            els.dot.style.left = `${pct}%`;
+            els.dot.style.background = isWinner ? '#ffd76a' : '#0080BAc4';
+        });
+    }
+
+    // Plain unstyled <button>/<input> render with the browser's own default
+    // control chrome, which stands out badly against the app's dark theme.
+    // Same muted, semi-transparent gray already used for every other button
+    // in the lobby chrome (lobby-ready/start/leave/restart/rejoin).
+    function styleButton(el) {
+        el.style.background = '#c4c4c454';
+        el.style.color = '#ffffffaa';
+        el.style.border = 'unset';
+        el.style.padding = '2px 12px';
+    }
+
+    function styleInput(el) {
+        el.style.background = '#c4c4c454';
+        el.style.color = '#ffffffcc';
+        el.style.border = 'unset';
+        el.style.padding = '2px 6px';
     }
 
     function renderBetting() {
@@ -148,6 +312,7 @@
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.textContent = `${marker}${name} — pool: ${total}`;
+                styleButton(btn);
                 btn.addEventListener('click', () => {
                     selectedRacer = name;
                     render();
@@ -156,12 +321,12 @@
             }
             list.appendChild(row);
         });
-        container.appendChild(list);
+        chromeTopEl.appendChild(list);
 
         if (myBet) {
             const p = document.createElement('p');
             p.textContent = `you bet ${myBet.wager} coins on ${myBet.racer_name} — nobody else can see that`;
-            container.appendChild(p);
+            chromeTopEl.appendChild(p);
             return;
         }
 
@@ -170,11 +335,13 @@
         wagerInput.min = '1';
         wagerInput.value = '50';
         wagerInput.style.width = '70px';
-        container.appendChild(wagerInput);
+        styleInput(wagerInput);
+        chromeTopEl.appendChild(wagerInput);
 
         const betBtn = document.createElement('button');
         betBtn.type = 'button';
         betBtn.textContent = 'Place Bet';
+        styleButton(betBtn);
         betBtn.addEventListener('click', () => {
             const wager = parseInt(wagerInput.value, 10);
             if (!selectedRacer) {
@@ -189,28 +356,17 @@
             }
             window.CheddarHost.send('place_bet', { raceId: race.id, racerName: selectedRacer, wager });
         });
-        container.appendChild(betBtn);
+        chromeTopEl.appendChild(betBtn);
     }
 
-    function renderResolved() {
-        const list = document.createElement('div');
-        race.racer_names.forEach((name) => {
-            const total = pool ? (pool[name] ?? 0) : 0;
-            const p = document.createElement('p');
-            const won = name === race.winning_name;
-            p.textContent = `${won ? '🏆 ' : ''}${name} — pool: ${total}`;
-            list.appendChild(p);
-        });
-        container.appendChild(list);
-
-        if (myBet) {
-            const p = document.createElement('p');
-            p.textContent =
-                myBet.payout > 0
-                    ? `you bet on ${myBet.racer_name} and won ${myBet.payout} coins!`
-                    : `you bet ${myBet.wager} on ${myBet.racer_name} — no payout this time.`;
-            container.appendChild(p);
-        }
+    function renderResult() {
+        if (!myBet) return;
+        const p = document.createElement('p');
+        p.textContent =
+            myBet.payout > 0
+                ? `you bet on ${myBet.racer_name} and won ${myBet.payout} coins!`
+                : `you bet ${myBet.wager} on ${myBet.racer_name} — no payout this time.`;
+        chromeBottomEl.appendChild(p);
     }
 
     window.CheddarGames = window.CheddarGames || {};

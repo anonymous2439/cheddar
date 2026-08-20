@@ -37,7 +37,7 @@ class Race(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     lobby_id = Column(BigInteger, nullable=False)
     racer_names = Column(JSON, nullable=False)
-    status = Column(Enum("betting_open", "resolved"), nullable=False, default="betting_open")
+    status = Column(Enum("betting_open", "racing", "resolved"), nullable=False, default="betting_open")
     winning_name = Column(String(64), nullable=True)
     created_by = Column(BigInteger, nullable=False)
     created_at = Column(DateTime, nullable=False, server_default=func.now())

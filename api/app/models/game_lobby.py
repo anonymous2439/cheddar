@@ -13,6 +13,12 @@ class GameLobby(Base):
         BIGINT(unsigned=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, unique=True
     )
     game_key = Column(String(50), nullable=False)
+    # Generated lazily on first request (see games.py get_invite_code), not at
+    # creation — most lobbies are invited into directly by username and never
+    # need one. Anyone holding the code can join without being friends with
+    # anyone already there; that's the point of a shareable code as opposed
+    # to the friend-gated /invite.
+    invite_code = Column(String(12), nullable=True, unique=True)
     status = Column(Enum("waiting", "in_progress", "finished"), nullable=False, default="waiting")
     leader_id = Column(BIGINT(unsigned=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_by = Column(BIGINT(unsigned=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
