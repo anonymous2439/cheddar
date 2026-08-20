@@ -77,10 +77,26 @@ html, body {
     box-shadow: 2px 2px 8px 1px #ffffff6a;
 }
 
-#karir-options {
+#game-lobby {
+    min-width: 500px;
+    padding: 6px;
+}
+
+#game-hint,
+#lobby-hint {
+    color: #c4c4c47a;
+    margin: 4px 0;
+}
+
+#lobby-title {
+    color: #ffffffcc;
+    font-weight: 500;
+    margin: 4px 0;
+}
+
+#lobby-actions {
     display: flex;
     gap: 6px;
-    min-width: 500px;
 }
 
 #msg-users {
@@ -121,18 +137,25 @@ html, body {
     outline: unset !important;
 }
 
-#game-con {
-    min-width: 500px;
+#chat-title {
+    flex: none;
+    max-width: 120px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: #c4c4c47a;
+    display: flex;
+    align-items: center;
 }
 
-#game-con li {
+#game-catalog li,
+#lobby-players li {
     position: relative;
     background: #c4c4c41a;
     display: block;
-    padding: 4px;
-    width: 40px;
+    padding: 4px 8px;
     border-radius: 0 8px 8px 0;
-    text-align: center;
+    text-align: left;
     margin: 2px 0;
 }
 

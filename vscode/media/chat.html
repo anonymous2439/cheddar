@@ -12,13 +12,20 @@
     <div class="container">
         <div id="msg">
             <div class="msg-options">
-                <ul id="karir-options">
-                    <li><button type="button" id="karirs-start">Start</button></li>
-                    <!-- <li><button type="button" id="karirs-stop">Stop</button></li> -->
-                    <li><button type="button" id="karirs-change">Change lineup</button></li>
-                </ul>
-                <p id="countdown"></p>
-                <ul id="game-con"></ul>
+                <div id="game-lobby">
+                    <p id="game-hint">/games to browse, /lobby create &lt;n&gt; to host</p>
+                    <ul id="game-catalog"></ul>
+                    <div id="lobby-view" style="display:none">
+                        <p id="lobby-title"></p>
+                        <ul id="lobby-players"></ul>
+                        <ul id="lobby-actions">
+                            <li><button type="button" id="lobby-ready">Ready</button></li>
+                            <li><button type="button" id="lobby-start" style="display:none">Start</button></li>
+                            <li><button type="button" id="lobby-leave">Leave</button></li>
+                        </ul>
+                        <p id="lobby-hint"></p>
+                    </div>
+                </div>
             </div>
             <div id="msg-users">
                 <div id="game-drawer-lock"></div>
@@ -28,6 +35,7 @@
         <div id="user-actions">
             <span id="user-action-label">$</span>
             <input id="textbox" autocomplete="off" spellcheck="false" />
+            <span id="chat-title"></span>
         </div>
     </div>
 

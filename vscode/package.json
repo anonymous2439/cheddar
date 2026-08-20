@@ -2,7 +2,7 @@
   "name": "cheddar",
   "displayName": "Cheddar",
   "description": "VS Code extension with a custom bottom panel tab",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "engines": {
     "vscode": "^1.108.1"
   },
@@ -49,6 +49,11 @@
           "type": "string",
           "default": "ched_XZivKSUSfElK5BPK0DZO_oX3ZWBnBpEfqp8B5Dg60ug",
           "description": "Application API key identifying this extension to the Cheddar API."
+        },
+        "cheddar.updateBaseUrl": {
+          "type": "string",
+          "default": "http://109.123.234.69/cheddar-builds",
+          "description": "Base URL hosting latest.json and .vsix builds for self-update checks."
         }
       }
     }
@@ -58,7 +63,8 @@
     "watch": "node esbuild.js --watch",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
-    "package": "npm run check-types && npm run lint && node esbuild.js --production"
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "vsix": "npm run check-types && node esbuild.js --production && vsce package --no-dependencies --allow-missing-repository"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

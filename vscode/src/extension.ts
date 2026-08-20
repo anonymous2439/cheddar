@@ -2,6 +2,18 @@ import * as vscode from 'vscode';
 import WebSocket from 'ws';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as path from 'path';
+
+function isNewerVersion(remote: string, current: string): boolean {
+    const r = remote.split('.').map(Number);
+    const c = current.split('.').map(Number);
+    for (let i = 0; i < Math.max(r.length, c.length); i++) {
+        const rv = r[i] ?? 0;
+        const cv = c[i] ?? 0;
+        if (rv !== cv) return rv > cv;
+    }
+    return false;
+}
 
 function getMacAddress(): string | null {
     const interfaces = os.networkInterfaces();
@@ -35,6 +47,35 @@ interface RequestSummary {
     label: string;
 }
 
+interface GameCatalogEntry {
+    key: string;
+    name: string;
+    min_players: number;
+    max_players: number;
+}
+
+interface LobbyParticipant {
+    user: { id: number; username: string; display_name: string };
+    is_ready: boolean;
+    is_leader: boolean;
+}
+
+interface LobbyState {
+    id: number;
+    conversation_id: number;
+    game_key: string;
+    game_name: string;
+    status: string;
+    leader_id: number | null;
+    participants: LobbyParticipant[];
+}
+
+interface UpdateManifest {
+    version: string;
+    file: string;
+    notes?: string;
+}
+
 const SESSION_SECRET_KEY = 'cheddar.session';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -65,13 +106,15 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
     private displayName?: string;
     private userId?: number;
     private activeConversationId?: number;
+    private activeConversationTitle?: string;
     private conversationCache: ConversationSummary[] = [];
     private requestCache: RequestSummary[] = [];
     private participantNames = new Map<number, string>();
 
-    // Game socket — separate feature, untouched by the Cheddar integration.
-    private gameSocket?: WebSocket;
-    private default_game_ws_url = 'ws://109.123.234.69/karirs/';
+    // Game lobby state — realtime updates arrive over the same cheddarSocket
+    // as chat (lobby.updated / lobby.invited / lobby.kicked / game.started).
+    private gameCatalogCache: GameCatalogEntry[] = [];
+    private currentLobby?: LobbyState;
 
     private unread_count = 0;
 
@@ -91,12 +134,16 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         return this.apiBaseUrl.replace(/^http/, 'ws');
     }
 
+    private get updateBaseUrl(): string {
+        return vscode.workspace
+            .getConfiguration('cheddar')
+            .get<string>('updateBaseUrl', 'http://109.123.234.69/cheddar-builds');
+    }
+
     resolveWebviewView(webviewView: vscode.WebviewView) {
         this.webviewView = webviewView;
         webviewView.webview.options = { enableScripts: true };
         webviewView.webview.html = this.getHtml();
-
-        this.connectGameSocket(this.default_game_ws_url);
 
         const mac = getMacAddress();
         console.log('MAC Address:', mac);
@@ -114,12 +161,13 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                 void this.handleInput(msg.text);
             }
 
-            if (msg.type === 'karirs') {
-                this.gameSocket?.send(JSON.stringify(msg.data));
+            if (msg.type === 'game') {
+                void this.handleGameAction(msg.action);
             }
         });
 
         void this.restoreSession();
+        void this.checkForUpdates(false);
     }
 
     // -----------------------------
@@ -181,9 +229,12 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         this.username = undefined;
         this.displayName = undefined;
         this.userId = undefined;
-        this.activeConversationId = undefined;
+        this.setActiveConversation(undefined, undefined);
         this.conversationCache = [];
         this.requestCache = [];
+        this.gameCatalogCache = [];
+        this.currentLobby = undefined;
+        this.renderLobby();
         await this.context.secrets.delete(SESSION_SECRET_KEY);
         this.cheddarSocket?.removeAllListeners();
         this.cheddarSocket?.close();
@@ -305,11 +356,61 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             case 'open':
                 await this.doOpenChat(rest[0]);
                 return;
+            case 'who':
+                await this.doListMembers();
+                return;
+            case 'games':
+                await this.doListGames();
+                return;
+            case 'lobby':
+                await this.handleLobbyCommand(rest);
+                return;
+            case 'update':
+                await this.checkForUpdates(true);
+                return;
             case 'help':
-                this.log('commands: /login /logout /whoami /friends /requests /add /accept /decline /chats /open');
+                this.log(
+                    'commands: /login /logout /whoami /friends /requests /add /accept /decline /chats /open /who /games /lobby /update'
+                );
                 return;
             default:
                 this.log(`unknown command: /${name}`);
+        }
+    }
+
+    private async handleLobbyCommand(rest: string[]) {
+        const [sub, ...subArgs] = rest;
+        switch ((sub || '').toLowerCase()) {
+            case undefined:
+            case '':
+                this.logLobbyStatus();
+                return;
+            case 'create':
+                await this.doCreateLobby(subArgs[0]);
+                return;
+            case 'invite':
+                if (!subArgs[0]) {
+                    this.log('usage: /lobby invite <username>');
+                    return;
+                }
+                await this.doInviteToLobby(subArgs[0]);
+                return;
+            case 'kick':
+                if (!subArgs[0]) {
+                    this.log('usage: /lobby kick <username>');
+                    return;
+                }
+                await this.doKickFromLobby(subArgs[0]);
+                return;
+            case 'leader':
+                if (!subArgs[0]) {
+                    this.log('usage: /lobby leader <username>');
+                    return;
+                }
+                await this.doTransferLeader(subArgs[0]);
+                return;
+            default:
+                this.log('usage: /lobby [create <n>|invite <user>|kick <user>|leader <user>]');
         }
     }
 
@@ -461,7 +562,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             return;
         }
 
-        this.activeConversationId = convo.id;
+        this.setActiveConversation(convo.id, convo.label);
         this.log(`— opened ${convo.label} —`);
 
         const res = await this.authorizedFetch(`/api/v1/conversations/${convo.id}/messages`);
@@ -491,6 +592,251 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         this.cheddarSocket?.send(
             JSON.stringify({ type: 'message.read', data: { conversation_id: conversationId, message_id: messageId } })
         );
+    }
+
+    private setActiveConversation(id: number | undefined, title: string | undefined) {
+        this.activeConversationId = id;
+        this.activeConversationTitle = title;
+        this.webviewView?.webview.postMessage({ type: 'chat.title', text: title ?? '' });
+    }
+
+    private async doListMembers() {
+        if (this.activeConversationId == null) {
+            this.log('no chat open — /chats then /open <n>, or /lobby create <n>');
+            return;
+        }
+        const res = await this.authorizedFetch('/api/v1/conversations');
+        if (!res.ok) {
+            this.log('not logged in');
+            return;
+        }
+        const conversations = (await res.json()) as Array<{
+            id: number;
+            participants: Array<{ id: number; username: string; display_name: string; status: string }>;
+        }>;
+        const convo = conversations.find((c) => c.id === this.activeConversationId);
+        if (!convo) {
+            this.log('could not find this conversation');
+            return;
+        }
+        this.log(`— members of ${this.activeConversationTitle ?? `conversation #${convo.id}`} —`);
+        convo.participants.forEach((p) => this.log(`  @${p.username} (${p.display_name}) [${p.status}]`));
+    }
+
+    // -----------------------------
+    // 🔹 GAME LOBBY — hidden drawer feature. Lobby mutations go over plain
+    // REST; realtime fan-out (ready/kick/leader/start) arrives back over the
+    // same cheddarSocket used for chat, so there's no second connection.
+    // -----------------------------
+    private async doListGames() {
+        const res = await this.authorizedFetch('/api/v1/games/catalog');
+        if (!res.ok) {
+            this.log('not logged in');
+            return;
+        }
+        this.gameCatalogCache = (await res.json()) as GameCatalogEntry[];
+        if (!this.gameCatalogCache.length) {
+            this.log('no games available yet');
+            return;
+        }
+        this.gameCatalogCache.forEach((g, i) =>
+            this.log(`${i + 1}) ${g.name}  (${g.min_players}-${g.max_players} players)`)
+        );
+        this.log('— /lobby create <n> to open a lobby —');
+        this.renderCatalog();
+    }
+
+    private async doCreateLobby(indexArg: string) {
+        const idx = Number(indexArg) - 1;
+        const game = this.gameCatalogCache[idx];
+        if (!game) {
+            this.log('run /games first, then /lobby create <n>');
+            return;
+        }
+
+        const res = await this.authorizedFetch('/api/v1/games/lobbies', {
+            method: 'POST',
+            body: JSON.stringify({ game_key: game.key }),
+        });
+        if (!res.ok) {
+            this.log('could not create lobby');
+            return;
+        }
+        this.currentLobby = (await res.json()) as LobbyState;
+        this.setActiveConversation(this.currentLobby.conversation_id, this.lobbyChatTitle(this.currentLobby));
+        this.log(`— lobby created for ${game.name} — now chatting here —`);
+        this.logLobbyStatus();
+        this.renderLobby();
+    }
+
+    private async doInviteToLobby(username: string) {
+        if (!this.currentLobby) {
+            this.log('no active lobby — /lobby create <n> first');
+            return;
+        }
+        const searchRes = await this.authorizedFetch(`/api/v1/users/search?q=${encodeURIComponent(username)}`);
+        if (!searchRes.ok) {
+            this.log('not logged in');
+            return;
+        }
+        const users = (await searchRes.json()) as Array<{ id: number; username: string }>;
+        const match = users.find((u) => u.username.toLowerCase() === username.toLowerCase()) ?? users[0];
+        if (!match) {
+            this.log(`no user found matching "${username}"`);
+            return;
+        }
+
+        const res = await this.authorizedFetch(`/api/v1/games/lobbies/${this.currentLobby.id}/invite`, {
+            method: 'POST',
+            body: JSON.stringify({ user_id: match.id }),
+        });
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}) as { detail?: string });
+            this.log(`could not invite @${match.username}: ${body.detail ?? res.status}`);
+            return;
+        }
+        this.currentLobby = (await res.json()) as LobbyState;
+        this.log(`invited @${match.username} to the lobby`);
+        this.renderLobby();
+    }
+
+    private async doKickFromLobby(username: string) {
+        if (!this.currentLobby) {
+            this.log('no active lobby');
+            return;
+        }
+        const target = this.currentLobby.participants.find(
+            (p) => p.user.username.toLowerCase() === username.toLowerCase()
+        );
+        if (!target) {
+            this.log(`"${username}" is not in this lobby`);
+            return;
+        }
+
+        const res = await this.authorizedFetch(`/api/v1/games/lobbies/${this.currentLobby.id}/kick`, {
+            method: 'POST',
+            body: JSON.stringify({ user_id: target.user.id }),
+        });
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}) as { detail?: string });
+            this.log(`could not kick @${username}: ${body.detail ?? res.status}`);
+            return;
+        }
+        this.currentLobby = (await res.json()) as LobbyState;
+        this.log(`kicked @${username} from the lobby`);
+        this.renderLobby();
+    }
+
+    private async doTransferLeader(username: string) {
+        if (!this.currentLobby) {
+            this.log('no active lobby');
+            return;
+        }
+        const target = this.currentLobby.participants.find(
+            (p) => p.user.username.toLowerCase() === username.toLowerCase()
+        );
+        if (!target) {
+            this.log(`"${username}" is not in this lobby`);
+            return;
+        }
+
+        const res = await this.authorizedFetch(`/api/v1/games/lobbies/${this.currentLobby.id}/leader`, {
+            method: 'POST',
+            body: JSON.stringify({ user_id: target.user.id }),
+        });
+        if (!res.ok) {
+            this.log('could not pass leadership — leader only');
+            return;
+        }
+        this.currentLobby = (await res.json()) as LobbyState;
+        this.log(`@${username} is now the lobby leader`);
+        this.renderLobby();
+    }
+
+    private async handleGameAction(action: string) {
+        if (!this.currentLobby) return;
+        const lobbyId = this.currentLobby.id;
+
+        if (action === 'ready') {
+            const me = this.currentLobby.participants.find((p) => p.user.id === this.userId);
+            const res = await this.authorizedFetch(`/api/v1/games/lobbies/${lobbyId}/ready`, {
+                method: 'POST',
+                body: JSON.stringify({ is_ready: !me?.is_ready }),
+            });
+            if (res.ok) {
+                this.currentLobby = (await res.json()) as LobbyState;
+                this.renderLobby();
+            }
+            return;
+        }
+
+        if (action === 'start') {
+            const res = await this.authorizedFetch(`/api/v1/games/lobbies/${lobbyId}/start`, { method: 'POST' });
+            if (res.ok) {
+                this.currentLobby = (await res.json()) as LobbyState;
+                this.renderLobby();
+            } else {
+                const body = await res.json().catch(() => ({}) as { detail?: string });
+                this.log(`could not start: ${body.detail ?? res.status}`);
+            }
+            return;
+        }
+
+        if (action === 'leave') {
+            const res = await this.authorizedFetch(`/api/v1/games/lobbies/${lobbyId}/leave`, { method: 'POST' });
+            if (res.ok) {
+                this.log('— left the lobby —');
+                if (this.activeConversationId === this.currentLobby.conversation_id) {
+                    this.setActiveConversation(undefined, undefined);
+                }
+                this.currentLobby = undefined;
+                this.renderLobby();
+            }
+            return;
+        }
+    }
+
+    private lobbyChatTitle(lobby: LobbyState): string {
+        return `${lobby.game_name} lobby`;
+    }
+
+    private logLobbyStatus() {
+        const lobby = this.currentLobby;
+        if (!lobby) {
+            this.log('no active lobby — /games then /lobby create <n>');
+            return;
+        }
+        this.log(`— ${lobby.game_name} lobby (${lobby.status}) —`);
+        lobby.participants.forEach((p) => {
+            const tags = [p.is_leader ? 'leader' : null, p.is_ready ? 'ready' : 'not ready']
+                .filter(Boolean)
+                .join(', ');
+            this.log(`  @${p.user.username} — ${tags}`);
+        });
+    }
+
+    private applyLobbyUpdate(lobby: LobbyState) {
+        const wasMine = this.currentLobby?.id === lobby.id;
+        const amStillIn = lobby.participants.some((p) => p.user.id === this.userId);
+        if (wasMine || amStillIn) {
+            if (!amStillIn && this.activeConversationId === lobby.conversation_id) {
+                this.setActiveConversation(undefined, undefined);
+            }
+            this.currentLobby = amStillIn ? lobby : undefined;
+            this.renderLobby();
+        }
+    }
+
+    private renderCatalog() {
+        this.webviewView?.webview.postMessage({ type: 'catalog.render', data: this.gameCatalogCache });
+    }
+
+    private renderLobby() {
+        this.webviewView?.webview.postMessage({
+            type: 'lobby.render',
+            data: this.currentLobby ?? null,
+            selfId: this.userId,
+        });
     }
 
     // -----------------------------
@@ -535,36 +881,95 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                 this.updateBadge();
             } else if (event.type === 'error') {
                 this.log(`error: ${event.data?.message}`);
+            } else if (event.type === 'lobby.updated') {
+                this.applyLobbyUpdate(event.data as LobbyState);
+            } else if (event.type === 'lobby.invited') {
+                const lobby = event.data as LobbyState;
+                this.currentLobby = lobby;
+                this.setActiveConversation(lobby.conversation_id, this.lobbyChatTitle(lobby));
+                this.log(`— invited to ${lobby.game_name} lobby by a friend — now chatting here —`);
+                this.logLobbyStatus();
+                this.renderLobby();
+            } else if (event.type === 'lobby.kicked') {
+                const lobby = this.currentLobby;
+                if (lobby && lobby.id === event.data?.lobby_id) {
+                    this.log('— you were removed from the lobby —');
+                    if (this.activeConversationId === lobby.conversation_id) {
+                        this.setActiveConversation(undefined, undefined);
+                    }
+                    this.currentLobby = undefined;
+                    this.renderLobby();
+                }
+            } else if (event.type === 'game.started') {
+                if (this.currentLobby?.id === event.data?.lobby_id) {
+                    this.log(`— ${event.data.game_name} has started! —`);
+                }
             }
         });
     }
 
     // -----------------------------
-    // 🔹 GAME SOCKET (fixed, unrelated to Cheddar chat — untouched)
+    // 🔹 SELF-UPDATE — this is a private/sideloaded extension so it can't rely
+    // on the Marketplace's update mechanism. `interactive: false` (checked
+    // once when the panel first launches) only notifies; it never installs
+    // anything on its own. `interactive: true` (the /update command) is the
+    // only path that actually downloads and installs a new version.
     // -----------------------------
-    private connectGameSocket(url: string) {
-        if (this.gameSocket) {
-            this.gameSocket.removeAllListeners();
-            this.gameSocket.close();
+    private async checkForUpdates(interactive: boolean) {
+        const currentVersion = this.context.extension.packageJSON.version as string;
+
+        let manifest: UpdateManifest;
+        try {
+            const res = await fetch(`${this.updateBaseUrl}/latest.json`);
+            if (!res.ok) throw new Error(`status ${res.status}`);
+            manifest = (await res.json()) as UpdateManifest;
+        } catch (err) {
+            if (interactive) this.log(`update check failed: ${(err as Error).message}`);
+            return;
         }
 
-        this.gameSocket = new WebSocket(url);
+        if (!isNewerVersion(manifest.version, currentVersion)) {
+            if (interactive) this.log(`up to date (v${currentVersion})`);
+            return;
+        }
 
-        this.gameSocket.on('open', () => {
-            console.log('Game WebSocket connected:', url);
-        });
+        if (!interactive) {
+            this.log(`— update available: v${currentVersion} → v${manifest.version} — /update to install —`);
+            void vscode.window.showInformationMessage(
+                `Cheddar v${manifest.version} is available (current: v${currentVersion}). Run /update in the Cheddar panel to install it.`
+            );
+            return;
+        }
 
-        this.gameSocket.on('close', () => console.log('Game WebSocket closed:', url));
-        this.gameSocket.on('error', (err) => console.error('Game WebSocket error:', err));
+        await this.installUpdate(manifest);
+    }
 
-        this.gameSocket.on('message', (data) => {
-            if (this.webviewView) {
-                this.webviewView.webview.postMessage({
-                    type: 'karirs',
-                    data: data.toString(),
-                });
+    private async installUpdate(manifest: UpdateManifest) {
+        this.log(`downloading v${manifest.version}...`);
+        try {
+            const res = await fetch(`${this.updateBaseUrl}/${manifest.file}`);
+            if (!res.ok) throw new Error(`download failed: status ${res.status}`);
+
+            const buffer = Buffer.from(await res.arrayBuffer());
+            const tmpPath = path.join(os.tmpdir(), manifest.file);
+            fs.writeFileSync(tmpPath, buffer);
+
+            await vscode.commands.executeCommand(
+                'workbench.extensions.installExtension',
+                vscode.Uri.file(tmpPath)
+            );
+
+            this.log(`installed v${manifest.version} — reload the window to finish`);
+            const choice = await vscode.window.showInformationMessage(
+                `Cheddar v${manifest.version} installed. Reload window to finish updating?`,
+                'Reload now'
+            );
+            if (choice === 'Reload now') {
+                await vscode.commands.executeCommand('workbench.action.reloadWindow');
             }
-        });
+        } catch (err) {
+            this.log(`update failed: ${(err as Error).message}`);
+        }
     }
 
     private updateBadge() {

@@ -22,6 +22,7 @@ dist/test/**
 # Ignore configs and scripts not needed in VSIX
 webpack.config.js
 esbuild.js
+deploy.sh
 .yarnrc
 .vsc-extension-quickstart.md
 

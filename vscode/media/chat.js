@@ -2,60 +2,84 @@ const vscode = acquireVsCodeApi();
 const textbox = document.getElementById('textbox');
 const msgContainer = document.getElementById('msg-users');
 const msgContent = document.getElementById('msg-content');
-const gameContainer = document.getElementById('game-con');
-const startBtn = document.getElementById('karirs-start');
-const stopBtn = document.getElementById('karirs-stop');
-const changeBtn = document.getElementById('karirs-change');
-const countdownEl = document.getElementById('countdown');
 const msgEl = document.getElementById('msg');
+
+const gameCatalogEl = document.getElementById('game-catalog');
+const gameHintEl = document.getElementById('game-hint');
+const lobbyViewEl = document.getElementById('lobby-view');
+const lobbyTitleEl = document.getElementById('lobby-title');
+const lobbyPlayersEl = document.getElementById('lobby-players');
+const lobbyReadyBtn = document.getElementById('lobby-ready');
+const lobbyStartBtn = document.getElementById('lobby-start');
+const lobbyLeaveBtn = document.getElementById('lobby-leave');
+const lobbyHintEl = document.getElementById('lobby-hint');
+const chatTitleEl = document.getElementById('chat-title');
 
 // Receive messages from extension
 window.addEventListener('message', event => {
     const msg = event.data;
-    // console.log("msg:",msg)
     if (msg.type === 'log') {
         const p = document.createElement('p');
         p.textContent = msg.text;
         msgContent.appendChild(p);
         msgContainer.scrollTop = msgContainer.scrollHeight;
     }
-    else if(msg.type === 'karirs') {
-        const gameData = JSON.parse(msg.data)
-        const spectators = gameData?.spectators ?? 0
-        const players = gameData?.players ?? []
-        const hasStarted = gameData?.started ?? false
-        let winnerIndex = null
-
-        if(hasStarted) {
-            startBtn.style.display = 'none'
-            changeBtn.style.display = 'none'
-        }
-        else if(!hasStarted) {
-            startBtn.style.display = 'block'
-            changeBtn.style.display = 'block'
-
-            if(players.length) {
-                winnerIndex = players.reduce(
-                    (max_idx, player, idx, arr) =>
-                        player.position > arr[max_idx].position ? idx : max_idx,
-                    0
-                );
-            }
-        }
-        
-        gameContainer.innerHTML = '';
-
-        players.forEach((player, index) => {
-            const li = document.createElement('li')
-            li.innerHTML = player.name
-            li.style.marginLeft = player.position + 'px'
-            if(winnerIndex != null && index === winnerIndex && player.position > 0) {
-                li.style.background = '#0080BAc4'
-            }
-            gameContainer.appendChild(li)
-        });
+    else if (msg.type === 'catalog.render') {
+        renderCatalog(msg.data ?? []);
+    }
+    else if (msg.type === 'lobby.render') {
+        renderLobby(msg.data, msg.selfId);
+    }
+    else if (msg.type === 'chat.title') {
+        chatTitleEl.textContent = msg.text ?? '';
+        chatTitleEl.title = msg.text ?? '';
     }
 });
+
+function renderCatalog(games) {
+    gameCatalogEl.innerHTML = '';
+    games.forEach((g, i) => {
+        const li = document.createElement('li');
+        li.textContent = `${i + 1}) ${g.name} (${g.min_players}-${g.max_players})`;
+        gameCatalogEl.appendChild(li);
+    });
+}
+
+function renderLobby(lobby, selfId) {
+    if (!lobby) {
+        lobbyViewEl.style.display = 'none';
+        gameHintEl.style.display = 'block';
+        return;
+    }
+
+    gameHintEl.style.display = 'none';
+    lobbyViewEl.style.display = 'block';
+    lobbyTitleEl.textContent = `${lobby.game_name} — ${lobby.status}`;
+
+    const me = lobby.participants.find(p => p.user.id === selfId);
+    const isLeader = !!me?.is_leader;
+    const allReady = lobby.participants.length > 0 && lobby.participants.every(p => p.is_ready);
+
+    lobbyPlayersEl.innerHTML = '';
+    lobby.participants.forEach(p => {
+        const li = document.createElement('li');
+        const crown = p.is_leader ? '👑 ' : '';
+        const ready = p.is_ready ? '✓ ready' : '… not ready';
+        li.textContent = `${crown}@${p.user.username} — ${ready}`;
+        lobbyPlayersEl.appendChild(li);
+    });
+
+    const gameLive = lobby.status !== 'waiting';
+    lobbyReadyBtn.style.display = gameLive ? 'none' : 'inline-block';
+    lobbyReadyBtn.textContent = me?.is_ready ? 'Unready' : 'Ready';
+    lobbyStartBtn.style.display = isLeader && !gameLive ? 'inline-block' : 'none';
+    lobbyStartBtn.disabled = !allReady;
+    lobbyHintEl.textContent = gameLive
+        ? ''
+        : isLeader
+            ? (allReady ? 'all ready — Start when you are' : 'waiting for everyone to ready up')
+            : '/lobby invite <username> to add a friend';
+}
 
 // Send the typed line to the extension host on Enter. The host owns all the
 // parsing (slash-commands vs. a plain chat send) and network calls — the
@@ -73,35 +97,16 @@ textbox.addEventListener('keydown', e => {
 
 
 window.addEventListener('click', (e) => {
-    if (e.target.id === 'karirs-start') {
-        startCountdown(10, () => {
-            vscode.postMessage({
-                type: 'karirs',
-                data: {
-                    action: "start"
-                }
-            });
-            countdownEl.innerHTML = '';
-        })
-        
+    if (e.target.id === 'lobby-ready') {
+        vscode.postMessage({ type: 'game', action: 'ready' });
     }
-    else if (e.target.id === 'karirs-stop') {
-        vscode.postMessage({
-            type: 'karirs',
-            data: {
-                action: "stop"
-            }
-        });
+    else if (e.target.id === 'lobby-start') {
+        vscode.postMessage({ type: 'game', action: 'start' });
     }
-    else if (e.target.id === 'karirs-change') {
-        vscode.postMessage({
-            type: 'karirs',
-            data: {
-                action: "change"
-            }
-        });
+    else if (e.target.id === 'lobby-leave') {
+        vscode.postMessage({ type: 'game', action: 'leave' });
     }
-    else if(e.target.id === 'game-drawer-lock') {
+    else if (e.target.id === 'game-drawer-lock') {
         const isUnlocked = msgEl.classList.contains('unlocked');
 
         if (isUnlocked) {
@@ -111,18 +116,3 @@ window.addEventListener('click', (e) => {
         }
     }
 });
-
-
-function startCountdown(duration, callback) {
-    let remaining = duration;
-
-    const timer = setInterval(() => {
-        countdownEl.innerHTML = `Race will start at '${remaining}s'`
-        remaining--;
-
-        if (remaining < 0) {
-            clearInterval(timer);
-            callback();
-        }
-    }, 1000);
-}
