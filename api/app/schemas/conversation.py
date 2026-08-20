@@ -9,6 +9,10 @@ class ConversationCreate(BaseModel):
     user_id: int
 
 
+class ConversationInvite(BaseModel):
+    user_id: int
+
+
 class ConversationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

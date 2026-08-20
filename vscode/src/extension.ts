@@ -359,6 +359,16 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             case 'who':
                 await this.doListMembers();
                 return;
+            case 'leave':
+                await this.doLeaveChat();
+                return;
+            case 'invite':
+                if (!arg) {
+                    this.log('usage: /invite <username>');
+                    return;
+                }
+                await this.doInviteToChat(arg);
+                return;
             case 'games':
                 await this.doListGames();
                 return;
@@ -370,7 +380,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                 return;
             case 'help':
                 this.log(
-                    'commands: /login /logout /whoami /friends /requests /add /accept /decline /chats /open /who /games /lobby /update'
+                    'commands: /login /logout /whoami /friends /requests /add /accept /decline /chats /open /who /leave /invite /games /lobby /update'
                 );
                 return;
             default:
@@ -621,6 +631,60 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         }
         this.log(`— members of ${this.activeConversationTitle ?? `conversation #${convo.id}`} —`);
         convo.participants.forEach((p) => this.log(`  @${p.username} (${p.display_name}) [${p.status}]`));
+    }
+
+    private async doLeaveChat() {
+        if (this.activeConversationId == null) {
+            this.log('no chat open');
+            return;
+        }
+        const conversationId = this.activeConversationId;
+        const title = this.activeConversationTitle ?? `conversation #${conversationId}`;
+
+        const res = await this.authorizedFetch(`/api/v1/conversations/${conversationId}/leave`, { method: 'POST' });
+        if (!res.ok) {
+            this.log('could not leave chat');
+            return;
+        }
+
+        this.log(`— left ${title} —`);
+        // A lobby's chat and its roster are the same membership server-side —
+        // if this was the lobby's chat, the leave already took us out of the
+        // lobby too, so drop the local lobby cache to match.
+        if (this.currentLobby?.conversation_id === conversationId) {
+            this.currentLobby = undefined;
+            this.renderLobby();
+        }
+        this.setActiveConversation(undefined, undefined);
+    }
+
+    private async doInviteToChat(username: string) {
+        if (this.activeConversationId == null) {
+            this.log('no chat open — /chats then /open <n>');
+            return;
+        }
+        const searchRes = await this.authorizedFetch(`/api/v1/users/search?q=${encodeURIComponent(username)}`);
+        if (!searchRes.ok) {
+            this.log('not logged in');
+            return;
+        }
+        const users = (await searchRes.json()) as Array<{ id: number; username: string }>;
+        const match = users.find((u) => u.username.toLowerCase() === username.toLowerCase()) ?? users[0];
+        if (!match) {
+            this.log(`no user found matching "${username}"`);
+            return;
+        }
+
+        const res = await this.authorizedFetch(`/api/v1/conversations/${this.activeConversationId}/invite`, {
+            method: 'POST',
+            body: JSON.stringify({ user_id: match.id }),
+        });
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}) as { detail?: string });
+            this.log(`could not invite @${match.username}: ${body.detail ?? res.status}`);
+            return;
+        }
+        this.log(`invited @${match.username} to ${this.activeConversationTitle ?? 'the chat'}`);
     }
 
     // -----------------------------
@@ -904,6 +968,9 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                 if (this.currentLobby?.id === event.data?.lobby_id) {
                     this.log(`— ${event.data.game_name} has started! —`);
                 }
+            } else if (event.type === 'conversation.invited') {
+                const name = event.data?.name ?? `conversation #${event.data?.id}`;
+                this.log(`— added to a group chat: ${name} — /chats to see it —`);
             }
         });
     }

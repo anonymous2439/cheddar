@@ -38,12 +38,20 @@ html, body {
     transition: .6s;
 }
 
-#msg.unlocked:hover .msg-options{
+/* Scoped to the lock button and the drawer itself — not #msg:hover broadly,
+   which used to also fire while hovering the plain messages area since
+   #game-drawer-lock lives inside #msg-users rather than beside .msg-options
+   in the DOM. :has() lets the button's hover reach its non-descendant
+   sibling .msg-options; once the drawer is open, hovering it directly keeps
+   it open without needing the pointer back over the button. */
+#msg.unlocked:has(#game-drawer-lock:hover) .msg-options,
+#msg.unlocked .msg-options:hover {
     width: 578px;
     opacity: 1;
 }
 
-#msg.unlocked:hover #msg-users {
+#msg.unlocked:has(#game-drawer-lock:hover) #msg-users,
+#msg.unlocked:has(.msg-options:hover) #msg-users {
     width: calc(100% - 578px);
 }
 
@@ -160,12 +168,18 @@ html, body {
 }
 
 #game-drawer-lock {
+    /* height was 100vh — since #msg-users is an overflow:auto container, it
+       contains floated children by their full height, so a 100vh-tall float
+       forced the scrollable area to be at least a full viewport tall no
+       matter how short the message list was. That gave a spurious scrollbar
+       on a handful of messages, and "scroll to bottom" on send landed at the
+       bottom of that inflated area instead of on the real last message.
+       100% matches #msg-users's actual box height instead. */
     position: sticky;
     left: 0;
     top: 0;
-    bottom: 0;
+    height: 100%;
     width: 12px;
-    height: 100vh;
     background: #ffffff1a;
     display: flex;
     justify-content: center;
