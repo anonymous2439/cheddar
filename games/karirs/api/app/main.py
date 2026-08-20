@@ -3,6 +3,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,17 @@ BETTING_SECONDS = 30
 STEP_DELAY_SECONDS = 0.3
 
 app = FastAPI(title="Karirs API")
+
+# Same origins as the main Cheddar API — this is the second backend the web
+# client talks to directly (vscode/mobile don't need CORS, they aren't
+# browsers).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class RaceConnectionManager:

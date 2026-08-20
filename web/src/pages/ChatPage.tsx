@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import { useChatData } from "../hooks/useChatData";
+import { useGames } from "../hooks/useGames";
 import { ConversationList } from "../components/ConversationList";
 import { FriendsPanel } from "../components/FriendsPanel";
 import { ChatWindow } from "../components/ChatWindow";
+import { GamesPanel } from "../components/GamesPanel";
+import { LobbyRoom } from "../components/LobbyRoom";
 import type { Conversation } from "../types";
 
-type Tab = "conversations" | "friends";
+type Tab = "conversations" | "friends" | "games";
 
 export function ChatPage() {
   const { user, logout } = useAuth();
@@ -29,6 +32,23 @@ export function ChatPage() {
     markRead,
   } = useChatData();
 
+  const {
+    catalog,
+    myLobbies,
+    currentLobby,
+    selectLobby,
+    createLobby,
+    setReady,
+    startLobby,
+    restartLobby,
+    kickFromLobby,
+    transferLeader,
+    inviteToLobby,
+    getInviteCode,
+    joinLobbyByCode,
+    leaveLobby,
+  } = useGames();
+
   const [tab, setTab] = useState<Tab>("conversations");
   const [selected, setSelected] = useState<Conversation | null>(null);
 
@@ -46,7 +66,7 @@ export function ChatPage() {
     <div className="flex h-full">
       <aside
         className={`w-full flex-shrink-0 flex-col border-r border-neutral-200 md:flex md:w-80 ${
-          selected ? "hidden md:flex" : "flex"
+          selected || (tab === "games" && currentLobby) ? "hidden md:flex" : "flex"
         }`}
       >
         <div className="flex items-center justify-between border-b border-neutral-200 px-4 py-3">
@@ -77,10 +97,16 @@ export function ChatPage() {
               </span>
             )}
           </button>
+          <button
+            onClick={() => setTab("games")}
+            className={`flex-1 py-2 ${tab === "games" ? "border-b-2 border-amber-500 font-medium" : "text-neutral-500"}`}
+          >
+            Games
+          </button>
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          {tab === "conversations" ? (
+          {tab === "conversations" && (
             <ConversationList
               conversations={conversations}
               currentUserId={user.id}
@@ -88,7 +114,8 @@ export function ChatPage() {
               onSelect={setSelected}
               onlineUserIds={onlineUserIds}
             />
-          ) : (
+          )}
+          {tab === "friends" && (
             <FriendsPanel
               friends={friends}
               incomingRequests={incomingRequests}
@@ -102,11 +129,41 @@ export function ChatPage() {
               }}
             />
           )}
+          {tab === "games" && (
+            <GamesPanel
+              catalog={catalog}
+              myLobbies={myLobbies}
+              selectedLobbyId={currentLobby?.id ?? null}
+              onHost={createLobby}
+              onSelect={selectLobby}
+              onJoinByCode={joinLobbyByCode}
+            />
+          )}
         </div>
       </aside>
 
-      <main className={`min-w-0 flex-1 ${selected ? "block" : "hidden md:block"}`}>
-        {selected ? (
+      <main className={`min-w-0 flex-1 ${selected || (tab === "games" && currentLobby) ? "block" : "hidden md:block"}`}>
+        {tab === "games" ? (
+          currentLobby ? (
+            <LobbyRoom
+              lobby={currentLobby}
+              currentUserId={user.id}
+              friends={friends}
+              onReady={(isReady) => setReady(currentLobby.id, isReady)}
+              onStart={() => startLobby(currentLobby.id)}
+              onLeave={() => leaveLobby(currentLobby.id)}
+              onRestart={() => restartLobby(currentLobby.id)}
+              onKick={(userId) => kickFromLobby(currentLobby.id, userId)}
+              onTransferLeader={(userId) => transferLeader(currentLobby.id, userId)}
+              onInviteFriend={(userId) => inviteToLobby(currentLobby.id, userId)}
+              onGetInviteCode={() => getInviteCode(currentLobby.id)}
+            />
+          ) : (
+            <div className="hidden h-full items-center justify-center text-neutral-400 md:flex">
+              Host a game or pick one of your lobbies
+            </div>
+          )
+        ) : selected ? (
           <ChatWindow
             conversation={selected}
             currentUserId={user.id}
