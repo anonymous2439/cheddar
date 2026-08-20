@@ -140,6 +140,12 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             .get<string>('updateBaseUrl', 'http://109.123.234.69/cheddar-builds');
     }
 
+    private get karirsApiBaseUrl(): string {
+        return vscode.workspace
+            .getConfiguration('cheddar')
+            .get<string>('karirsApiBaseUrl', 'http://109.123.234.69/api/karirs');
+    }
+
     resolveWebviewView(webviewView: vscode.WebviewView) {
         this.webviewView = webviewView;
         webviewView.webview.options = { enableScripts: true };
@@ -163,6 +169,10 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
 
             if (msg.type === 'game') {
                 void this.handleGameAction(msg.action);
+            }
+
+            if (msg.type === 'game.action') {
+                void this.handleGameHostAction(msg.gameKey, msg.action, msg.data);
             }
         });
 
@@ -914,8 +924,91 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             gameName,
             lobbyId: this.currentLobby.id,
             selfId: this.userId,
+            leaderId: this.currentLobby.leader_id,
             participants: this.currentLobby.participants.map((p) => p.user),
         });
+    }
+
+    private async sendGameEvent(gameKey: string, event: string, data: unknown) {
+        this.webviewView?.webview.postMessage({ type: 'game.event', gameKey, event, data });
+    }
+
+    // A mounted module only ever reaches its own game's API through this —
+    // it holds no token and makes no network calls of its own. Right now
+    // 'karirs' is the only game with a backend; a future game with its own
+    // API would get its own branch here rather than a shared one, since each
+    // game's action set and base URL are its own concern.
+    private async handleGameHostAction(gameKey: string, action: string, data: any) {
+        if (gameKey === 'karirs') {
+            await this.handleKarirsAction(action, data);
+        }
+    }
+
+    private async karirsFetch(path: string, init: RequestInit = {}): Promise<Response> {
+        const headers = new Headers(init.headers);
+        if (this.accessToken) headers.set('Authorization', `Bearer ${this.accessToken}`);
+        if (init.body && !headers.has('Content-Type')) {
+            headers.set('Content-Type', 'application/json');
+        }
+        return fetch(`${this.karirsApiBaseUrl}${path}`, { ...init, headers });
+    }
+
+    private async handleKarirsAction(action: string, data: any) {
+        try {
+            switch (action) {
+                case 'sync_race': {
+                    // One race per lobby — try to fetch whatever's already
+                    // there before creating a new one, so reopening the game
+                    // (or a second player mounting it) doesn't spawn a
+                    // duplicate table. The API deals its own field of racers
+                    // from its roster — the client never names them.
+                    let res = await this.karirsFetch(`/races/lobby/${data.lobbyId}/current`);
+                    if (res.status === 404) {
+                        res = await this.karirsFetch('/races', {
+                            method: 'POST',
+                            body: JSON.stringify({ lobby_id: data.lobbyId }),
+                        });
+                    }
+                    if (!res.ok) throw new Error(`race sync failed (${res.status})`);
+                    await this.sendGameEvent('karirs', 'race', await res.json());
+                    return;
+                }
+                case 'wallet': {
+                    const res = await this.karirsFetch('/wallet');
+                    if (!res.ok) throw new Error(`wallet fetch failed (${res.status})`);
+                    await this.sendGameEvent('karirs', 'wallet', await res.json());
+                    return;
+                }
+                case 'pool': {
+                    const res = await this.karirsFetch(`/races/${data.raceId}/pool`);
+                    if (!res.ok) throw new Error(`pool fetch failed (${res.status})`);
+                    await this.sendGameEvent('karirs', 'pool', await res.json());
+                    return;
+                }
+                case 'my_bet': {
+                    const res = await this.karirsFetch(`/races/${data.raceId}/bets`);
+                    if (!res.ok) throw new Error(`bet fetch failed (${res.status})`);
+                    await this.sendGameEvent('karirs', 'my_bet', await res.json());
+                    return;
+                }
+                case 'place_bet': {
+                    const res = await this.karirsFetch(`/races/${data.raceId}/bets`, {
+                        method: 'POST',
+                        body: JSON.stringify({ racer_name: data.racerName, wager: data.wager }),
+                    });
+                    if (!res.ok) {
+                        const body = await res.json().catch(() => ({}) as { detail?: string });
+                        throw new Error(body.detail ?? `bet failed (${res.status})`);
+                    }
+                    await this.sendGameEvent('karirs', 'bet_placed', await res.json());
+                    return;
+                }
+                default:
+                    throw new Error(`unknown karirs action: ${action}`);
+            }
+        } catch (err) {
+            await this.sendGameEvent('karirs', 'error', { message: (err as Error).message });
+        }
     }
 
     // -----------------------------

@@ -38,7 +38,23 @@ window.addEventListener('message', event => {
     else if (msg.type === 'game.mount') {
         mountGame(msg);
     }
+    else if (msg.type === 'game.event') {
+        const game = window.CheddarGames && window.CheddarGames[msg.gameKey];
+        if (game && game.onEvent) game.onEvent(msg.event, msg.data);
+    }
 });
+
+// Bridge for a mounted game module to reach the extension host — the host
+// holds the access token and does the actual fetch, the module never talks
+// to a game's API directly. Replies come back as 'game.event' above, routed
+// to whichever module is currently mounted.
+window.CheddarHost = {
+    send(action, data) {
+        const gameKey = gameStageEl.dataset.mountedKey;
+        if (!gameKey) return;
+        vscode.postMessage({ type: 'game.action', gameKey, action, data });
+    },
+};
 
 function mountGame(msg) {
     const game = window.CheddarGames && window.CheddarGames[msg.gameKey];
@@ -53,6 +69,7 @@ function mountGame(msg) {
         gameName: msg.gameName,
         lobbyId: msg.lobbyId,
         selfId: msg.selfId,
+        leaderId: msg.leaderId,
         participants: msg.participants ?? [],
     });
 }
@@ -63,6 +80,7 @@ function unmountGame() {
     const game = key && window.CheddarGames && window.CheddarGames[key];
     if (game) game.unmount(gameStageEl);
     gameStageEl.style.display = 'none';
+    delete gameStageEl.dataset.mountedKey;
 }
 
 function renderCatalog(games) {

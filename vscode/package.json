@@ -2,7 +2,7 @@
   "name": "cheddar",
   "displayName": "Cheddar",
   "description": "VS Code extension with a custom bottom panel tab",
-  "version": "0.0.13",
+  "version": "0.0.15",
   "engines": {
     "vscode": "^1.108.1"
   },
@@ -54,6 +54,11 @@
           "type": "string",
           "default": "http://109.123.234.69/cheddar-builds",
           "description": "Base URL hosting latest.json and .vsix builds for self-update checks."
+        },
+        "cheddar.karirsApiBaseUrl": {
+          "type": "string",
+          "default": "http://109.123.234.69/api/karirs",
+          "description": "Base URL of the Karirs game API."
         }
       }
     }

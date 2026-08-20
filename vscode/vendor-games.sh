@@ -11,6 +11,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 #   key            source dist dir (relative to this file's directory)
 GAMES=(
     "hello_world:../games/hello-world/dist"
+    "karirs:../games/karirs/client/dist"
 )
 
 DEST_ROOT="media/games"

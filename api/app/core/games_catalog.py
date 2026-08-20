@@ -11,6 +11,12 @@ GAMES = [
         "min_players": 1,
         "max_players": 8,
     },
+    {
+        "key": "karirs",
+        "name": "Karirs",
+        "min_players": 1,
+        "max_players": 8,
+    },
 ]
 
 GAMES_BY_KEY = {game["key"]: game for game in GAMES}
