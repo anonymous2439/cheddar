@@ -3,6 +3,7 @@ from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.sql import func
 
 from app.db import Base
+from app.signature_moves import signature_move_for
 
 
 class Wallet(Base):
@@ -47,6 +48,12 @@ class Race(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     betting_closes_at = Column(DateTime, nullable=False)
     resolved_at = Column(DateTime, nullable=True)
+
+    @property
+    def signature_moves(self) -> dict[str, str]:
+        """Derived, not stored — every racer's catchphrase for THIS race's
+        roster, so clients don't need their own hardcoded name->line map."""
+        return {name: signature_move_for(name) for name in self.racer_names}
 
 
 class Bet(Base):

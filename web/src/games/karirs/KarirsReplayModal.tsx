@@ -56,7 +56,7 @@ export function KarirsReplayModal({ raceId, onClose }: Props) {
       const r = raceRef.current;
       if (canvas && r && r.steps) {
         const playback = computePlayback(r.steps, anchorRef.current, Date.now());
-        renderTrack(canvas, r.racer_names, r.winning_name, true, playback, null);
+        renderTrack(canvas, r.racer_names, r.winning_name, true, playback, null, r.signature_moves);
       }
       rafId = requestAnimationFrame(draw);
     }

@@ -96,7 +96,7 @@ def _finish_race(db: Session, race: Race) -> RaceResultOut:
     for the animation's natural duration to elapse before crediting wallets,
     so nobody can learn the outcome early by polling their balance instead
     of watching the race."""
-    final_positions = race.steps[-1] if race.steps else {}
+    final_positions = race.steps[-1]["positions"] if race.steps else {}
     winner = race.winning_name
     standings = sorted(race.racer_names, key=lambda n: final_positions.get(n, 0), reverse=True)
 

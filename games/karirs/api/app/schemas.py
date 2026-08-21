@@ -24,6 +24,16 @@ class BetOut(BaseModel):
     created_at: datetime
 
 
+class RaceStepOut(BaseModel):
+    positions: dict[str, float]
+    # Racers whose speed is currently at/above race.py's PEAK_SPEED_THRESHOLD
+    # this step — i.e. shouting their signature move (see RaceOut.signature_moves
+    # for the actual line). Not interpolated like positions are: it's a
+    # discrete "yes/no right now" flag, so a client should read it off
+    # whichever step index it's currently in, not blend it with neighbors.
+    shouting: list[str]
+
+
 class RaceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -32,7 +42,11 @@ class RaceOut(BaseModel):
     racer_names: list[str]
     status: str
     winning_name: str | None
-    steps: list[dict[str, float]] | None
+    steps: list[RaceStepOut] | None
+    # Every racer's catchphrase for this race's roster — derived from
+    # racer_names, not stored, so clients never need their own hardcoded
+    # name->line map (see Race.signature_moves).
+    signature_moves: dict[str, str]
     created_by: int
     created_at: datetime
     betting_closes_at: datetime

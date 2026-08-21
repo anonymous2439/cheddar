@@ -162,6 +162,7 @@ export function KarirsGame({ lobby, onFinished }: Props) {
           currentRace.status === "resolved",
           playback,
           myBetRef.current?.racer_name ?? null,
+          currentRace.signature_moves,
         );
       }
       rafId = requestAnimationFrame(draw);

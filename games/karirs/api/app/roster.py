@@ -6,12 +6,16 @@ from app.models import Racer
 
 DEFAULT_RACER_COUNT = 4
 
-# Seeded once on first startup if the table is empty. Filipino words for
-# fast/stormy things, nodding at the game's namesake — easy to grow later
+# Seeded once on first startup if the table is empty — easy to grow later
 # by just inserting more rows into `racers`.
 SEED_NAMES = [
-    "Kidlat", "Sigwa", "Bagyo", "Barako", "Alon", "Agila",
-    "Tigre", "Bituin", "Tibo", "Diwata", "Lakan", "Sinag",
+    "Neil Axinto", "Aby Calago", "Ashley Bayarcal", "Brian Lisondra",
+    "Carl Perral", "Chaimel Enjambre", "Elieser Tajanlangit", "Jayson Martinez",
+    "Jerome Madelo", "Jhoewell Posas", "Jhon Pabroa", "John Macapaz",
+    "John Leo Salac", "Jonah Taganahan", "Joshua Paulo", "Troy Alonsagay",
+    "Grace Vellina", "Mat Ando", "Michael Tonilon", "Mike Miñoza",
+    "Novel Chavez", "Percival Mansueto", "Rashed Perez", "Roland Clarion",
+    "Xiao",
 ]
 
 

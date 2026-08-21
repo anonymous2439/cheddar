@@ -131,9 +131,11 @@ function replayStepInfo() {
     const elapsed = Math.max(0, Date.now() - replayAnchorAt);
     const idx = Math.floor(elapsed / REPLAY_STEP_DELAY_MS);
     if (idx >= steps.length) {
-        return { positions: steps[steps.length - 1], step: steps.length, total: steps.length, done: true };
+        const last = steps[steps.length - 1];
+        return { positions: last.positions, shouting: last.shouting, step: steps.length, total: steps.length, done: true };
     }
-    return { positions: steps[idx], step: idx + 1, total: steps.length, done: false };
+    const cur = steps[idx];
+    return { positions: cur.positions, shouting: cur.shouting, step: idx + 1, total: steps.length, done: false };
 }
 
 function ensureReplayTrackDom() {
@@ -172,10 +174,27 @@ function ensureReplayTrackDom() {
         dot.style.transform = 'translate(-50%, -50%)';
         dot.style.transition = 'left 0.3s linear';
         lane.appendChild(dot);
+
+        const shout = document.createElement('span');
+        shout.style.position = 'absolute';
+        shout.style.bottom = '100%';
+        shout.style.left = '0%';
+        shout.style.transform = 'translateX(-50%)';
+        shout.style.marginBottom = '2px';
+        shout.style.background = '#3a2a06';
+        shout.style.color = '#ffd76a';
+        shout.style.border = '1px solid #d97706';
+        shout.style.borderRadius = '6px';
+        shout.style.padding = '1px 5px';
+        shout.style.fontSize = '8px';
+        shout.style.whiteSpace = 'nowrap';
+        shout.style.display = 'none';
+        lane.appendChild(shout);
+
         row.appendChild(lane);
 
         replayTrackEl.appendChild(row);
-        replayDots[name] = { label, dot };
+        replayDots[name] = { label, dot, shout };
     });
 }
 
@@ -192,6 +211,15 @@ function updateReplayView() {
         els.label.style.color = isWinner ? '#ffd76a' : '#ffffffcc';
         els.dot.style.left = `${pct}%`;
         els.dot.style.background = isWinner ? '#ffd76a' : '#0080BAc4';
+
+        if (info.shouting && info.shouting.includes(name)) {
+            const moves = replayRace.signature_moves || {};
+            els.shout.textContent = moves[name] || `${name}'s Signature Move!`;
+            els.shout.style.left = `${pct}%`;
+            els.shout.style.display = 'inline-block';
+        } else {
+            els.shout.style.display = 'none';
+        }
     });
 
     replayStatusEl.textContent = info.done ? `🏁 ${replayRace.winning_name} won!` : `racing… (${info.step}/${info.total})`;

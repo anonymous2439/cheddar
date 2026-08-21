@@ -11,11 +11,20 @@ export const FINISH_LINE = 100;
 
 export const RACER_COLORS = ["#f59e0b", "#3b82f6", "#ef4444", "#10b981", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316"];
 
+export interface RaceStep {
+  positions: Record<string, number>;
+  shouting: string[];
+}
+
 export interface Playback {
   positions: Record<string, number>;
   stepDisplay: number;
   totalSteps: number;
   done: boolean;
+  // Racers currently at/above peak speed, straight from whichever step is
+  // active right now — a discrete flag, never interpolated/blended like
+  // positions are (see KarirsRaceStep's comment in types/index.ts).
+  shouting: string[];
 }
 
 // Every frame just asks "given how much wall-clock time has passed since
@@ -23,26 +32,27 @@ export interface Playback {
 // the two surrounding steps. Uses Date.now() (wall clock), not
 // performance.now() — anchorMs is always a real timestamp, not a monotonic
 // clock reading.
-export function computePlayback(steps: Record<string, number>[], anchorMs: number, now: number): Playback {
-  if (steps.length === 0) return { positions: {}, stepDisplay: 0, totalSteps: 0, done: false };
+export function computePlayback(steps: RaceStep[], anchorMs: number, now: number): Playback {
+  if (steps.length === 0) return { positions: {}, stepDisplay: 0, totalSteps: 0, done: false, shouting: [] };
 
   const elapsedMs = Math.max(0, now - anchorMs);
   const raw = elapsedMs / STEP_DELAY_MS;
   const idx = Math.floor(raw);
 
   if (idx >= steps.length) {
-    return { positions: steps[steps.length - 1], stepDisplay: steps.length, totalSteps: steps.length, done: true };
+    const last = steps[steps.length - 1];
+    return { positions: last.positions, stepDisplay: steps.length, totalSteps: steps.length, done: true, shouting: last.shouting };
   }
 
   const frac = raw - idx;
-  const prev = idx === 0 ? null : steps[idx - 1];
+  const prev = idx === 0 ? null : steps[idx - 1].positions;
   const cur = steps[idx];
   const positions: Record<string, number> = {};
-  for (const name of Object.keys(cur)) {
+  for (const name of Object.keys(cur.positions)) {
     const p = prev ? prev[name] : 0;
-    positions[name] = p + (cur[name] - p) * frac;
+    positions[name] = p + (cur.positions[name] - p) * frac;
   }
-  return { positions, stepDisplay: idx + 1, totalSteps: steps.length, done: false };
+  return { positions, stepDisplay: idx + 1, totalSteps: steps.length, done: false, shouting: cur.shouting };
 }
 
 function truncateToWidth(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
@@ -63,6 +73,7 @@ export function renderTrack(
   isResolved: boolean,
   playback: Playback,
   myBetRacerName: string | null,
+  signatureMoves: Record<string, string> = {},
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -118,6 +129,29 @@ export function renderTrack(
     if (isWinner) {
       ctx.font = "13px system-ui, sans-serif";
       ctx.fillText("🏆", x + 12, y);
+    }
+
+    if (playback.shouting.includes(name)) {
+      const line = signatureMoves[name] ?? `${name}'s Signature Move!`;
+      ctx.font = "bold 10px system-ui, sans-serif";
+      const textWidth = ctx.measureText(line).width;
+      const bubbleW = textWidth + 12;
+      const bubbleH = 16;
+      const bubbleX = Math.min(Math.max(x - bubbleW / 2, 2), cssWidth - bubbleW - 2);
+      const bubbleY = Math.max(2, y - laneHeight / 2 - bubbleH + 2);
+
+      ctx.fillStyle = "#fef3c7";
+      ctx.strokeStyle = "#d97706";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(bubbleX, bubbleY, bubbleW, bubbleH, 6);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "#92400e";
+      ctx.textAlign = "center";
+      ctx.fillText(line, bubbleX + bubbleW / 2, bubbleY + bubbleH / 2 + 1);
+      ctx.textAlign = "left";
     }
   });
 

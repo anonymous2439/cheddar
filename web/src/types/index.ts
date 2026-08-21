@@ -111,6 +111,15 @@ export interface KarirsWallet {
   coins: number;
 }
 
+// A single precomputed step of a race — positions get interpolated between
+// neighboring steps for smooth motion, but shouting is a discrete "yes/no
+// right now" flag (a racer's speed at/above race.py's PEAK_SPEED_THRESHOLD),
+// so it's always read off whichever step is currently active, never blended.
+export interface KarirsRaceStep {
+  positions: Record<string, number>;
+  shouting: string[];
+}
+
 export interface KarirsRace {
   id: number;
   lobby_id: number;
@@ -120,7 +129,10 @@ export interface KarirsRace {
   // The whole race, precomputed the instant betting closed (index 0 = step
   // 1) — null until then. Clients replay it locally, timed off
   // betting_closes_at, instead of animating from live per-step pushes.
-  steps: Record<string, number>[] | null;
+  steps: KarirsRaceStep[] | null;
+  // Every racer's catchphrase for this race's roster (see signature_moves.py)
+  // — shown when playback.shouting includes their name.
+  signature_moves: Record<string, string>;
   created_by: number;
   created_at: string;
   betting_closes_at: string;
@@ -141,7 +153,7 @@ export type KarirsPool = Record<string, number>;
 
 export interface KarirsStepsMessage {
   type: "steps";
-  steps: Record<string, number>[];
+  steps: KarirsRaceStep[];
   total_steps: number;
   started_at: string;
 }

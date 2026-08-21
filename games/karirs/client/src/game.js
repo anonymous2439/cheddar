@@ -35,9 +35,11 @@
         const elapsedMs = Math.max(0, Date.now() - stepsAnchorAt);
         const idx = Math.floor(elapsedMs / STEP_DELAY_MS);
         if (idx >= raceSteps.length) {
-            return { positions: raceSteps[raceSteps.length - 1], step: raceSteps.length, total: raceSteps.length, done: true };
+            const last = raceSteps[raceSteps.length - 1];
+            return { positions: last.positions, shouting: last.shouting, step: raceSteps.length, total: raceSteps.length, done: true };
         }
-        return { positions: raceSteps[idx], step: idx + 1, total: raceSteps.length, done: false };
+        const cur = raceSteps[idx];
+        return { positions: cur.positions, shouting: cur.shouting, step: idx + 1, total: raceSteps.length, done: false };
     }
 
     // The track's own DOM persists across step updates (see ensureTrackDom/
@@ -241,7 +243,7 @@
             chromeTopEl.appendChild(title);
             if (stepInfo) {
                 ensureTrackDom();
-                updateTrackDots(stepInfo.positions);
+                updateTrackDots(stepInfo.positions, stepInfo.shouting);
             }
             if (isResolved) renderResult();
         }
@@ -302,16 +304,37 @@
             dot.style.transform = 'translate(-50%, -50%)';
             dot.style.transition = 'left 0.3s linear';
             lane.appendChild(dot);
+
+            // Signature-move callout — shown only while shouting.includes(name)
+            // (see race.py's PEAK_SPEED_THRESHOLD), positioned above the dot.
+            // No transition on this one: it should snap in/out with the
+            // step, not visibly slide around like the dot does.
+            const shout = document.createElement('span');
+            shout.style.position = 'absolute';
+            shout.style.bottom = '100%';
+            shout.style.left = '0%';
+            shout.style.transform = 'translateX(-50%)';
+            shout.style.marginBottom = '2px';
+            shout.style.background = '#3a2a06';
+            shout.style.color = '#ffd76a';
+            shout.style.border = '1px solid #d97706';
+            shout.style.borderRadius = '6px';
+            shout.style.padding = '1px 5px';
+            shout.style.fontSize = '8px';
+            shout.style.whiteSpace = 'nowrap';
+            shout.style.display = 'none';
+            lane.appendChild(shout);
+
             row.appendChild(lane);
 
             trackWrapperEl.appendChild(row);
-            trackDots[name] = { label, dot };
+            trackDots[name] = { label, dot, shout };
         });
     }
 
     // Only mutates the existing dots/labels built above — this is what
     // actually lets the CSS transition on `left` animate smoothly.
-    function updateTrackDots(positions) {
+    function updateTrackDots(positions, shouting) {
         race.racer_names.forEach((name) => {
             const els = trackDots[name];
             if (!els) return;
@@ -323,6 +346,15 @@
             els.label.style.color = isWinner ? '#ffd76a' : '#ffffffcc';
             els.dot.style.left = `${pct}%`;
             els.dot.style.background = isWinner ? '#ffd76a' : '#0080BAc4';
+
+            if (shouting && shouting.includes(name)) {
+                const moves = race.signature_moves || {};
+                els.shout.textContent = moves[name] || `${name}'s Signature Move!`;
+                els.shout.style.left = `${pct}%`;
+                els.shout.style.display = 'inline-block';
+            } else {
+                els.shout.style.display = 'none';
+            }
         });
     }
 
