@@ -18,11 +18,26 @@ HOUSE_EDGE_FACTOR = 0.9
 # today's behavior) and only drifts as real results accumulate.
 PRIOR_STRENGTH = 4.0
 
-# Clamp on how much a racer's estimated skill can bias their actual speed
-# rolls in the sim — enough that favorites noticeably tend to finish better,
-# never so much that the field's longshot becomes hopeless or the favorite
-# becomes unbeatable.
-MIN_SPEED_FACTOR = 0.8
+# A racer's speed is re-rolled ~10 times over the course of a race (see
+# race.py's SPEED_CHANGE_STEP_INTERVAL), and the finish is essentially the
+# sum of all those rolls — the law of large numbers means even a modest,
+# *consistent* per-roll bias compounds into a near-certain outcome by the
+# end (empirically: a raw relative-skill multiplier, clamped to [0.8, 1.3]
+# and applied every reroll, turned a racer with a genuine 45% win
+# probability into one that actually won ~80% of the time). SPEED_FACTOR_
+# DAMPING compresses relative skill toward 1.0 (relative ** DAMPING) before
+# it's applied, so the *simulated* win frequency ends up close to the
+# probability the payout odds actually promise, instead of wildly
+# overshooting it. 0.10 was picked by simulating real race trials across
+# lopsided, moderate, and near-even fields and checking actual win rate
+# against intended probability (see games/karirs conversation history for
+# the sweep) — it's the tuning knob if this ever needs revisiting: lower
+# = less predictable, higher = more.
+SPEED_FACTOR_DAMPING = 0.10
+# Backstop only — the damping above already keeps every realistic case well
+# inside this range; it exists so a pathological input (e.g. an unusually
+# large field) can't push the bias somewhere silly.
+MIN_SPEED_FACTOR = 0.75
 MAX_SPEED_FACTOR = 1.3
 
 # Seeded once on first startup if the table is empty — easy to grow later
@@ -90,12 +105,14 @@ def compute_payout_multipliers(db: Session, racer_names: list[str]) -> dict[str,
 
 def speed_factor_for_multiplier(multiplier: float, field_size: int) -> float:
     """Reverses compute_payout_multipliers' math to recover the relative
-    skill implied by a racer's (already-frozen) payout multiplier, clamped
-    to [MIN_SPEED_FACTOR, MAX_SPEED_FACTOR] for race.py to bias their speed
-    rolls with. Keeps the sim and the odds bettors were shown driven by the
-    exact same numbers instead of two separate computations that could
-    drift apart."""
+    skill implied by a racer's (already-frozen) payout multiplier, damped
+    (see SPEED_FACTOR_DAMPING) so the sim's actual win frequency tracks the
+    probability the payout odds promise instead of overshooting it, then
+    clamped to [MIN_SPEED_FACTOR, MAX_SPEED_FACTOR] as a backstop. Keeps the
+    sim and the odds bettors were shown driven by the exact same numbers
+    instead of two separate computations that could drift apart."""
     neutral = 1.0 / field_size
     probability = HOUSE_EDGE_FACTOR / multiplier
     relative = probability / neutral
-    return max(MIN_SPEED_FACTOR, min(MAX_SPEED_FACTOR, relative))
+    damped = relative**SPEED_FACTOR_DAMPING
+    return max(MIN_SPEED_FACTOR, min(MAX_SPEED_FACTOR, damped))
