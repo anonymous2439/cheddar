@@ -33,6 +33,17 @@
                     <button type="button" id="lobby-rejoin" style="display:none">Rejoin Game in Progress</button>
                     <div id="game-stage" style="display:none"></div>
                     <button type="button" id="lobby-restart" style="display:none">Back to Lobby</button>
+
+                    <div id="replay-view" style="display:none">
+                        <div style="display:flex; align-items:center; justify-content:space-between;">
+                            <strong>🏇 Race Replay</strong>
+                            <button type="button" id="replay-close">✕</button>
+                        </div>
+                        <div id="replay-track"></div>
+                        <p id="replay-status"></p>
+                        <ul id="replay-standings"></ul>
+                        <button type="button" id="replay-again" style="display:none">▶ Watch again</button>
+                    </div>
                 </div>
             </div>
             <div id="msg-users">

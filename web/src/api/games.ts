@@ -52,3 +52,7 @@ export function startLobby(lobbyId: number) {
 export function restartLobby(lobbyId: number) {
   return api.post<Lobby>(`/games/lobbies/${lobbyId}/restart`).then((r) => r.data);
 }
+
+export function finishLobbyGame(lobbyId: number) {
+  return api.post<Lobby>(`/games/lobbies/${lobbyId}/finish`).then((r) => r.data);
+}

@@ -39,6 +39,10 @@ class Race(Base):
     racer_names = Column(JSON, nullable=False)
     status = Column(Enum("betting_open", "racing", "resolved"), nullable=False, default="betting_open")
     winning_name = Column(String(64), nullable=True)
+    # The whole race, precomputed the instant betting closes (index 0 = step
+    # 1) — clients replay it locally against betting_closes_at as the anchor
+    # instead of us live-broadcasting one step at a time.
+    steps = Column(JSON, nullable=True)
     created_by = Column(BigInteger, nullable=False)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     betting_closes_at = Column(DateTime, nullable=False)

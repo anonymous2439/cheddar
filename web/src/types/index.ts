@@ -42,13 +42,23 @@ export interface MessageAttachment {
   mime_type: string;
 }
 
+// A "system_action" message's metadata — a system-posted chat message with
+// a button attached. `action` picks which button/behavior to render;
+// everything else is whatever that action needs (e.g. Karirs' race replay
+// carries race_id/winner). Generic on purpose: this is the first consumer,
+// not the only one a system message can ever have.
+export interface SystemActionMetadata {
+  action: string;
+  [key: string]: unknown;
+}
+
 export interface Message {
   id: number;
   conversation_id: number;
   sender_id: number;
   type: string;
   content: string | null;
-  metadata: MessageAttachment | null;
+  metadata: MessageAttachment | SystemActionMetadata | null;
   reply_to_id: number | null;
   edited_at: string | null;
   created_at: string;
@@ -59,6 +69,7 @@ export interface GameCatalogEntry {
   name: string;
   min_players: number;
   max_players: number;
+  tracks_completion: boolean;
 }
 
 export interface LobbyParticipant {
@@ -106,6 +117,10 @@ export interface KarirsRace {
   racer_names: string[];
   status: "betting_open" | "racing" | "resolved";
   winning_name: string | null;
+  // The whole race, precomputed the instant betting closed (index 0 = step
+  // 1) — null until then. Clients replay it locally, timed off
+  // betting_closes_at, instead of animating from live per-step pushes.
+  steps: Record<string, number>[] | null;
   created_by: number;
   created_at: string;
   betting_closes_at: string;
@@ -124,11 +139,11 @@ export interface KarirsBet {
 
 export type KarirsPool = Record<string, number>;
 
-export interface KarirsStepMessage {
-  type: "step";
-  step: number;
+export interface KarirsStepsMessage {
+  type: "steps";
+  steps: Record<string, number>[];
   total_steps: number;
-  positions: Record<string, number>;
+  started_at: string;
 }
 
 export interface KarirsResolvedMessage {

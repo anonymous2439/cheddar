@@ -4,3 +4,4 @@ sqlalchemy
 pymysql
 pydantic-settings
 python-jose[cryptography]
+httpx

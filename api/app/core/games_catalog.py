@@ -16,6 +16,10 @@ GAMES = [
         "name": "Karirs",
         "min_players": 1,
         "max_players": 8,
+        # Karirs has a real race session running behind the lobby (betting +
+        # animated race), so the leader can't "Back to Lobby" until the game
+        # module itself reports the race resolved via POST .../finish.
+        "tracks_completion": True,
     },
 ]
 

@@ -25,7 +25,9 @@ from app.schemas.game import (
     LobbyLeaderTransfer,
     LobbyOut,
     LobbyReadyUpdate,
+    SystemMessageCreate,
 )
+from app.schemas.conversation import MessageOut
 from app.schemas.user import UserOut
 from app.websocket.handlers import _serialize_message
 from app.websocket.manager import manager
@@ -196,9 +198,13 @@ def list_my_lobbies(db: Session = Depends(get_db), user: User = Depends(get_curr
     lobby_ids = db.query(GameLobbyParticipant.lobby_id).filter(
         GameLobbyParticipant.user_id == user.id, GameLobbyParticipant.left_at.is_(None)
     )
+    # No extra status filter needed: a lobby only shows up here if the
+    # requesting user is still an active participant (left_at IS NULL), and
+    # a genuinely abandoned lobby has none of those left — so a "finished"
+    # lobby here always means "my game session just ended, still restartable".
     lobbies = (
         db.query(GameLobby)
-        .filter(GameLobby.id.in_(lobby_ids), GameLobby.status != "finished")
+        .filter(GameLobby.id.in_(lobby_ids))
         .order_by(GameLobby.updated_at.desc())
         .all()
     )
@@ -516,6 +522,56 @@ async def start_lobby(lobby_id: int, db: Session = Depends(get_db), user: User =
     return _serialize_lobby(db, lobby)
 
 
+@router.post("/lobbies/{lobby_id}/finish", response_model=LobbyOut)
+async def finish_lobby_game(lobby_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Called by a game module (any participant's client) once its own game
+    session has genuinely concluded — e.g. Karirs calls this when a race
+    resolves. Idempotent: a no-op if the lobby isn't mid-game, so multiple
+    clients racing to report the same finish is harmless."""
+    lobby = _get_lobby_or_404(db, lobby_id)
+    _require_participant(db, lobby, user)
+
+    if lobby.status != "in_progress":
+        return _serialize_lobby(db, lobby)
+
+    lobby.status = "finished"
+    db.commit()
+    db.refresh(lobby)
+
+    await _broadcast_lobby(db, lobby)
+    return _serialize_lobby(db, lobby)
+
+
+@router.post("/lobbies/{lobby_id}/system-message", response_model=MessageOut, status_code=201)
+async def post_system_message(
+    lobby_id: int,
+    payload: SystemMessageCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """A game module reporting something into its own lobby's chat, the same
+    conversation everyone's already chatting in — not a separate feed. The
+    first use is Karirs posting a "watch the replay" button once a race
+    resolves, but `action`/`action_data` are generic so any game can reuse
+    this for its own system-driven, button-bearing messages."""
+    lobby = _get_lobby_or_404(db, lobby_id)
+    _require_participant(db, lobby, user)
+
+    message = Message(
+        conversation_id=lobby.conversation_id,
+        sender_id=user.id,
+        type="system_action",
+        content=payload.content,
+        metadata_={"action": payload.action, **payload.action_data},
+    )
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+
+    await manager.broadcast(_active_participant_ids(db, lobby.id), {"type": "message.new", "data": _serialize_message(message)})
+    return _serialize_message(message)
+
+
 @router.post("/lobbies/{lobby_id}/restart", response_model=LobbyOut)
 async def restart_lobby(lobby_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Leader-only: takes a lobby back to "waiting" after a game session so
@@ -525,8 +581,12 @@ async def restart_lobby(lobby_id: int, db: Session = Depends(get_db), user: User
     _require_participant(db, lobby, user)
     _require_leader(lobby, user)
 
-    if lobby.status != "in_progress":
+    if lobby.status not in ("in_progress", "finished"):
         raise HTTPException(status.HTTP_409_CONFLICT, "Lobby isn't in a game right now")
+
+    game = GAMES_BY_KEY.get(lobby.game_key, {})
+    if lobby.status == "in_progress" and game.get("tracks_completion"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "The game is still ongoing — wait for it to finish")
 
     lobby.status = "waiting"
     lobby.started_at = None

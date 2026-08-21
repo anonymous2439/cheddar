@@ -2,15 +2,17 @@ import asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from jose import jwt
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import Base, SessionLocal, engine, get_db
 from app.models import Bet, Race, Wallet
-from app.race import TOTAL_STEPS, step_race
+from app.race import compute_race
 from app.roster import pick_racers, record_result, seed_roster_if_empty
 from app.schemas import BetCreate, BetOut, RaceCreate, RaceOut, RaceResultOut, WalletOut
 from app.security import decode_user_id, get_current_user_id
@@ -88,11 +90,17 @@ def _get_or_create_wallet(db: Session, user_id: int) -> Wallet:
     return wallet
 
 
-def _finish_race(db: Session, race: Race, winner: str, final_positions: dict[str, float]) -> RaceResultOut:
+def _finish_race(db: Session, race: Race) -> RaceResultOut:
+    """Applies payouts and locks in the result. race.steps/winning_name are
+    already known (set the moment betting closed) — this just needs to wait
+    for the animation's natural duration to elapse before crediting wallets,
+    so nobody can learn the outcome early by polling their balance instead
+    of watching the race."""
+    final_positions = race.steps[-1] if race.steps else {}
+    winner = race.winning_name
     standings = sorted(race.racer_names, key=lambda n: final_positions.get(n, 0), reverse=True)
 
     race.status = "resolved"
-    race.winning_name = winner
     race.resolved_at = _now()
 
     # Flat function of field size (no per-racer odds yet — later, once the
@@ -117,16 +125,20 @@ def _finish_race(db: Session, race: Race, winner: str, final_positions: dict[str
 
 
 def _run_to_completion_now(db: Session, race: Race) -> RaceResultOut:
-    """Runs the whole race instantly with no broadcast/delay — used by the
-    manual ops resolve endpoint, and to recover any race whose in-memory
-    animation was lost to a process restart (can't resume mid-animation
-    positions that were never persisted, so it just concludes)."""
-    winner = None
-    final_positions: dict[str, float] = {}
-    for _step, positions, is_final, step_winner in step_race(list(race.racer_names)):
-        if is_final:
-            winner, final_positions = step_winner, positions
-    return _finish_race(db, race, winner, final_positions)
+    """Used by the manual ops resolve endpoint, and to recover a race whose
+    countdown already elapsed by the time we look at it (e.g. a process
+    restart). Reuses race.steps if a race already got as far as "racing" —
+    it was likely already shipped to a connected client, so recomputing here
+    would resolve a *different* outcome than what they were shown. Only
+    computes fresh steps for a race that never got that far."""
+    if not race.steps:
+        steps, winner = compute_race(list(race.racer_names))
+        race.status = "racing"
+        race.winning_name = winner
+        race.steps = steps
+        db.commit()
+        db.refresh(race)
+    return _finish_race(db, race)
 
 
 async def _run_race(race_id: int) -> None:
@@ -135,23 +147,33 @@ async def _run_race(race_id: int) -> None:
         if race is None or race.status != "betting_open":
             _scheduled.discard(race_id)
             return
+        steps, winner = compute_race(list(race.racer_names))
         race.status = "racing"
+        race.winning_name = winner
+        race.steps = steps
         db.commit()
-        racer_names = list(race.racer_names)
+        started_at = race.betting_closes_at
 
-    winner = None
-    final_positions: dict[str, float] = {}
-    for step, positions, is_final, step_winner in step_race(racer_names):
-        await race_sockets.broadcast(
-            race_id, {"type": "step", "step": step, "total_steps": TOTAL_STEPS, "positions": positions}
-        )
-        if is_final:
-            winner, final_positions = step_winner, positions
-        await asyncio.sleep(STEP_DELAY_SECONDS)
+    # One shot, not one message per step — the client replays this locally,
+    # timed off `started_at`, instead of waiting on a live push per tick.
+    await race_sockets.broadcast(
+        race_id,
+        {
+            "type": "steps",
+            "steps": steps,
+            "total_steps": len(steps),
+            "started_at": started_at.isoformat() + "Z",
+        },
+    )
+
+    # Still wait out the animation's real duration before paying anyone —
+    # otherwise a wallet-balance poll would reveal the outcome before the
+    # race visually finishes for anyone actually watching it.
+    await asyncio.sleep(len(steps) * STEP_DELAY_SECONDS)
 
     with SessionLocal() as db:
         race = db.get(Race, race_id)
-        result = _finish_race(db, race, winner, final_positions)
+        result = _finish_race(db, race)
         pool = _pool_totals(db, race)
     # Never broadcast result.bets here — it carries each bet's user_id, and
     # this goes out to every connected watcher. Standings + aggregate pool
@@ -165,7 +187,48 @@ async def _run_race(race_id: int) -> None:
             "pool": pool,
         },
     )
+    await _post_race_replay_message(result.race)
     _scheduled.discard(race_id)
+
+
+def _mint_cheddar_token(user_id: int) -> str:
+    """Mints a token in exactly the shape Cheddar's own login issues (see
+    api/app/core/security.py's create_access_token) — Cheddar's /games/*
+    endpoints only check the signature and claims, not where the token came
+    from, so this is enough to act as that user without a real login. Kept
+    short-lived since it only needs to survive one immediate request."""
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "app": "karirs-service",
+        "type": "access",
+        "exp": now + timedelta(minutes=2),
+        "iat": now,
+    }
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+
+async def _post_race_replay_message(race: RaceOut) -> None:
+    """Posts a "watch the replay" system message into the lobby's own chat
+    — not a separate feed, so a player doesn't have to go back to the game
+    lobby just to see how the race went. Best-effort: a failed notification
+    shouldn't break race resolution, it just means the chat doesn't get the
+    button this time (the leader can still see the result in-game)."""
+    token = _mint_cheddar_token(race.created_by)
+    payload = {
+        "content": f"\U0001f3c1 {race.winning_name} won the race! Tap below to watch a replay.",
+        "action": "karirs_race_replay",
+        "action_data": {"race_id": race.id, "winner": race.winning_name},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{settings.cheddar_api_base_url}/api/v1/games/lobbies/{race.lobby_id}/system-message",
+                json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except Exception:
+        pass
 
 
 async def _delay_then_run(race_id: int, delay_seconds: float) -> None:
@@ -265,6 +328,18 @@ def get_current_race(lobby_id: int, db: Session = Depends(get_db), _user_id: int
     return race
 
 
+@app.get("/races/{race_id}", response_model=RaceOut)
+def get_race(race_id: int, db: Session = Depends(get_db), _user_id: int = Depends(get_current_user_id)):
+    """For replaying a specific past race — "current for this lobby" only
+    ever gets the latest one, but a lobby can have many races over time
+    (every restart deals a fresh one) and a replay button always points at
+    one specific historical race by id."""
+    race = db.get(Race, race_id)
+    if race is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Race not found")
+    return race
+
+
 def _pool_totals(db: Session, race: Race) -> dict[str, int]:
     """Aggregate coins wagered per racer — never who wagered them. Shared by
     the REST endpoint below and the race websocket's final broadcast, since
@@ -347,9 +422,14 @@ def resolve_race(race_id: int, db: Session = Depends(get_db), _user_id: int = De
 
 @app.websocket("/races/{race_id}/ws")
 async def race_ws(websocket: WebSocket, race_id: int) -> None:
-    """Streams {"type":"step",...} messages while the race runs, then one
-    {"type":"resolved","data":RaceResultOut}. Connect any time after a race
-    exists — nothing is sent until betting closes and it actually starts."""
+    """Sends at most two messages over a race's life: one
+    {"type":"steps","steps":[...],"started_at":...} the instant betting
+    closes (the whole precomputed animation, for a client to replay locally
+    against `started_at`), then one {"type":"resolved",...} once payouts are
+    applied. Connect any time — nothing is sent until betting closes. A
+    client that connects after "steps" already fired won't get it over this
+    socket; it should already have `race.steps` from its own REST fetch by
+    then, so this is a supplement to that, not the only source of it."""
     user_id = decode_user_id(websocket.query_params.get("token"))
     if user_id is None:
         await websocket.close(code=4401)

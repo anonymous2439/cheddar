@@ -75,6 +75,11 @@ export function useGames() {
     [applyLobby],
   );
 
+  const finishGame = useCallback(
+    async (lobbyId: number) => applyLobby(await gamesApi.finishLobbyGame(lobbyId)),
+    [applyLobby],
+  );
+
   const kickFromLobby = useCallback(
     async (lobbyId: number, userId: number) => applyLobby(await gamesApi.kickFromLobby(lobbyId, userId)),
     [applyLobby],
@@ -122,6 +127,7 @@ export function useGames() {
     setReady,
     startLobby,
     restartLobby,
+    finishGame,
     kickFromLobby,
     transferLeader,
     inviteToLobby,

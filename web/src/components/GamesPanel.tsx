@@ -1,5 +1,12 @@
 import { useState } from "react";
+import axios from "axios";
 import type { GameCatalogEntry, Lobby } from "../types";
+
+const STATUS_LABELS: Record<Lobby["status"], string> = {
+  waiting: "waiting",
+  in_progress: "🎮 ongoing",
+  finished: "finished — ready to restart",
+};
 
 interface Props {
   catalog: GameCatalogEntry[];
@@ -20,8 +27,9 @@ export function GamesPanel({ catalog, myLobbies, selectedLobbyId, onHost, onSele
       await onJoinByCode(code.trim());
       setCode("");
       setJoinError("");
-    } catch {
-      setJoinError("Invalid or expired code");
+    } catch (err) {
+      const detail = axios.isAxiosError(err) ? (err.response?.data?.detail as string | undefined) : undefined;
+      setJoinError(detail ?? "Invalid or expired code");
     }
   }
 
@@ -79,7 +87,7 @@ export function GamesPanel({ catalog, myLobbies, selectedLobbyId, onHost, onSele
                   }`}
                 >
                   <span>{lobby.game_name}</span>
-                  <span className="text-xs text-neutral-400">{lobby.status}</span>
+                  <span className="text-xs text-neutral-400">{STATUS_LABELS[lobby.status]}</span>
                 </button>
               </li>
             ))}

@@ -32,6 +32,7 @@ class RaceOut(BaseModel):
     racer_names: list[str]
     status: str
     winning_name: str | None
+    steps: list[dict[str, float]] | None
     created_by: int
     created_at: datetime
     betting_closes_at: datetime

@@ -55,3 +55,17 @@ def step_race(racer_names: list[str]) -> Iterator[tuple[int, dict[str, float], b
 
         if is_final:
             return
+
+
+def compute_race(racer_names: list[str]) -> tuple[list[dict[str, float]], str]:
+    """Runs the whole race immediately (no delay) and returns every step's
+    positions in order — index 0 is step 1 — plus the winner. This is what
+    lets the whole animation ship to clients in one shot instead of being
+    live-broadcast step by step."""
+    steps: list[dict[str, float]] = []
+    winner = None
+    for _step, positions, is_final, step_winner in step_race(racer_names):
+        steps.append(positions)
+        if is_final:
+            winner = step_winner
+    return steps, winner

@@ -10,6 +10,7 @@ class GameCatalogEntry(BaseModel):
     name: str
     min_players: int
     max_players: int
+    tracks_completion: bool = False
 
 
 class LobbyParticipantOut(BaseModel):
@@ -57,3 +58,15 @@ class LobbyKick(BaseModel):
 
 class LobbyLeaderTransfer(BaseModel):
     user_id: int
+
+
+class SystemMessageCreate(BaseModel):
+    """A game module (any authenticated user, in practice a service-minted
+    token acting on a game's behalf) reporting something into the lobby's
+    own chat — e.g. Karirs posting a "watch the replay" button once a race
+    resolves. `action` names what the client should render as a button;
+    `action_data` is whatever that action needs (e.g. a race id)."""
+
+    content: str
+    action: str
+    action_data: dict = {}

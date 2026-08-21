@@ -52,6 +52,7 @@ interface GameCatalogEntry {
     name: string;
     min_players: number;
     max_players: number;
+    tracks_completion: boolean;
 }
 
 interface LobbyParticipant {
@@ -702,6 +703,15 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             return;
         }
 
+        if (m.type === 'system_action' && m.metadata?.action === 'karirs_race_replay') {
+            this.webviewView?.webview.postMessage({
+                type: 'log.replay',
+                text: m.content ?? '',
+                raceId: m.metadata.race_id,
+            });
+            return;
+        }
+
         const body = m.content ?? (m.metadata?.filename ? `[attachment] ${m.metadata.filename}` : '');
         this.log(`${who}» ${body}`);
     }
@@ -1060,6 +1070,17 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             }
             return;
         }
+
+        if (action === 'finish') {
+            // A game module (e.g. Karirs) reports its own session concluded —
+            // idempotent server-side, safe even if several clients call it.
+            const res = await this.authorizedFetch(`/api/v1/games/lobbies/${lobbyId}/finish`, { method: 'POST' });
+            if (res.ok) {
+                this.currentLobby = (await res.json()) as LobbyState;
+                this.renderLobby();
+            }
+            return;
+        }
     }
 
     private lobbyChatTitle(lobby: LobbyState): string {
@@ -1099,10 +1120,14 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
 
     private renderLobby() {
         if (!this.currentLobby) this.closeKarirsRaceSocket();
+        const tracksCompletion = this.currentLobby
+            ? (this.gameCatalogCache.find((g) => g.key === this.currentLobby!.game_key)?.tracks_completion ?? false)
+            : false;
         this.webviewView?.webview.postMessage({
             type: 'lobby.render',
             data: this.currentLobby ?? null,
             selfId: this.userId,
+            tracksCompletion,
         });
     }
 
@@ -1200,6 +1225,19 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                     await this.sendGameEvent('karirs', 'bet_placed', await res.json());
                     return;
                 }
+                case 'view_replay': {
+                    // Reachable straight from a "watch a replay" chat message,
+                    // whether or not any karirs game module happens to be
+                    // mounted right now — chat.js renders this into its own
+                    // dedicated replay panel, not through the game module.
+                    const raceRes = await this.karirsFetch(`/races/${data.raceId}`);
+                    if (!raceRes.ok) throw new Error(`replay fetch failed (${raceRes.status})`);
+                    const race = await raceRes.json();
+                    const poolRes = await this.karirsFetch(`/races/${data.raceId}/pool`);
+                    const pool = poolRes.ok ? await poolRes.json() : {};
+                    await this.sendGameEvent('karirs', 'replay_data', { race, pool });
+                    return;
+                }
                 default:
                     throw new Error(`unknown karirs action: ${action}`);
             }
@@ -1234,8 +1272,8 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                 return;
             }
 
-            if (event.type === 'step') {
-                void this.sendGameEvent('karirs', 'race_step', event);
+            if (event.type === 'steps') {
+                void this.sendGameEvent('karirs', 'race_steps', event);
             } else if (event.type === 'resolved') {
                 // Deliberately no per-user bets here — see the API's own
                 // comment on this broadcast; race+standings+pool only.
@@ -1325,8 +1363,15 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                     // non-leader's Ready/Start buttons hide correctly too.
                     this.currentLobby = { ...lobby, status: 'in_progress' };
                     this.log(`— ${event.data.game_name} has started! —`);
-                    this.renderLobby();
+                    // Mount before rendering the lobby, not after — renderLobby()
+                    // decides the "Rejoin Game in Progress" button's visibility by
+                    // checking whether the game stage is already showing this
+                    // lobby's game. Rendering first meant that check always saw
+                    // the pre-mount DOM state and flashed the button on every
+                    // start, even though this client was about to be in the game
+                    // a moment later anyway.
                     this.mountGame(event.data.game_key, event.data.game_name);
+                    this.renderLobby();
                 }
             } else if (event.type === 'conversation.invited') {
                 const name = event.data?.name ?? `conversation #${event.data?.id}`;

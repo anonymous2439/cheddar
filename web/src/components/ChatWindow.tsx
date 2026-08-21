@@ -1,14 +1,30 @@
 import { useEffect, useRef, useState } from "react";
-import type { Conversation, Message } from "../types";
+import type { Conversation, Message, MessageAttachment, SystemActionMetadata } from "../types";
 import { applyEmojiShortcuts } from "../lib/emoji";
 import { EmojiPicker } from "./EmojiPicker";
 import { apiBaseUrl } from "../api/client";
 import { uploadAttachment } from "../api/conversations";
+import { KarirsReplayModal } from "../games/karirs/KarirsReplayModal";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// metadata's shape depends on message type — these two just narrow it back
+// down for the one type each actually applies to, rather than widening the
+// type back to `any` at every call site.
+function asAttachment(m: Message): MessageAttachment | null {
+  if (m.type !== "image" && m.type !== "file") return null;
+  return (m.metadata as MessageAttachment | null) ?? null;
+}
+
+function karirsReplayRaceId(m: Message): number | null {
+  if (m.type !== "system_action" || !m.metadata) return null;
+  const metadata = m.metadata as SystemActionMetadata;
+  if (metadata.action !== "karirs_race_replay") return null;
+  return typeof metadata.race_id === "number" ? metadata.race_id : null;
 }
 
 interface Props {
@@ -42,6 +58,7 @@ export function ChatWindow({
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [replayRaceId, setReplayRaceId] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -222,25 +239,31 @@ export function ChatWindow({
         )}
         {messages.map((m) => {
           const isMine = m.sender_id === currentUserId;
-          const attachmentUrl = m.metadata ? `${apiBaseUrl}${m.metadata.url}` : null;
+          const attachment = asAttachment(m);
+          const attachmentUrl = attachment ? `${apiBaseUrl}${attachment.url}` : null;
+          const replayRaceIdForMessage = karirsReplayRaceId(m);
 
           return (
             <div key={m.id} className={`mb-2 flex ${isMine ? "justify-end" : "justify-start"}`}>
               <div
                 className={`max-w-[85%] rounded-lg px-3 py-2 text-sm sm:max-w-xs ${
-                  isMine ? "bg-amber-500 text-white" : "bg-neutral-100 text-neutral-900"
+                  m.type === "system_action"
+                    ? "bg-neutral-50 text-neutral-700 ring-1 ring-neutral-200"
+                    : isMine
+                      ? "bg-amber-500 text-white"
+                      : "bg-neutral-100 text-neutral-900"
                 }`}
               >
                 {m.type === "image" && attachmentUrl && (
                   <a href={attachmentUrl} target="_blank" rel="noreferrer">
                     <img
                       src={attachmentUrl}
-                      alt={m.metadata?.filename ?? "attachment"}
+                      alt={attachment?.filename ?? "attachment"}
                       className="mb-1 max-h-64 rounded"
                     />
                   </a>
                 )}
-                {m.type === "file" && attachmentUrl && m.metadata && (
+                {m.type === "file" && attachmentUrl && attachment && (
                   <a
                     href={attachmentUrl}
                     target="_blank"
@@ -250,11 +273,19 @@ export function ChatWindow({
                     }`}
                   >
                     <span>📄</span>
-                    <span className="truncate">{m.metadata.filename}</span>
-                    <span className="text-xs opacity-70">{formatBytes(m.metadata.size)}</span>
+                    <span className="truncate">{attachment.filename}</span>
+                    <span className="text-xs opacity-70">{formatBytes(attachment.size)}</span>
                   </a>
                 )}
                 {m.content}
+                {replayRaceIdForMessage !== null && (
+                  <button
+                    onClick={() => setReplayRaceId(replayRaceIdForMessage)}
+                    className="mt-2 block w-full rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 hover:bg-amber-100"
+                  >
+                    🏁 Watch Replay
+                  </button>
+                )}
               </div>
             </div>
           );
@@ -305,6 +336,10 @@ export function ChatWindow({
           Send
         </button>
       </form>
+
+      {replayRaceId !== null && (
+        <KarirsReplayModal raceId={replayRaceId} onClose={() => setReplayRaceId(null)} />
+      )}
     </div>
   );
 }

@@ -1,10 +1,15 @@
 // Karirs — a Philippine "karera" (video horse-racing betting) style game.
 // Racers are a fixed roster the Karirs API deals out itself (not the lobby's
 // players), betting is anonymous (only aggregate pool totals are visible),
-// and once the 30s betting window closes the race runs and animates live
-// over its own websocket (see extension.ts's ensureKarirsRaceSocket) — no
-// "start"/"resolve" action here at all.
+// and once the 30s betting window closes the server computes the *entire*
+// race in one shot and ships it as one message (see extension.ts's
+// ensureKarirsRaceSocket) — this client replays it locally, timed off the
+// race's betting_closes_at, rather than animating from live per-step
+// pushes. No "start"/"resolve" action here at all.
 (function () {
+    // Must match games/karirs/api/app/main.py's STEP_DELAY_SECONDS.
+    const STEP_DELAY_MS = 300;
+
     let ctx = null;
     let container = null;
     let wallet = null;
@@ -16,13 +21,24 @@
     let pollTimer = null;
     let tickTimer = null;
 
-    // Live animation state, driven entirely by 'race_step' events over the
-    // race socket — independent of the REST-polled `race` above, which can
-    // lag a couple of seconds behind. Receiving a single step is treated as
-    // "racing has started" regardless of what the last poll said.
-    let stepPositions = null;
-    let currentStep = 0;
-    let totalSteps = 100;
+    // The whole precomputed race (index 0 = step 1) plus the wall-clock
+    // instant it started — independent of the REST-polled `race` above,
+    // which can lag a couple of seconds behind. Positions for "right now"
+    // are always derived from these via currentStepInfo(), never stored
+    // directly, so a reconnect mid-race just works: elapsed time since
+    // stepsAnchorAt already reflects wherever the race actually is.
+    let raceSteps = null;
+    let stepsAnchorAt = null;
+
+    function currentStepInfo() {
+        if (!raceSteps || !stepsAnchorAt) return null;
+        const elapsedMs = Math.max(0, Date.now() - stepsAnchorAt);
+        const idx = Math.floor(elapsedMs / STEP_DELAY_MS);
+        if (idx >= raceSteps.length) {
+            return { positions: raceSteps[raceSteps.length - 1], step: raceSteps.length, total: raceSteps.length, done: true };
+        }
+        return { positions: raceSteps[idx], step: idx + 1, total: raceSteps.length, done: false };
+    }
 
     // The track's own DOM persists across step updates (see ensureTrackDom/
     // updateTrackDots below) — a CSS transition only animates a property
@@ -43,8 +59,8 @@
         myBet = null;
         selectedRacer = null;
         errorText = '';
-        stepPositions = null;
-        currentStep = 0;
+        raceSteps = null;
+        stepsAnchorAt = null;
         trackWrapperEl = null;
         trackDots = {};
         trackRaceId = null;
@@ -54,7 +70,10 @@
         window.CheddarHost.send('wallet', {});
 
         pollTimer = setInterval(poll, 2000);
-        tickTimer = setInterval(render, 1000);
+        // Fast enough to advance the track a step at a time in sync with the
+        // server's cadence (see STEP_DELAY_MS) — cheap either way, this is a
+        // handful of DOM nodes.
+        tickTimer = setInterval(render, 200);
     }
 
     function unmount() {
@@ -71,7 +90,7 @@
     }
 
     function poll() {
-        if (stepPositions || !race || race.status !== 'betting_open') return;
+        if (!race || race.status !== 'betting_open') return;
         window.CheddarHost.send('sync_race', { lobbyId: ctx.lobbyId });
         window.CheddarHost.send('pool', { raceId: race.id });
     }
@@ -90,9 +109,28 @@
             const justResolved = race && race.status === 'betting_open' && data.status === 'resolved';
             race = data;
 
+            // A REST sync can land after betting already closed (a fresh
+            // mount, or a reconnect) — race.steps is already the whole
+            // precomputed animation by then, same as if it had arrived over
+            // the socket, so this is enough to start replaying it locally.
+            if (race.steps) {
+                raceSteps = race.steps;
+                stepsAnchorAt = new Date(race.betting_closes_at + 'Z').getTime();
+                if (pollTimer) {
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                }
+            }
+
             if (isFirstLoad || justResolved) {
                 window.CheddarHost.send('pool', { raceId: race.id });
                 window.CheddarHost.send('my_bet', { raceId: race.id });
+            }
+            // Tell the lobby the race is over so the leader can go back to
+            // it — covers both a live resolution and reconnecting straight
+            // into an already-resolved race.
+            if (race.status === 'resolved' && (isFirstLoad || justResolved)) {
+                window.CheddarHost.finishGame();
             }
         } else if (event === 'wallet') {
             wallet = data;
@@ -108,18 +146,26 @@
             myBet = data;
             window.CheddarHost.send('wallet', {});
             window.CheddarHost.send('pool', { raceId: race.id });
-        } else if (event === 'race_step') {
+        } else if (event === 'race_steps') {
+            // The whole animation, in one message — not a per-tick push.
             if (pollTimer) {
                 clearInterval(pollTimer);
                 pollTimer = null;
             }
-            stepPositions = data.positions;
-            currentStep = data.step;
-            totalSteps = data.total_steps;
+            raceSteps = data.steps;
+            // Unlike race.betting_closes_at (a naive REST field — needs the
+            // client to append 'Z' itself), the API already appends 'Z' to
+            // this WS field server-side (main.py: `.isoformat() + "Z"`).
+            // Appending it again here silently produced an invalid date —
+            // Date.parse gives NaN, not a throw — so raceSteps looked set
+            // but currentStepInfo() always bailed, never showing a track.
+            stepsAnchorAt = new Date(data.started_at).getTime();
+            if (race) race.status = 'racing';
         } else if (event === 'race_finished') {
             race = data.race;
             pool = data.pool;
             window.CheddarHost.send('my_bet', { raceId: race.id });
+            window.CheddarHost.finishGame();
         } else if (event === 'error') {
             errorText = data.message;
         }
@@ -177,8 +223,9 @@
             return;
         }
 
-        const isRacing = !!stepPositions && race.status !== 'resolved';
+        const isRacing = race.status === 'racing';
         const isResolved = race.status === 'resolved';
+        const stepInfo = isRacing || isResolved ? currentStepInfo() : null;
 
         if (!isRacing && !isResolved) {
             const title = document.createElement('p');
@@ -190,11 +237,11 @@
             const title = document.createElement('p');
             title.textContent = isResolved
                 ? `🏁 ${race.winning_name} wins!`
-                : `🏇 racing… (${currentStep}/${totalSteps})`;
+                : `🏇 racing… (${stepInfo ? stepInfo.step : 0}/${stepInfo ? stepInfo.total : 0})`;
             chromeTopEl.appendChild(title);
-            if (stepPositions) {
+            if (stepInfo) {
                 ensureTrackDom();
-                updateTrackDots();
+                updateTrackDots(stepInfo.positions);
             }
             if (isResolved) renderResult();
         }
@@ -264,13 +311,13 @@
 
     // Only mutates the existing dots/labels built above — this is what
     // actually lets the CSS transition on `left` animate smoothly.
-    function updateTrackDots() {
+    function updateTrackDots(positions) {
         race.racer_names.forEach((name) => {
             const els = trackDots[name];
             if (!els) return;
             const isMine = myBet && myBet.racer_name === name;
             const isWinner = race.status === 'resolved' && name === race.winning_name;
-            const pct = Math.max(0, Math.min(100, stepPositions[name] ?? 0));
+            const pct = Math.max(0, Math.min(100, positions[name] ?? 0));
 
             els.label.textContent = `${isMine ? '★ ' : ''}${name}${isWinner ? ' 🏆' : ''}`;
             els.label.style.color = isWinner ? '#ffd76a' : '#ffffffcc';

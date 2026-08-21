@@ -41,6 +41,7 @@ export function ChatPage() {
     setReady,
     startLobby,
     restartLobby,
+    finishGame,
     kickFromLobby,
     transferLeader,
     inviteToLobby,
@@ -157,6 +158,8 @@ export function ChatPage() {
               onTransferLeader={(userId) => transferLeader(currentLobby.id, userId)}
               onInviteFriend={(userId) => inviteToLobby(currentLobby.id, userId)}
               onGetInviteCode={() => getInviteCode(currentLobby.id)}
+              onGameFinished={() => finishGame(currentLobby.id)}
+              gameTracksCompletion={catalog.find((g) => g.key === currentLobby.game_key)?.tracks_completion ?? false}
             />
           ) : (
             <div className="hidden h-full items-center justify-center text-neutral-400 md:flex">

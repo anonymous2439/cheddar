@@ -32,6 +32,10 @@ export function syncRace(lobbyId: number) {
   return karirsApi.post<KarirsRace>("/races", { lobby_id: lobbyId }).then((r) => r.data);
 }
 
+export function getRace(raceId: number) {
+  return karirsApi.get<KarirsRace>(`/races/${raceId}`).then((r) => r.data);
+}
+
 export function getPool(raceId: number) {
   return karirsApi.get<KarirsPool>(`/races/${raceId}/pool`).then((r) => r.data);
 }

@@ -1,118 +1,15 @@
 import axios from "axios";
 import { useEffect, useRef, useState } from "react";
 import * as karirsApi from "../../api/karirs";
-import type { KarirsBet, KarirsPool, KarirsRace, KarirsResolvedMessage, KarirsStepMessage, KarirsWallet, Lobby } from "../../types";
-
-// Must match games/karirs/api/app/race.py and main.py — the server never
-// tells us these, they're just the game's fixed parameters.
-const STEP_DELAY_MS = 300;
-const FINISH_LINE = 100;
-
-const RACER_COLORS = ["#f59e0b", "#3b82f6", "#ef4444", "#10b981", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316"];
-
-interface StepState {
-  prev: Record<string, number> | null;
-  last: Record<string, number> | null;
-  lastAt: number;
-  step: number;
-  totalSteps: number;
-}
-
-function truncateToWidth(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
-  if (ctx.measureText(text).width <= maxWidth) return text;
-  let t = text;
-  while (t.length > 1 && ctx.measureText(t + "…").width > maxWidth) t = t.slice(0, -1);
-  return t + "…";
-}
-
-// Canvas, not CSS/DOM — a browser game screen deserves real graphics, and
-// unlike the vscode client (a webview log with CSS-transitioned dots) there's
-// no "recreate the DOM every frame defeats the transition" trap to fall into
-// here: canvas redraws from scratch every frame by design, so interpolating
-// between the last two server positions here just works.
-function renderTrack(
-  canvas: HTMLCanvasElement,
-  race: KarirsRace,
-  steps: StepState,
-  myBet: KarirsBet | null,
-) {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const dpr = window.devicePixelRatio || 1;
-  const cssWidth = canvas.clientWidth;
-  const cssHeight = canvas.clientHeight;
-  if (cssWidth === 0 || cssHeight === 0) return;
-  if (canvas.width !== cssWidth * dpr || canvas.height !== cssHeight * dpr) {
-    canvas.width = cssWidth * dpr;
-    canvas.height = cssHeight * dpr;
-  }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-  const names = race.racer_names;
-  const laneHeight = cssHeight / names.length;
-  const trackLeft = 96;
-  const trackRight = cssWidth - 28;
-  const trackWidth = Math.max(1, trackRight - trackLeft);
-
-  ctx.fillStyle = "#fafaf9";
-  ctx.fillRect(0, 0, cssWidth, cssHeight);
-
-  const now = performance.now();
-  const t = steps.last && steps.lastAt ? Math.min(1, (now - steps.lastAt) / STEP_DELAY_MS) : 1;
-
-  names.forEach((name, i) => {
-    const laneTop = laneHeight * i;
-    const y = laneTop + laneHeight / 2;
-
-    ctx.fillStyle = i % 2 === 0 ? "#f0efed" : "#fafaf9";
-    ctx.fillRect(0, laneTop, cssWidth, laneHeight);
-
-    const isMine = myBet?.racer_name === name;
-    const isWinner = race.status === "resolved" && name === race.winning_name;
-
-    ctx.font = isMine ? "bold 12px system-ui, sans-serif" : "12px system-ui, sans-serif";
-    ctx.fillStyle = isWinner ? "#b45309" : "#404040";
-    ctx.textBaseline = "middle";
-    const label = `${isMine ? "★ " : ""}${name}`;
-    ctx.fillText(truncateToWidth(ctx, label, trackLeft - 12), 6, y);
-
-    const prevPos = steps.prev?.[name] ?? 0;
-    const lastPos = steps.last?.[name] ?? 0;
-    const pos = prevPos + (lastPos - prevPos) * t;
-    const pct = Math.max(0, Math.min(1, pos / FINISH_LINE));
-    const x = trackLeft + pct * trackWidth;
-
-    ctx.beginPath();
-    ctx.fillStyle = RACER_COLORS[i % RACER_COLORS.length];
-    ctx.arc(x, y, 7, 0, Math.PI * 2);
-    ctx.fill();
-    if (isMine) {
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = "#171717";
-      ctx.stroke();
-    }
-
-    if (isWinner) {
-      ctx.font = "13px system-ui, sans-serif";
-      ctx.fillText("🏆", x + 12, y);
-    }
-  });
-
-  ctx.strokeStyle = "#d4d4d4";
-  ctx.setLineDash([4, 4]);
-  ctx.beginPath();
-  ctx.moveTo(trackRight, 0);
-  ctx.lineTo(trackRight, cssHeight);
-  ctx.stroke();
-  ctx.setLineDash([]);
-}
+import { computePlayback, renderTrack } from "./render";
+import type { KarirsBet, KarirsPool, KarirsRace, KarirsResolvedMessage, KarirsStepsMessage, KarirsWallet, Lobby } from "../../types";
 
 interface Props {
   lobby: Lobby;
+  onFinished?: () => void;
 }
 
-export function KarirsGame({ lobby }: Props) {
+export function KarirsGame({ lobby, onFinished }: Props) {
   const [wallet, setWallet] = useState<KarirsWallet | null>(null);
   const [race, setRace] = useState<KarirsRace | null>(null);
   const [pool, setPool] = useState<KarirsPool | null>(null);
@@ -123,7 +20,6 @@ export function KarirsGame({ lobby }: Props) {
   const [, forceTick] = useState(0);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const stepsRef = useRef<StepState>({ prev: null, last: null, lastAt: 0, step: 0, totalSteps: 150 });
   const raceRef = useRef<KarirsRace | null>(null);
   const myBetRef = useRef<KarirsBet | null>(null);
   const lastProcessedRef = useRef<{ id: number; status: string } | null>(null);
@@ -144,7 +40,6 @@ export function KarirsGame({ lobby }: Props) {
     setMyBet(null);
     setSelectedRacer(null);
     setError("");
-    stepsRef.current = { prev: null, last: null, lastAt: 0, step: 0, totalSteps: 150 };
     lastProcessedRef.current = null;
 
     karirsApi
@@ -190,7 +85,14 @@ export function KarirsGame({ lobby }: Props) {
         })
         .catch(() => {});
     }
-  }, [race]);
+
+    // Tell the lobby the race is over so the leader can "Back to Lobby" —
+    // this is what lets restart() unblock instead of leaving the lobby
+    // stuck "in_progress" forever with a finished race behind it.
+    if (race.status === "resolved" && (isNewRace || justResolved)) {
+      onFinished?.();
+    }
+  }, [race, onFinished]);
 
   // Live pool totals while betting is open.
   useEffect(() => {
@@ -208,27 +110,31 @@ export function KarirsGame({ lobby }: Props) {
     return () => clearInterval(interval);
   }, [race?.id, race?.status]);
 
+  // The "Racing… (step/total)" text isn't drawn on the canvas (the canvas
+  // redraws every animation frame regardless), so it needs its own re-render
+  // ticks while animating — the canvas itself doesn't depend on this.
+  useEffect(() => {
+    if (!race || race.status !== "racing") return;
+    const interval = setInterval(() => forceTick((n) => n + 1), 200);
+    return () => clearInterval(interval);
+  }, [race?.id, race?.status]);
+
   // The race's own websocket — separate from the Cheddar chat socket, since
-  // this belongs to a different, independent API.
+  // this belongs to a different, independent API. Only ever carries at most
+  // two messages now: the whole precomputed race the instant betting
+  // closes, then the final resolved result — no more one message per step.
   useEffect(() => {
     if (!race) return;
     const ws = new WebSocket(karirsApi.karirsWsUrl(race.id));
     ws.onmessage = (event) => {
-      let msg: KarirsStepMessage | KarirsResolvedMessage;
+      let msg: KarirsStepsMessage | KarirsResolvedMessage;
       try {
         msg = JSON.parse(event.data);
       } catch {
         return;
       }
-      if (msg.type === "step") {
-        const s = stepsRef.current;
-        stepsRef.current = {
-          prev: s.last ?? msg.positions,
-          last: msg.positions,
-          lastAt: performance.now(),
-          step: msg.step,
-          totalSteps: msg.total_steps,
-        };
+      if (msg.type === "steps") {
+        setRace((prev) => (prev ? { ...prev, status: "racing", steps: msg.steps } : prev));
         forceTick((n) => n + 1);
       } else if (msg.type === "resolved") {
         setRace(msg.race);
@@ -239,13 +145,24 @@ export function KarirsGame({ lobby }: Props) {
   }, [race?.id]);
 
   // Draw loop runs continuously off refs — no need to depend on state that
-  // changes every animation frame.
+  // changes every animation frame. Recomputes playback position from
+  // scratch every frame off race.steps + elapsed wall-clock time.
   useEffect(() => {
     let rafId: number;
     function draw() {
       const canvas = canvasRef.current;
-      if (canvas && raceRef.current) {
-        renderTrack(canvas, raceRef.current, stepsRef.current, myBetRef.current);
+      const currentRace = raceRef.current;
+      if (canvas && currentRace) {
+        const anchor = new Date(currentRace.betting_closes_at + "Z").getTime();
+        const playback = computePlayback(currentRace.steps ?? [], anchor, Date.now());
+        renderTrack(
+          canvas,
+          currentRace.racer_names,
+          currentRace.winning_name,
+          currentRace.status === "resolved",
+          playback,
+          myBetRef.current?.racer_name ?? null,
+        );
       }
       rafId = requestAnimationFrame(draw);
     }
@@ -285,6 +202,9 @@ export function KarirsGame({ lobby }: Props) {
   const secondsLeft = isBetting
     ? Math.max(0, Math.round((new Date(race.betting_closes_at + "Z").getTime() - Date.now()) / 1000))
     : 0;
+  const playback = !isBetting
+    ? computePlayback(race.steps ?? [], new Date(race.betting_closes_at + "Z").getTime(), Date.now())
+    : null;
 
   return (
     <div className="flex h-full flex-col overflow-y-auto p-4">
@@ -295,7 +215,7 @@ export function KarirsGame({ lobby }: Props) {
 
       <p className="mb-2 text-sm text-neutral-600">
         {isBetting && `Betting closes in ${secondsLeft}s`}
-        {!isBetting && !isResolved && `Racing… (${stepsRef.current.step}/${stepsRef.current.totalSteps})`}
+        {!isBetting && !isResolved && `Racing… (${playback?.stepDisplay ?? 0}/${playback?.totalSteps ?? 0})`}
         {isResolved && `🏁 ${race.winning_name} wins!`}
       </p>
 

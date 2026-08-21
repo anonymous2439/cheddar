@@ -14,6 +14,8 @@ interface Props {
   onTransferLeader: (userId: number) => void;
   onInviteFriend: (userId: number) => void;
   onGetInviteCode: () => Promise<string>;
+  onGameFinished: () => void;
+  gameTracksCompletion: boolean;
 }
 
 export function LobbyRoom({
@@ -28,6 +30,8 @@ export function LobbyRoom({
   onTransferLeader,
   onInviteFriend,
   onGetInviteCode,
+  onGameFinished,
+  gameTracksCompletion,
 }: Props) {
   const [showInvite, setShowInvite] = useState(false);
   const [inviteCode, setInviteCode] = useState<string | null>(lobby.invite_code);
@@ -36,41 +40,39 @@ export function LobbyRoom({
   const me = lobby.participants.find((p) => p.user.id === currentUserId);
   const isLeader = !!me?.is_leader;
   const isLive = lobby.status !== "waiting";
+  const isOngoing = lobby.status === "in_progress" && gameTracksCompletion;
   const allReady = lobby.participants.length > 0 && lobby.participants.every((p) => p.is_ready);
   const memberIds = new Set(lobby.participants.map((p) => p.user.id));
   const invitableFriends = friends.filter((f) => !memberIds.has(f.id));
 
   if (isLive) {
+    const backToLobbyChrome = isLeader && (
+      <div className="border-t border-neutral-200 p-3">
+        {isOngoing ? (
+          <p className="text-xs text-neutral-500">🎮 Game in progress — invites are disabled until it finishes.</p>
+        ) : (
+          <button
+            onClick={onRestart}
+            className="rounded bg-neutral-800 px-3 py-1.5 text-sm text-white hover:bg-neutral-900"
+          >
+            Back to Lobby
+          </button>
+        )}
+      </div>
+    );
+
     if (lobby.game_key === "karirs") {
       return (
         <div className="flex h-full flex-col">
-          <KarirsGame lobby={lobby} />
-          {isLeader && (
-            <div className="border-t border-neutral-200 p-3">
-              <button
-                onClick={onRestart}
-                className="rounded bg-neutral-800 px-3 py-1.5 text-sm text-white hover:bg-neutral-900"
-              >
-                Back to Lobby
-              </button>
-            </div>
-          )}
+          <KarirsGame lobby={lobby} onFinished={onGameFinished} />
+          {backToLobbyChrome}
         </div>
       );
     }
     return (
       <div className="p-6 text-sm text-neutral-500">
         {lobby.game_name} isn't available on the web yet — try it from the vscode extension.
-        {isLeader && (
-          <div className="mt-3">
-            <button
-              onClick={onRestart}
-              className="rounded bg-neutral-800 px-3 py-1.5 text-sm text-white hover:bg-neutral-900"
-            >
-              Back to Lobby
-            </button>
-          </div>
-        )}
+        {backToLobbyChrome}
       </div>
     );
   }

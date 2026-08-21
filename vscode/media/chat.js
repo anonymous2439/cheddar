@@ -22,10 +22,17 @@ const lobbyHintEl = document.getElementById('lobby-hint');
 const chatTitleEl = document.getElementById('chat-title');
 const gameStageEl = document.getElementById('game-stage');
 
+const replayViewEl = document.getElementById('replay-view');
+const replayTrackEl = document.getElementById('replay-track');
+const replayStatusEl = document.getElementById('replay-status');
+const replayStandingsEl = document.getElementById('replay-standings');
+const replayAgainBtn = document.getElementById('replay-again');
+
 // So the "rejoin" button's click handler can mount the right game without a
 // round trip to the host — renderLobby() already gets everything it needs.
 let lastLobby = null;
 let lastSelfId = null;
+let lastTracksCompletion = false;
 
 // Receive messages from extension
 window.addEventListener('message', event => {
@@ -58,7 +65,7 @@ window.addEventListener('message', event => {
         renderCatalog(msg.data ?? []);
     }
     else if (msg.type === 'lobby.render') {
-        renderLobby(msg.data, msg.selfId);
+        renderLobby(msg.data, msg.selfId, msg.tracksCompletion);
     }
     else if (msg.type === 'chat.title') {
         chatTitleEl.textContent = msg.text ?? '';
@@ -67,11 +74,157 @@ window.addEventListener('message', event => {
     else if (msg.type === 'game.mount') {
         mountGame(msg);
     }
+    else if (msg.type === 'log.replay') {
+        const p = document.createElement('p');
+        p.textContent = msg.text + ' — ';
+        const replayBtn = document.createElement('button');
+        replayBtn.type = 'button';
+        replayBtn.textContent = 'Watch Replay';
+        replayBtn.style.background = '#c4c4c454';
+        replayBtn.style.color = '#ffffffaa';
+        replayBtn.style.border = 'unset';
+        replayBtn.style.padding = '0px 8px';
+        replayBtn.style.fontSize = 'inherit';
+        replayBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'game.action', gameKey: 'karirs', action: 'view_replay', data: { raceId: msg.raceId } });
+        });
+        p.appendChild(replayBtn);
+        msgContent.appendChild(p);
+        msgContainer.scrollTop = msgContainer.scrollHeight;
+    }
     else if (msg.type === 'game.event') {
-        const game = window.CheddarGames && window.CheddarGames[msg.gameKey];
-        if (game && game.onEvent) game.onEvent(msg.event, msg.data);
+        // A replay is watchable straight from chat whether or not any karirs
+        // game module happens to be mounted right now — it renders into its
+        // own dedicated panel below, never through the game module.
+        if (msg.event === 'replay_data') {
+            renderReplay(msg.data);
+        } else {
+            if (msg.event === 'error' && replayViewEl.style.display === 'block' && !replayRace) {
+                replayStatusEl.textContent = `⚠ ${msg.data.message}`;
+            }
+            const game = window.CheddarGames && window.CheddarGames[msg.gameKey];
+            if (game && game.onEvent) game.onEvent(msg.event, msg.data);
+        }
     }
 });
+
+// -----------------------------
+// 🔹 Race replay — a one-off playback of a past, already-resolved race,
+// reachable straight from a "watch a replay" chat message. Lives in the host
+// chrome (not the karirs game module) since it's watchable with no active
+// game session at all. Same lane/dot visual language as the live game for
+// consistency, but its own small self-contained renderer: no betting, no
+// wallet, just "replay this exact race" driven by a local anchor timestamp
+// instead of the race's real betting_closes_at.
+// -----------------------------
+const REPLAY_STEP_DELAY_MS = 300;
+
+let replayRace = null;
+let replayPool = null;
+let replayAnchorAt = 0;
+let replayTickTimer = null;
+let replayDots = {};
+
+function replayStepInfo() {
+    if (!replayRace || !replayRace.steps || !replayRace.steps.length) return null;
+    const steps = replayRace.steps;
+    const elapsed = Math.max(0, Date.now() - replayAnchorAt);
+    const idx = Math.floor(elapsed / REPLAY_STEP_DELAY_MS);
+    if (idx >= steps.length) {
+        return { positions: steps[steps.length - 1], step: steps.length, total: steps.length, done: true };
+    }
+    return { positions: steps[idx], step: idx + 1, total: steps.length, done: false };
+}
+
+function ensureReplayTrackDom() {
+    replayTrackEl.innerHTML = '';
+    replayDots = {};
+    replayRace.racer_names.forEach((name) => {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '6px';
+        row.style.margin = '3px 0';
+
+        const label = document.createElement('span');
+        label.style.width = '90px';
+        label.style.flex = 'none';
+        label.style.overflow = 'hidden';
+        label.style.textOverflow = 'ellipsis';
+        label.style.whiteSpace = 'nowrap';
+        label.style.fontSize = '9px';
+        row.appendChild(label);
+
+        const lane = document.createElement('div');
+        lane.style.position = 'relative';
+        lane.style.flex = '1';
+        lane.style.height = '14px';
+        lane.style.background = '#ffffff14';
+        lane.style.borderRadius = '3px';
+
+        const dot = document.createElement('span');
+        dot.style.position = 'absolute';
+        dot.style.top = '50%';
+        dot.style.left = '0%';
+        dot.style.width = '8px';
+        dot.style.height = '8px';
+        dot.style.borderRadius = '50%';
+        dot.style.transform = 'translate(-50%, -50%)';
+        dot.style.transition = 'left 0.3s linear';
+        lane.appendChild(dot);
+        row.appendChild(lane);
+
+        replayTrackEl.appendChild(row);
+        replayDots[name] = { label, dot };
+    });
+}
+
+function updateReplayView() {
+    const info = replayStepInfo();
+    if (!info) return;
+
+    replayRace.racer_names.forEach((name) => {
+        const els = replayDots[name];
+        if (!els) return;
+        const isWinner = name === replayRace.winning_name;
+        const pct = Math.max(0, Math.min(100, info.positions[name] ?? 0));
+        els.label.textContent = `${name}${isWinner ? ' 🏆' : ''}`;
+        els.label.style.color = isWinner ? '#ffd76a' : '#ffffffcc';
+        els.dot.style.left = `${pct}%`;
+        els.dot.style.background = isWinner ? '#ffd76a' : '#0080BAc4';
+    });
+
+    replayStatusEl.textContent = info.done ? `🏁 ${replayRace.winning_name} won!` : `racing… (${info.step}/${info.total})`;
+
+    replayStandingsEl.innerHTML = '';
+    replayRace.racer_names.forEach((name) => {
+        const li = document.createElement('li');
+        const total = replayPool ? (replayPool[name] ?? 0) : 0;
+        li.textContent = `${name === replayRace.winning_name ? '🏆 ' : ''}${name} — pool: ${total}`;
+        replayStandingsEl.appendChild(li);
+    });
+
+    replayAgainBtn.style.display = info.done ? 'inline-block' : 'none';
+}
+
+function renderReplay(data) {
+    replayRace = data.race;
+    replayPool = data.pool;
+    replayAnchorAt = Date.now();
+    replayViewEl.style.display = 'block';
+    ensureReplayTrackDom();
+    if (replayTickTimer) clearInterval(replayTickTimer);
+    replayTickTimer = setInterval(updateReplayView, 200);
+    updateReplayView();
+}
+
+function closeReplay() {
+    if (replayTickTimer) clearInterval(replayTickTimer);
+    replayTickTimer = null;
+    replayViewEl.style.display = 'none';
+    replayRace = null;
+    replayPool = null;
+}
 
 // Bridge for a mounted game module to reach the extension host — the host
 // holds the access token and does the actual fetch, the module never talks
@@ -82,6 +235,12 @@ window.CheddarHost = {
         const gameKey = gameStageEl.dataset.mountedKey;
         if (!gameKey) return;
         vscode.postMessage({ type: 'game.action', gameKey, action, data });
+    },
+    // Lobby-level, not game-API-level — tells Cheddar itself (not the game's
+    // own backend) that this game's session has concluded, so the leader's
+    // "Back to Lobby" unblocks. Idempotent server-side.
+    finishGame() {
+        vscode.postMessage({ type: 'game', action: 'finish' });
     },
 };
 
@@ -121,9 +280,10 @@ function renderCatalog(games) {
     });
 }
 
-function renderLobby(lobby, selfId) {
+function renderLobby(lobby, selfId, tracksCompletion) {
     lastLobby = lobby;
     lastSelfId = selfId;
+    lastTracksCompletion = tracksCompletion;
 
     if (!lobby) {
         lobbyViewEl.style.display = 'none';
@@ -157,17 +317,20 @@ function renderLobby(lobby, selfId) {
     });
 
     const gameLive = lobby.status !== 'waiting';
+    const isOngoing = lobby.status === 'in_progress' && tracksCompletion;
     lobbyReadyBtn.style.display = gameLive ? 'none' : 'inline-block';
     lobbyReadyBtn.textContent = me?.is_ready ? 'Unready' : 'Ready';
     lobbyStartBtn.style.display = isLeader && !gameLive ? 'inline-block' : 'none';
     lobbyStartBtn.disabled = !allReady;
-    lobbyHintEl.textContent = gameLive
-        ? ''
-        : isLeader
-            ? (allReady ? 'all ready — Start when you are' : 'waiting for everyone to ready up')
-            : '/lobby invite <username> to add a friend';
+    lobbyHintEl.textContent = isOngoing
+        ? '🎮 game in progress — invites disabled until it finishes'
+        : gameLive
+            ? ''
+            : isLeader
+                ? (allReady ? 'all ready — Start when you are' : 'waiting for everyone to ready up')
+                : '/lobby invite <username> to add a friend';
 
-    lobbyRestartBtn.style.display = isLeader && gameLive ? 'inline-block' : 'none';
+    lobbyRestartBtn.style.display = isLeader && gameLive && !isOngoing ? 'inline-block' : 'none';
     lobbyInviteBtn.style.display = gameLive ? 'none' : 'inline-block';
     if (gameLive) lobbyInviteRow.style.display = 'none';
 
@@ -241,7 +404,7 @@ window.addEventListener('click', (e) => {
             leaderId: lastLobby.leader_id,
             participants: lastLobby.participants.map(p => p.user),
         });
-        renderLobby(lastLobby, lastSelfId);
+        renderLobby(lastLobby, lastSelfId, lastTracksCompletion);
     }
     else if (e.target.id === 'game-drawer-lock') {
         const isUnlocked = msgEl.classList.contains('unlocked');
@@ -251,5 +414,11 @@ window.addEventListener('click', (e) => {
         } else {
             msgEl.classList.add('unlocked');
         }
+    }
+    else if (e.target.id === 'replay-close') {
+        closeReplay();
+    }
+    else if (e.target.id === 'replay-again') {
+        replayAnchorAt = Date.now();
     }
 });
