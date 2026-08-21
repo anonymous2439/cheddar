@@ -23,6 +23,10 @@ export function KarirsGame({ lobby, onFinished }: Props) {
   const raceRef = useRef<KarirsRace | null>(null);
   const myBetRef = useRef<KarirsBet | null>(null);
   const lastProcessedRef = useRef<{ id: number; status: string } | null>(null);
+  // Read via a ref (not a WS-effect dependency) so the race socket doesn't
+  // reconnect every time the parent re-renders with a new inline callback —
+  // it only needs the latest onFinished at the moment resolution fires.
+  const onFinishedRef = useRef(onFinished);
 
   useEffect(() => {
     raceRef.current = race;
@@ -30,6 +34,9 @@ export function KarirsGame({ lobby, onFinished }: Props) {
   useEffect(() => {
     myBetRef.current = myBet;
   }, [myBet]);
+  useEffect(() => {
+    onFinishedRef.current = onFinished;
+  }, [onFinished]);
 
   // New lobby focused — reset everything and get/create its race.
   useEffect(() => {
@@ -64,12 +71,18 @@ export function KarirsGame({ lobby, onFinished }: Props) {
   // once more on resolution to pick up the final payout — not on every
   // poll tick, which is exactly the stale-response bug the vscode client
   // hit (an old pre-resolution null-payout response landing after the
-  // resolved one and clobbering a correct payout).
+  // resolved one and clobbering a correct payout). In practice the WS
+  // "resolved" handler above already covers a live viewer (guaranteed to
+  // fire exactly once); this is the fallback for a REST poll noticing
+  // resolution instead — e.g. a dropped WS message — so it checks "wasn't
+  // resolved before, is now" rather than specifically "was betting_open",
+  // since a live race's status always passes through "racing" first and
+  // would never match the latter.
   useEffect(() => {
     if (!race) return;
     const prevEntry = lastProcessedRef.current;
     const isNewRace = !prevEntry || prevEntry.id !== race.id;
-    const justResolved = !isNewRace && prevEntry.status === "betting_open" && race.status === "resolved";
+    const justResolved = !isNewRace && prevEntry.status !== "resolved" && race.status === "resolved";
     lastProcessedRef.current = { id: race.id, status: race.status };
 
     if (isNewRace || justResolved) {
@@ -139,6 +152,17 @@ export function KarirsGame({ lobby, onFinished }: Props) {
       } else if (msg.type === "resolved") {
         setRace(msg.race);
         setPool(msg.pool);
+        // Fetched directly here, not left to the effect below — that one
+        // gates on a direct betting_open->resolved transition, which a live
+        // viewer's race never actually has (it always passes through
+        // "racing" first via the "steps" message above), so it would never
+        // fire for anyone actually watching. This WS message is the one
+        // signal guaranteed to fire exactly once, right when the race
+        // resolves — the right place to pick up the final payout, the
+        // updated wallet, and unblock the leader's "Back to Lobby".
+        karirsApi.getMyBet(msg.race.id).then((bets) => setMyBet(bets[0] ?? null)).catch(() => {});
+        karirsApi.getWallet().then(setWallet).catch(() => {});
+        onFinishedRef.current?.();
       }
     };
     return () => ws.close();
@@ -234,6 +258,9 @@ export function KarirsGame({ lobby, onFinished }: Props) {
                 }`}
               >
                 <div>{name}</div>
+                <div className="text-xs font-semibold text-amber-600">
+                  {race.payout_multipliers?.[name]?.toFixed(2) ?? "?"}x payout
+                </div>
                 <div className="text-xs text-neutral-400">pool: {pool?.[name] ?? 0}</div>
               </button>
             ))}
@@ -264,7 +291,7 @@ export function KarirsGame({ lobby, onFinished }: Props) {
           {race.racer_names.map((name) => (
             <li key={name} className={name === race.winning_name ? "font-semibold text-amber-700" : "text-neutral-600"}>
               {name === race.winning_name ? "🏆 " : ""}
-              {name} — pool: {pool?.[name] ?? 0}
+              {name} — {race.payout_multipliers?.[name]?.toFixed(2) ?? "?"}x — pool: {pool?.[name] ?? 0}
             </li>
           ))}
         </ul>

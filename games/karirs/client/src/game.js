@@ -108,7 +108,7 @@
             // payout) responses could land after the resolved one and
             // clobber a correct payout with a stale null.
             const isFirstLoad = race === null;
-            const justResolved = race && race.status === 'betting_open' && data.status === 'resolved';
+            const justResolved = race && race.status !== 'resolved' && data.status === 'resolved';
             race = data;
 
             // A REST sync can land after betting already closed (a fresh
@@ -167,6 +167,7 @@
             race = data.race;
             pool = data.pool;
             window.CheddarHost.send('my_bet', { raceId: race.id });
+            window.CheddarHost.send('wallet', {});
             window.CheddarHost.finishGame();
         } else if (event === 'error') {
             errorText = data.message;
@@ -382,15 +383,19 @@
             const row = document.createElement('div');
             const total = pool ? (pool[name] ?? 0) : 0;
             const marker = !myBet && name === selectedRacer ? '▶ ' : '';
+            // Frozen the moment betting opened (see karirs' roster.compute_payout_multipliers)
+            // — a racer with a stronger overall win/loss record pays less, a longshot pays more.
+            const multiplier = race.payout_multipliers ? race.payout_multipliers[name] : null;
+            const odds = multiplier != null ? ` — ${multiplier.toFixed(2)}x payout` : '';
 
             if (myBet) {
                 const label = document.createElement('span');
-                label.textContent = `${name === myBet.racer_name ? '★ ' : ''}${name} — pool: ${total}`;
+                label.textContent = `${name === myBet.racer_name ? '★ ' : ''}${name}${odds} — pool: ${total}`;
                 row.appendChild(label);
             } else {
                 const btn = document.createElement('button');
                 btn.type = 'button';
-                btn.textContent = `${marker}${name} — pool: ${total}`;
+                btn.textContent = `${marker}${name}${odds} — pool: ${total}`;
                 styleButton(btn);
                 btn.addEventListener('click', () => {
                     selectedRacer = name;

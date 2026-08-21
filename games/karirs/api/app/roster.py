@@ -6,6 +6,25 @@ from app.models import Racer
 
 DEFAULT_RACER_COUNT = 4
 
+# Same 10% cut the old flat multiplier used ((field_size - 1) * 0.9, back
+# when every racer had identical odds) — now applied per-racer against each
+# one's own estimated win probability instead of a shared field-size shape.
+HOUSE_EDGE_FACTOR = 0.9
+
+# How many "virtual races" of a neutral (1 / field size) win rate a racer's
+# real record is blended with. Keeps a thin or empty history from reading as
+# a sure thing or a lock — right now every racer is at 0 races/0 wins, so
+# everyone starts out exactly at the neutral rate (identical odds, matching
+# today's behavior) and only drifts as real results accumulate.
+PRIOR_STRENGTH = 4.0
+
+# Clamp on how much a racer's estimated skill can bias their actual speed
+# rolls in the sim — enough that favorites noticeably tend to finish better,
+# never so much that the field's longshot becomes hopeless or the favorite
+# becomes unbeatable.
+MIN_SPEED_FACTOR = 0.8
+MAX_SPEED_FACTOR = 1.3
+
 # Seeded once on first startup if the table is empty — easy to grow later
 # by just inserting more rows into `racers`.
 SEED_NAMES = [
@@ -42,3 +61,41 @@ def record_result(db: Session, racer_names: list[str], winner: str) -> None:
             racer.wins += 1
         else:
             racer.losses += 1
+
+
+def compute_payout_multipliers(db: Session, racer_names: list[str]) -> dict[str, float]:
+    """Turns each racer's overall win/loss record into fixed payout odds for
+    this specific field: HOUSE_EDGE_FACTOR / estimated P(win), where P(win)
+    is a Bayesian-smoothed win rate (real wins/races_run blended with a
+    neutral 1/field-size prior, weight PRIOR_STRENGTH) normalized so the
+    field's probabilities sum to 1. A racer with a stronger track record
+    than the rest of this field pays out less; a longshot pays out more.
+    Computed once at race creation and frozen on the Race row — this is the
+    single source of truth both for what bettors see and for what payouts
+    actually use."""
+    rows = db.query(Racer).filter(Racer.name.in_(racer_names)).all()
+    racers_by_name = {r.name: r for r in rows}
+    neutral = 1.0 / len(racer_names)
+
+    raw = {}
+    for name in racer_names:
+        racer = racers_by_name.get(name)
+        wins = racer.wins if racer else 0
+        races_run = racer.races_run if racer else 0
+        raw[name] = (wins + PRIOR_STRENGTH * neutral) / (races_run + PRIOR_STRENGTH)
+
+    total = sum(raw.values())
+    return {name: round(HOUSE_EDGE_FACTOR / (raw[name] / total), 2) for name in racer_names}
+
+
+def speed_factor_for_multiplier(multiplier: float, field_size: int) -> float:
+    """Reverses compute_payout_multipliers' math to recover the relative
+    skill implied by a racer's (already-frozen) payout multiplier, clamped
+    to [MIN_SPEED_FACTOR, MAX_SPEED_FACTOR] for race.py to bias their speed
+    rolls with. Keeps the sim and the odds bettors were shown driven by the
+    exact same numbers instead of two separate computations that could
+    drift apart."""
+    neutral = 1.0 / field_size
+    probability = HOUSE_EDGE_FACTOR / multiplier
+    relative = probability / neutral
+    return max(MIN_SPEED_FACTOR, min(MAX_SPEED_FACTOR, relative))

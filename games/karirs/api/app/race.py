@@ -33,19 +33,31 @@ SPEED_CHANGE_STEP_INTERVAL = (5, 15)
 PEAK_SPEED_THRESHOLD = 1.9
 
 
-def step_race(racer_names: list[str]) -> Iterator[tuple[int, dict[str, float], list[str], bool, str | None]]:
+def step_race(
+    racer_names: list[str], speed_factors: dict[str, float] | None = None
+) -> Iterator[tuple[int, dict[str, float], list[str], bool, str | None]]:
     """Yields (step, positions, shouting, is_final, winner) once per step.
     `winner` is only set on the final yielded step — either the racer who
     just crossed the finish line, or, if nobody has by step TOTAL_STEPS,
-    whoever is furthest along."""
+    whoever is furthest along.
+
+    speed_factors (from roster.speed_factor_for_multiplier) biases each
+    racer's *actual movement* toward their estimated track record — a
+    favorite's rolls get scaled up a bit, a longshot's down. The shout
+    trigger below deliberately compares the raw, unscaled roll instead, so
+    the signature-move flavor stays equally likely for every racer
+    regardless of skill; only real movement is weighted."""
+    factors = speed_factors or {}
     positions = {name: 0.0 for name in racer_names}
-    speeds = {name: random.uniform(*SPEED_RANGE) for name in racer_names}
+    raw_speeds = {name: random.uniform(*SPEED_RANGE) for name in racer_names}
+    speeds = {name: raw_speeds[name] * factors.get(name, 1.0) for name in racer_names}
     next_change = {name: random.randint(*SPEED_CHANGE_STEP_INTERVAL) for name in racer_names}
 
     for step in range(1, TOTAL_STEPS + 1):
         for name in racer_names:
             if step >= next_change[name]:
-                speeds[name] = random.uniform(*SPEED_RANGE)
+                raw_speeds[name] = random.uniform(*SPEED_RANGE)
+                speeds[name] = raw_speeds[name] * factors.get(name, 1.0)
                 next_change[name] = step + random.randint(*SPEED_CHANGE_STEP_INTERVAL)
 
         crossed: str | None = None
@@ -55,7 +67,7 @@ def step_race(racer_names: list[str]) -> Iterator[tuple[int, dict[str, float], l
                 if positions[name] >= FINISH_LINE and crossed is None:
                     crossed = name
 
-        shouting = [name for name in racer_names if speeds[name] >= PEAK_SPEED_THRESHOLD]
+        shouting = [name for name in racer_names if raw_speeds[name] >= PEAK_SPEED_THRESHOLD]
 
         is_final = crossed is not None or step == TOTAL_STEPS
         winner = crossed
@@ -68,7 +80,9 @@ def step_race(racer_names: list[str]) -> Iterator[tuple[int, dict[str, float], l
             return
 
 
-def compute_race(racer_names: list[str]) -> tuple[list[dict], str]:
+def compute_race(
+    racer_names: list[str], speed_factors: dict[str, float] | None = None
+) -> tuple[list[dict], str]:
     """Runs the whole race immediately (no delay) and returns every step in
     order — index 0 is step 1 — plus the winner. Each step is
     {"positions": {...}, "shouting": [...]}. This is what lets the whole
@@ -76,7 +90,7 @@ def compute_race(racer_names: list[str]) -> tuple[list[dict], str]:
     step by step."""
     steps: list[dict] = []
     winner = None
-    for _step, positions, shouting, is_final, step_winner in step_race(racer_names):
+    for _step, positions, shouting, is_final, step_winner in step_race(racer_names, speed_factors):
         steps.append({"positions": positions, "shouting": shouting})
         if is_final:
             winner = step_winner

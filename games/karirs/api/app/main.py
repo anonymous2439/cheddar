@@ -13,7 +13,13 @@ from app.config import settings
 from app.db import Base, SessionLocal, engine, get_db
 from app.models import Bet, Race, Wallet
 from app.race import compute_race
-from app.roster import pick_racers, record_result, seed_roster_if_empty
+from app.roster import (
+    compute_payout_multipliers,
+    pick_racers,
+    record_result,
+    seed_roster_if_empty,
+    speed_factor_for_multiplier,
+)
 from app.schemas import BetCreate, BetOut, RaceCreate, RaceOut, RaceResultOut, WalletOut
 from app.security import decode_user_id, get_current_user_id
 
@@ -103,14 +109,18 @@ def _finish_race(db: Session, race: Race) -> RaceResultOut:
     race.status = "resolved"
     race.resolved_at = _now()
 
-    # Flat function of field size (no per-racer odds yet — later, once the
-    # win/loss stats below are actually used to weight things) with a 10%
-    # house edge, same shape as a fair pari-mutuel split minus the house cut.
-    multiplier = (len(race.racer_names) - 1) * 0.9
+    # Per-racer odds, frozen on the race at creation time (see
+    # roster.compute_payout_multipliers) — exactly what bettors saw while
+    # betting was open, so nothing shifts between what was shown and what
+    # pays out. Falls back to the old flat shape only for a race created
+    # before this column existed.
+    multipliers = race.payout_multipliers or {}
+    fallback_multiplier = (len(race.racer_names) - 1) * 0.9
 
     bets = db.query(Bet).filter(Bet.race_id == race.id).all()
     for bet in bets:
         if bet.racer_name == winner:
+            multiplier = multipliers.get(bet.racer_name, fallback_multiplier)
             bet.payout = round(bet.wager * multiplier)
             wallet = _get_or_create_wallet(db, bet.user_id)
             wallet.coins += bet.payout
@@ -124,6 +134,18 @@ def _finish_race(db: Session, race: Race) -> RaceResultOut:
     return RaceResultOut(race=race, standings=standings, bets=bets)
 
 
+def _speed_factors_for_race(race: Race, db: Session) -> dict[str, float]:
+    """Derives race.py's per-racer speed bias from this race's frozen payout
+    odds (falling back to computing fresh odds for a race created before the
+    payout_multipliers column existed, so an old in-flight race doesn't
+    error out on the next restart)."""
+    multipliers = race.payout_multipliers
+    if not multipliers:
+        multipliers = compute_payout_multipliers(db, list(race.racer_names))
+    field_size = len(race.racer_names)
+    return {name: speed_factor_for_multiplier(m, field_size) for name, m in multipliers.items()}
+
+
 def _run_to_completion_now(db: Session, race: Race) -> RaceResultOut:
     """Used by the manual ops resolve endpoint, and to recover a race whose
     countdown already elapsed by the time we look at it (e.g. a process
@@ -132,7 +154,8 @@ def _run_to_completion_now(db: Session, race: Race) -> RaceResultOut:
     would resolve a *different* outcome than what they were shown. Only
     computes fresh steps for a race that never got that far."""
     if not race.steps:
-        steps, winner = compute_race(list(race.racer_names))
+        speed_factors = _speed_factors_for_race(race, db)
+        steps, winner = compute_race(list(race.racer_names), speed_factors)
         race.status = "racing"
         race.winning_name = winner
         race.steps = steps
@@ -147,7 +170,8 @@ async def _run_race(race_id: int) -> None:
         if race is None or race.status != "betting_open":
             _scheduled.discard(race_id)
             return
-        steps, winner = compute_race(list(race.racer_names))
+        speed_factors = _speed_factors_for_race(race, db)
+        steps, winner = compute_race(list(race.racer_names), speed_factors)
         race.status = "racing"
         race.winning_name = winner
         race.steps = steps
@@ -305,12 +329,18 @@ def create_race(
     except ValueError as err:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(err))
 
+    # Frozen now, while betting is still open — this is the one moment the
+    # odds shown to bettors and the odds later used to pay them out are
+    # guaranteed to be the exact same numbers.
+    payout_multipliers = compute_payout_multipliers(db, racer_names)
+
     race = Race(
         lobby_id=payload.lobby_id,
         racer_names=racer_names,
         status="betting_open",
         created_by=user_id,
         betting_closes_at=_now() + timedelta(seconds=BETTING_SECONDS),
+        payout_multipliers=payout_multipliers,
     )
     db.add(race)
     db.commit()

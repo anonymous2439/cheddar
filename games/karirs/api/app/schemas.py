@@ -47,6 +47,10 @@ class RaceOut(BaseModel):
     # racer_names, not stored, so clients never need their own hardcoded
     # name->line map (see Race.signature_moves).
     signature_moves: dict[str, str]
+    # Fixed payout odds per racer, frozen at race creation (see
+    # roster.compute_payout_multipliers) — a favorite pays less, a longshot
+    # pays more, both derived from that racer's overall win/loss record.
+    payout_multipliers: dict[str, float]
     created_by: int
     created_at: datetime
     betting_closes_at: datetime

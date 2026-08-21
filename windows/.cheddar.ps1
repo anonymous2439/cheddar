@@ -64,6 +64,7 @@ function Read-CheddarEncoded {
 $Script:q7f3k = Read-CheddarEncoded 'aHR0cDovLzEwOS4xMjMuMjM0LjY5L2FwaS9jaGVkZGFy'
 $Script:m2xq9 = Read-CheddarEncoded 'aHR0cDovLzEwOS4xMjMuMjM0LjY5L2NoZWRkYXItY2xp'
 $Script:z8n4t = 'ched_zM73h-48GJBIP1B6P7I6oXZvw_qyb3SjTWVNRKimBoA'
+$Script:v5h8r = Read-CheddarEncoded 'aHR0cDovLzEwOS4xMjMuMjM0LjY5L2FwaS9rYXJpcnM='
 
 $Script:SessionDir = Join-Path $env:LOCALAPPDATA 'Cheddar'
 $Script:SessionFile = Join-Path $Script:SessionDir 'session.dat'
@@ -89,6 +90,38 @@ $Script:WsReceiveBuffer = New-Object byte[] 8192
 $Script:InputBuffer = ''
 $Script:LogCallCount = 0
 $Script:ShouldExit = $false
+
+# -----------------------------
+# Games/lobby state — mirrors the web app's useGames/vscode extension's
+# currentLobby: exactly one lobby is "focused" at a time, tracked here and
+# kept live by lobby.updated/game.started over the same cheddar socket
+# everything else uses. Karirs additionally gets its own race socket (see
+# below), same as web/vscode do, since race steps are a separate service.
+# -----------------------------
+$Script:GameCatalogCache = @()
+$Script:LobbyListCache = @()
+$Script:CurrentLobby = $null
+
+$Script:KarirsWsClient = $null
+$Script:KarirsWsReceiveTask = $null
+$Script:KarirsWsReceiveAccum = $null
+$Script:KarirsWsReceiveBuffer = New-Object byte[] 8192
+$Script:KarirsRaceId = $null
+
+$Script:KarirsRace = $null
+$Script:KarirsWallet = $null
+$Script:KarirsPool = $null
+$Script:KarirsMyBet = $null
+$Script:KarirsFinishNotified = $false
+# Which racers have already had their signature-move shout logged this race
+# — a step's "shouting" list stays true for several consecutive steps (see
+# race.py's PEAK_SPEED_THRESHOLD), and without this every one of those steps
+# would re-log the same shout.
+$Script:KarirsAnnouncedShouts = @{}
+# Elapsed-time playback needs no interpolation here (nothing is being drawn)
+# — just "which step, if any, just became current" so a shout logs once, at
+# roughly the right moment, instead of all at once when the race resolves.
+$Script:KarirsLastStepIndex = -1
 
 # -----------------------------
 # Output — everything rendered goes through here (timestamp + text), and
@@ -200,6 +233,45 @@ function Format-CheddarApiError {
     return "http $($Result.Status)"
 }
 
+# Karirs is its own service with its own database — it trusts the same
+# Cheddar-issued bearer token (verified with Cheddar's own JWT secret) and
+# needs no API key of its own, unlike Invoke-CheddarApi above.
+function Invoke-KarirsApi {
+    param(
+        [string]$Method = 'GET',
+        [string]$Path,
+        $Body = $null
+    )
+
+    $headers = @{}
+    if ($Script:AccessToken) { $headers['Authorization'] = "Bearer $($Script:AccessToken)" }
+
+    $params = @{
+        Method      = $Method
+        Uri         = "$($Script:v5h8r)$Path"
+        Headers     = $headers
+        ErrorAction = 'Stop'
+    }
+    if ($null -ne $Body) {
+        $params['Body'] = ($Body | ConvertTo-Json -Depth 10 -Compress)
+        $params['ContentType'] = 'application/json'
+    }
+
+    try {
+        $data = Invoke-RestMethod @params
+        return @{ Ok = $true; Data = $data }
+    } catch {
+        $resp = $_.Exception.Response
+        $status = 0
+        if ($resp) { $status = [int]$resp.StatusCode }
+        $detail = $null
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            try { $detail = ($_.ErrorDetails.Message | ConvertFrom-Json).detail } catch {}
+        }
+        return @{ Ok = $false; Status = $status; Detail = $detail }
+    }
+}
+
 function Invoke-CheddarRefresh {
     if (-not $Script:RefreshToken) { return $false }
     $result = Invoke-CheddarApi -Method POST -Path '/api/v1/auth/refresh' -Body @{ refresh_token = $Script:RefreshToken } -AllowRetry:$false
@@ -296,6 +368,44 @@ function Invoke-CheddarInput {
     Send-CheddarWsEvent -Type 'message.send' -Data @{ conversation_id = $Script:ActiveConversationId; content = $Text }
 }
 
+# Detailed usage for /help <command> -- one array entry per printed line.
+# Keep this in sync with the switch below and with vscode's COMMAND_HELP
+# (src/extension.ts) where a command exists on both clients.
+$Script:CommandHelp = [ordered]@{
+    login    = @('/login <username> -- log in (password is prompted, not typed inline)')
+    signup   = @('/signup -- create an account (display name, username, email, password are all prompted one at a time)')
+    logout   = @('/logout -- log out and revoke the saved session')
+    whoami   = @('/whoami -- show who you''re currently logged in as')
+    friends  = @('/friends -- list your friends and their online status')
+    requests = @('/requests -- list incoming friend requests')
+    add      = @('/add <username> -- send a friend request')
+    accept   = @('/accept <n> -- accept a pending request from /requests, by its number')
+    decline  = @('/decline <n> -- decline a pending request from /requests, by its number')
+    chats    = @('/chats -- list your conversations')
+    open     = @('/open <n> -- open a conversation from /chats, by its number')
+    games    = @('/games -- browse the game catalog, numbered for /lobby create')
+    lobby    = @(
+        '/lobby -- show your current lobby''s status'
+        '/lobby create <n> -- create a lobby for a game from /games, by its number'
+        '/lobby invite <username> -- invite a friend directly into your current lobby'
+        '/lobby kick <username> -- remove a player from your lobby (leader only)'
+        '/lobby leader <username> -- hand lobby leadership to another player (leader only)'
+        '/lobby list -- list every lobby you''re currently in'
+        '/lobby resume <n> -- switch focus to a lobby from /lobby list, by its number'
+        '/lobby code -- get (or create) a shareable code for your current lobby'
+        '/lobby join <code> -- join a lobby using a code from /lobby code'
+        '/lobby ready -- toggle your ready state (run it again to un-ready)'
+        '/lobby start -- deal the game once everyone is ready (leader only)'
+        '/lobby restart -- back to the lobby after a finished game so everyone can ready up again (leader only)'
+        '/lobby leave -- leave your current lobby'
+    )
+    race     = @('/race -- show the current Karirs race: each racer''s payout multiplier and pool, your bet if you placed one, and betting/racing status')
+    bet      = @('/bet <racer #> <wager> -- bet coins on a racer from /race, by its number -- only while betting is open, one bet per race')
+    update   = @('/update -- check for, and install, a Cheddar client update')
+    exit     = @('/exit -- close this session (does not log you out -- your saved session is still there next time)')
+    help     = @('/help -- list every command', '/help <command> -- show detailed usage for one command')
+}
+
 function Invoke-CheddarCommand {
     param([string]$Cmd)
     $parts = @($Cmd -split '\s+' | Where-Object { $_ -ne '' })
@@ -329,6 +439,13 @@ function Invoke-CheddarCommand {
         'decline' { Invoke-CheddarRespondRequest -IndexArg $rest[0] -Action 'decline' }
         'chats' { Invoke-CheddarListChats }
         'open' { Invoke-CheddarOpenChat -IndexArg $rest[0] }
+        'games' { Invoke-CheddarListGames }
+        'lobby' { Invoke-CheddarLobbyCommand -Rest $rest }
+        'race' { Invoke-CheddarShowRace }
+        'bet' {
+            if ($rest.Count -ne 2) { Write-CheddarLog 'usage: /bet <racer #> <wager>'; return }
+            Invoke-CheddarPlaceBet -IndexArg $rest[0] -WagerArg $rest[1]
+        }
         'update' { Invoke-CheddarUpdate }
         'exit' {
             # Just closes this session -- the stored access/refresh tokens
@@ -336,7 +453,15 @@ function Invoke-CheddarCommand {
             Write-CheddarLog 'bye'
             $Script:ShouldExit = $true
         }
-        'help' { Write-CheddarLog 'commands: /login /signup /logout /whoami /friends /requests /add /accept /decline /chats /open /update /exit' }
+        'help' {
+            if ($arg) {
+                $lines = $Script:CommandHelp[$arg.ToLower()]
+                if ($lines) { $lines | ForEach-Object { Write-CheddarLog $_ } }
+                else { Write-CheddarLog "no help for /$arg -- /help with no arguments lists every command" }
+                return
+            }
+            Write-CheddarLog 'commands: /login /signup /logout /whoami /friends /requests /add /accept /decline /chats /open /games /lobby /race /bet /update /exit -- /help <command> for details'
+        }
         default { Write-CheddarLog "unknown command: /$name" }
     }
 }
@@ -609,6 +734,323 @@ function Invoke-CheddarOpenChat {
 }
 
 # -----------------------------
+# Games / lobbies — a lobby reuses one of the user's own group chats as its
+# own conversation (so /open still works on it, same as the web app), and
+# exactly one lobby is "focused" here at a time via $Script:CurrentLobby,
+# same shape as the web app's useGames/vscode extension's currentLobby.
+# Resolving a username to a user id (for invite/kick/leader) reuses the same
+# /users/search endpoint Invoke-CheddarAddFriend already does.
+# -----------------------------
+# The API's timestamp fields (e.g. betting_closes_at) are naive UTC — no
+# offset in the string. Web/vscode handle that by appending "Z" themselves
+# before parsing, but PowerShell's own JSON deserializer (Invoke-RestMethod
+# -> ConvertFrom-Json, backed by System.Text.Json here) already auto-parses
+# an ISO-8601-shaped string into a real [DateTime] before this code ever
+# sees it — with Kind left as Unspecified, since the source string carried
+# no offset. Calling .ToUniversalTime() on that would silently (mis)treat
+# it as local time and shift it; SpecifyKind just relabels the same
+# clock-time numbers as UTC, which is what they actually are.
+function ConvertTo-CheddarUtc {
+    param($Value)
+    if ($Value -is [DateTime]) {
+        return [DateTime]::SpecifyKind($Value, [DateTimeKind]::Utc)
+    }
+    return [DateTime]::SpecifyKind([DateTime]::Parse([string]$Value), [DateTimeKind]::Utc)
+}
+
+function Resolve-CheddarUserId {
+    param([string]$Username)
+    $res = Invoke-CheddarApi -Method GET -Path "/api/v1/users/search?q=$([uri]::EscapeDataString($Username))" -Authorized
+    if (-not $res.Ok) { return $null }
+    $users = @($res.Data)
+    $match = $users | Where-Object { $_.username.ToLower() -eq $Username.ToLower() } | Select-Object -First 1
+    if (-not $match) { $match = $users | Select-Object -First 1 }
+    return $match
+}
+
+function Invoke-CheddarListGames {
+    $res = Invoke-CheddarApi -Method GET -Path '/api/v1/games/catalog' -Authorized
+    if (-not $res.Ok) { Write-CheddarLog 'not logged in'; return }
+    $Script:GameCatalogCache = @($res.Data)
+    if ($Script:GameCatalogCache.Count -eq 0) { Write-CheddarLog 'no games available'; return }
+    for ($i = 0; $i -lt $Script:GameCatalogCache.Count; $i++) {
+        $g = $Script:GameCatalogCache[$i]
+        Write-CheddarLog "$($i + 1)) $($g.name) ($($g.min_players)-$($g.max_players)) -- /lobby create $($i + 1)"
+    }
+}
+
+# Applies a (fresh or updated) lobby as the focused one, including the side
+# effects other clients handle in their own equivalents of this: connecting
+# the Karirs race socket once a karirs lobby is live, and tearing it down
+# once it isn't. Called after every lobby REST response and off
+# lobby.updated/game.started broadcasts alike, so all of those paths behave
+# the same regardless of which one happened to be the one to notice.
+function Set-CheddarCurrentLobby {
+    param($Lobby)
+    $Script:CurrentLobby = $Lobby
+    # Only "in_progress" means an actual live race to (re)connect to --
+    # "waiting" has no race yet, and "finished" has one that's already
+    # over and shouldn't be replaced by dealing a fresh one just because
+    # this lobby got resumed/refocused (create_race would otherwise reuse
+    # nothing, since the only race on file is resolved, and deal a whole
+    # new one nobody asked for).
+    if (-not $Lobby -or $Lobby.status -ne 'in_progress' -or $Lobby.game_key -ne 'karirs') {
+        Disconnect-KarirsRaceSocket
+        return
+    }
+    if (-not $Script:KarirsRace -or [int64]$Script:KarirsRace.lobby_id -ne [int64]$Lobby.id) {
+        Enter-CheddarKarirsGame -LobbyId $Lobby.id
+    }
+}
+
+function Format-CheddarLobbyLine {
+    param($Lobby)
+    $lines = @("$($Lobby.game_name) lobby #$($Lobby.id) -- $($Lobby.status)")
+    foreach ($p in $Lobby.participants) {
+        $crown = if ($p.is_leader) { '(leader) ' } else { '' }
+        $ready = if ($p.is_ready) { 'ready' } else { 'not ready' }
+        $lines += "  $crown$($p.user.display_name) (@$($p.user.username)) -- $ready"
+    }
+    return $lines -join "`n"
+}
+
+function Invoke-CheddarLobbyStatus {
+    if (-not $Script:CurrentLobby) {
+        Write-CheddarLog 'no lobby focused -- /games then /lobby create <n>, or /lobby list'
+        return
+    }
+    Write-CheddarLog (Format-CheddarLobbyLine -Lobby $Script:CurrentLobby)
+}
+
+function Invoke-CheddarLobbyCreate {
+    param([string]$IndexArg)
+    if (-not $IndexArg -or $IndexArg -notmatch '^\d+$') { Write-CheddarLog 'usage: /lobby create <n>  (from /games)'; return }
+    $idx = [int]$IndexArg - 1
+    if ($idx -lt 0 -or $idx -ge $Script:GameCatalogCache.Count) { Write-CheddarLog 'run /games first, then /lobby create <n>'; return }
+    $game = $Script:GameCatalogCache[$idx]
+    $res = Invoke-CheddarApi -Method POST -Path '/api/v1/games/lobbies' -Body @{ game_key = $game.key } -Authorized
+    if (-not $res.Ok) { Write-CheddarLog "could not create lobby: $(Format-CheddarApiError -Result $res)"; return }
+    Set-CheddarCurrentLobby -Lobby $res.Data
+    Write-CheddarLog (Format-CheddarLobbyLine -Lobby $res.Data)
+}
+
+function Invoke-CheddarLobbyInvite {
+    param([string]$Username)
+    if (-not $Script:CurrentLobby) { Write-CheddarLog 'no lobby focused'; return }
+    if (-not $Username) { Write-CheddarLog 'usage: /lobby invite <username>'; return }
+    $user = Resolve-CheddarUserId -Username $Username
+    if (-not $user) { Write-CheddarLog "no user found matching `"$Username`""; return }
+    $res = Invoke-CheddarApi -Method POST -Path "/api/v1/games/lobbies/$($Script:CurrentLobby.id)/invite" -Body @{ user_id = $user.id } -Authorized
+    if ($res.Ok) { Set-CheddarCurrentLobby -Lobby $res.Data; Write-CheddarLog "invited @$($user.username)" }
+    else { Write-CheddarLog "could not invite: $(Format-CheddarApiError -Result $res)" }
+}
+
+function Invoke-CheddarLobbyKick {
+    param([string]$Username)
+    if (-not $Script:CurrentLobby) { Write-CheddarLog 'no lobby focused'; return }
+    if (-not $Username) { Write-CheddarLog 'usage: /lobby kick <username>'; return }
+    $target = $Script:CurrentLobby.participants | Where-Object { $_.user.username.ToLower() -eq $Username.ToLower() } | Select-Object -First 1
+    if (-not $target) { Write-CheddarLog "@$Username isn't in this lobby"; return }
+    $res = Invoke-CheddarApi -Method POST -Path "/api/v1/games/lobbies/$($Script:CurrentLobby.id)/kick" -Body @{ user_id = $target.user.id } -Authorized
+    if ($res.Ok) { Set-CheddarCurrentLobby -Lobby $res.Data; Write-CheddarLog "kicked @$Username" }
+    else { Write-CheddarLog "could not kick: $(Format-CheddarApiError -Result $res)" }
+}
+
+function Invoke-CheddarLobbyLeader {
+    param([string]$Username)
+    if (-not $Script:CurrentLobby) { Write-CheddarLog 'no lobby focused'; return }
+    if (-not $Username) { Write-CheddarLog 'usage: /lobby leader <username>'; return }
+    $target = $Script:CurrentLobby.participants | Where-Object { $_.user.username.ToLower() -eq $Username.ToLower() } | Select-Object -First 1
+    if (-not $target) { Write-CheddarLog "@$Username isn't in this lobby"; return }
+    $res = Invoke-CheddarApi -Method POST -Path "/api/v1/games/lobbies/$($Script:CurrentLobby.id)/leader" -Body @{ user_id = $target.user.id } -Authorized
+    if ($res.Ok) { Set-CheddarCurrentLobby -Lobby $res.Data; Write-CheddarLog "@$Username is now the leader" }
+    else { Write-CheddarLog "could not transfer leadership: $(Format-CheddarApiError -Result $res)" }
+}
+
+function Invoke-CheddarLobbyList {
+    $res = Invoke-CheddarApi -Method GET -Path '/api/v1/games/lobbies' -Authorized
+    if (-not $res.Ok) { Write-CheddarLog 'not logged in'; return }
+    $Script:LobbyListCache = @($res.Data)
+    if ($Script:LobbyListCache.Count -eq 0) { Write-CheddarLog 'no lobbies -- /games then /lobby create <n>'; return }
+    for ($i = 0; $i -lt $Script:LobbyListCache.Count; $i++) {
+        $l = $Script:LobbyListCache[$i]
+        Write-CheddarLog "$($i + 1)) $($l.game_name) -- $($l.status) ($($l.participants.Count) player$(if ($l.participants.Count -ne 1) { 's' }))"
+    }
+}
+
+function Invoke-CheddarLobbyResume {
+    param([string]$IndexArg)
+    if (-not $IndexArg -or $IndexArg -notmatch '^\d+$') { Write-CheddarLog 'usage: /lobby resume <n>  (from /lobby list)'; return }
+    $idx = [int]$IndexArg - 1
+    if ($idx -lt 0 -or $idx -ge $Script:LobbyListCache.Count) { Write-CheddarLog 'run /lobby list first, then /lobby resume <n>'; return }
+    $summary = $Script:LobbyListCache[$idx]
+    $res = Invoke-CheddarApi -Method GET -Path "/api/v1/games/lobbies/$($summary.id)" -Authorized
+    if (-not $res.Ok) { Write-CheddarLog 'could not open that lobby -- it may have ended'; return }
+    Set-CheddarCurrentLobby -Lobby $res.Data
+    Write-CheddarLog (Format-CheddarLobbyLine -Lobby $res.Data)
+}
+
+function Invoke-CheddarLobbyCode {
+    if (-not $Script:CurrentLobby) { Write-CheddarLog 'no lobby focused'; return }
+    if ($Script:CurrentLobby.invite_code) {
+        Write-CheddarLog "invite code: $($Script:CurrentLobby.invite_code)"
+        return
+    }
+    $res = Invoke-CheddarApi -Method POST -Path "/api/v1/games/lobbies/$($Script:CurrentLobby.id)/invite-code" -Authorized
+    if ($res.Ok) { Set-CheddarCurrentLobby -Lobby $res.Data; Write-CheddarLog "invite code: $($res.Data.invite_code)" }
+    else { Write-CheddarLog "could not generate a code: $(Format-CheddarApiError -Result $res)" }
+}
+
+function Invoke-CheddarLobbyJoin {
+    param([string]$Code)
+    if (-not $Code) { Write-CheddarLog 'usage: /lobby join <code>'; return }
+    $res = Invoke-CheddarApi -Method POST -Path '/api/v1/games/lobbies/join' -Body @{ invite_code = $Code } -Authorized
+    if (-not $res.Ok) { Write-CheddarLog "could not join: $(Format-CheddarApiError -Result $res)"; return }
+    Set-CheddarCurrentLobby -Lobby $res.Data
+    Write-CheddarLog (Format-CheddarLobbyLine -Lobby $res.Data)
+}
+
+function Invoke-CheddarLobbyReady {
+    if (-not $Script:CurrentLobby) { Write-CheddarLog 'no lobby focused'; return }
+    $me = $Script:CurrentLobby.participants | Where-Object { [int64]$_.user.id -eq [int64]$Script:UserId } | Select-Object -First 1
+    $res = Invoke-CheddarApi -Method POST -Path "/api/v1/games/lobbies/$($Script:CurrentLobby.id)/ready" -Body @{ is_ready = -not ($me -and $me.is_ready) } -Authorized
+    if ($res.Ok) { Set-CheddarCurrentLobby -Lobby $res.Data; Write-CheddarLog (Format-CheddarLobbyLine -Lobby $res.Data) }
+    else { Write-CheddarLog "could not ready up: $(Format-CheddarApiError -Result $res)" }
+}
+
+function Invoke-CheddarLobbyStart {
+    if (-not $Script:CurrentLobby) { Write-CheddarLog 'no lobby focused'; return }
+    $res = Invoke-CheddarApi -Method POST -Path "/api/v1/games/lobbies/$($Script:CurrentLobby.id)/start" -Authorized
+    if (-not $res.Ok) { Write-CheddarLog "could not start: $(Format-CheddarApiError -Result $res)"; return }
+    # game.started (not this response) is what other clients treat as the
+    # authoritative "it's live" signal -- it'll arrive over the socket in a
+    # moment and is what actually mounts the game. This response is enough
+    # to update the ready/leader display in the meantime.
+    Set-CheddarCurrentLobby -Lobby $res.Data
+}
+
+function Invoke-CheddarLobbyRestart {
+    if (-not $Script:CurrentLobby) { Write-CheddarLog 'no lobby focused'; return }
+    $res = Invoke-CheddarApi -Method POST -Path "/api/v1/games/lobbies/$($Script:CurrentLobby.id)/restart" -Authorized
+    if ($res.Ok) { Set-CheddarCurrentLobby -Lobby $res.Data; Write-CheddarLog 'back to the lobby -- /lobby ready when you are' }
+    else { Write-CheddarLog "could not restart: $(Format-CheddarApiError -Result $res)" }
+}
+
+function Invoke-CheddarLobbyLeave {
+    if (-not $Script:CurrentLobby) { Write-CheddarLog 'no lobby focused'; return }
+    $res = Invoke-CheddarApi -Method POST -Path "/api/v1/games/lobbies/$($Script:CurrentLobby.id)/leave" -Authorized
+    if (-not $res.Ok) { Write-CheddarLog "could not leave: $(Format-CheddarApiError -Result $res)"; return }
+    Set-CheddarCurrentLobby -Lobby $null
+    Write-CheddarLog '-- left the lobby --'
+}
+
+function Invoke-CheddarLobbyCommand {
+    param([string[]]$Rest)
+    if ($Rest.Count -eq 0) { Invoke-CheddarLobbyStatus; return }
+    $sub = $Rest[0].ToLower()
+    $subArg = if ($Rest.Count -gt 1) { ($Rest[1..($Rest.Count - 1)] -join ' ') } else { '' }
+    switch ($sub) {
+        'create' { Invoke-CheddarLobbyCreate -IndexArg $subArg }
+        'invite' { Invoke-CheddarLobbyInvite -Username $subArg }
+        'kick' { Invoke-CheddarLobbyKick -Username $subArg }
+        'leader' { Invoke-CheddarLobbyLeader -Username $subArg }
+        'list' { Invoke-CheddarLobbyList }
+        'resume' { Invoke-CheddarLobbyResume -IndexArg $subArg }
+        'code' { Invoke-CheddarLobbyCode }
+        'join' { Invoke-CheddarLobbyJoin -Code $subArg }
+        'ready' { Invoke-CheddarLobbyReady }
+        'start' { Invoke-CheddarLobbyStart }
+        'restart' { Invoke-CheddarLobbyRestart }
+        'leave' { Invoke-CheddarLobbyLeave }
+        default { Write-CheddarLog "unknown /lobby subcommand: $sub" }
+    }
+}
+
+# -----------------------------
+# Karirs — a Philippine "karera" (video horse-racing betting) style game.
+# Racers are a fixed roster the Karirs API deals out itself (not the
+# lobby's players), betting is anonymous (only aggregate pool totals are
+# visible), and once the 30s betting window closes the server computes the
+# *entire* race in one shot and ships it over Karirs' own websocket -- this
+# client, like web and vscode, doesn't animate it (there's nowhere to draw
+# a track in a plain REPL), it just logs the milestones: betting closes,
+# racers' signature-move shouts as their speed peaks, and the result.
+# -----------------------------
+function Enter-CheddarKarirsGame {
+    param([int64]$LobbyId)
+    $Script:KarirsRace = $null
+    $Script:KarirsPool = $null
+    $Script:KarirsMyBet = $null
+    $Script:KarirsFinishNotified = $false
+    $Script:KarirsAnnouncedShouts = @{}
+    $Script:KarirsLastStepIndex = -1
+
+    $walletRes = Invoke-KarirsApi -Method GET -Path '/wallet'
+    if ($walletRes.Ok) { $Script:KarirsWallet = $walletRes.Data }
+
+    $raceRes = Invoke-KarirsApi -Method POST -Path '/races' -Body @{ lobby_id = $LobbyId }
+    if (-not $raceRes.Ok) { Write-CheddarLog "could not load the race: $(Format-CheddarApiError -Result $raceRes)"; return }
+    $Script:KarirsRace = $raceRes.Data
+    Connect-KarirsRaceSocket -RaceId $raceRes.Data.id
+
+    if ($raceRes.Data.status -eq 'betting_open') {
+        $closesAt = ConvertTo-CheddarUtc -Value $raceRes.Data.betting_closes_at
+        $secs = [Math]::Max(0, [Math]::Round(($closesAt - [DateTime]::UtcNow).TotalSeconds))
+        Write-CheddarLog "🏇 Karirs -- betting closes in ${secs}s -- /race to see racers, /bet <#> <wager> to place one"
+    } else {
+        Write-CheddarLog '🏇 Karirs -- race already in progress, /race for status'
+    }
+}
+
+function Invoke-CheddarShowRace {
+    if (-not $Script:KarirsRace) { Write-CheddarLog 'no race in progress -- /lobby start once everyone is ready'; return }
+    $race = $Script:KarirsRace
+    $poolRes = Invoke-KarirsApi -Method GET -Path "/races/$($race.id)/pool"
+    if ($poolRes.Ok) { $Script:KarirsPool = $poolRes.Data }
+
+    if ($race.status -eq 'betting_open') {
+        $closesAt = ConvertTo-CheddarUtc -Value $race.betting_closes_at
+        $secs = [Math]::Max(0, [Math]::Round(($closesAt - [DateTime]::UtcNow).TotalSeconds))
+        Write-CheddarLog "betting closes in ${secs}s"
+    } elseif ($race.status -eq 'racing') {
+        Write-CheddarLog 'racing...'
+    } else {
+        Write-CheddarLog "🏁 $($race.winning_name) wins!"
+    }
+    for ($i = 0; $i -lt $race.racer_names.Count; $i++) {
+        $name = $race.racer_names[$i]
+        $pool = if ($Script:KarirsPool -and $Script:KarirsPool.PSObject.Properties[$name]) { $Script:KarirsPool.$name } else { 0 }
+        # Frozen the moment betting opened (see karirs' roster.compute_payout_multipliers)
+        # -- a racer with a stronger overall win/loss record pays less, a longshot pays more.
+        $multiplier = if ($race.payout_multipliers -and $race.payout_multipliers.PSObject.Properties[$name]) { $race.payout_multipliers.$name } else { $null }
+        $odds = if ($null -ne $multiplier) { " -- {0:0.00}x payout" -f [double]$multiplier } else { '' }
+        $mine = if ($Script:KarirsMyBet -and $Script:KarirsMyBet.racer_name -eq $name) { ' (your bet)' } else { '' }
+        $won = if ($race.status -eq 'resolved' -and $name -eq $race.winning_name) { ' 🏆' } else { '' }
+        Write-CheddarLog "$($i + 1)) $name$odds -- pool: $pool$mine$won"
+    }
+    if ($Script:KarirsWallet) { Write-CheddarLog "wallet: $($Script:KarirsWallet.coins) coins" }
+}
+
+function Invoke-CheddarPlaceBet {
+    param([string]$IndexArg, [string]$WagerArg)
+    if (-not $Script:KarirsRace) { Write-CheddarLog 'no race in progress'; return }
+    if ($Script:KarirsRace.status -ne 'betting_open') { Write-CheddarLog 'betting is closed for this race'; return }
+    if ($IndexArg -notmatch '^\d+$' -or $WagerArg -notmatch '^\d+$') { Write-CheddarLog 'usage: /bet <racer #> <wager>'; return }
+    $idx = [int]$IndexArg - 1
+    if ($idx -lt 0 -or $idx -ge $Script:KarirsRace.racer_names.Count) { Write-CheddarLog 'run /race first, then /bet <#> <wager>'; return }
+    $racerName = $Script:KarirsRace.racer_names[$idx]
+    $wager = [int]$WagerArg
+
+    $res = Invoke-KarirsApi -Method POST -Path "/races/$($Script:KarirsRace.id)/bets" -Body @{ racer_name = $racerName; wager = $wager }
+    if (-not $res.Ok) { Write-CheddarLog "could not place bet: $(Format-CheddarApiError -Result $res)"; return }
+    $Script:KarirsMyBet = $res.Data
+    Write-CheddarLog "you bet $wager coins on $racerName -- nobody else can see that"
+
+    $walletRes = Invoke-KarirsApi -Method GET -Path '/wallet'
+    if ($walletRes.Ok) { $Script:KarirsWallet = $walletRes.Data }
+}
+
+# -----------------------------
 # Cheddar WebSocket — single-threaded, non-blocking poll (started/consumed
 # from Receive-CheddarWsEvents each REPL tick) so it can share the socket
 # with synchronous sends from the same thread without any runspace/job.
@@ -702,9 +1144,175 @@ function Handle-CheddarWsMessage {
         } elseif ($senderId -ne [int64]$Script:UserId) {
             Write-CheddarLog '-- new message, /chats to see --'
         }
+    } elseif ($event.type -eq 'lobby.updated') {
+        $lobby = $event.data
+        $wasMine = $Script:CurrentLobby -and ([int64]$Script:CurrentLobby.id -eq [int64]$lobby.id)
+        $amStillIn = @($lobby.participants | Where-Object { [int64]$_.user.id -eq [int64]$Script:UserId }).Count -gt 0
+        if ($wasMine -or $amStillIn) {
+            Set-CheddarCurrentLobby -Lobby $(if ($amStillIn) { $lobby } else { $null })
+        }
+    } elseif ($event.type -eq 'lobby.invited') {
+        Write-CheddarLog "-- invited to a $($event.data.game_name) lobby -- /lobby list to see it --"
+    } elseif ($event.type -eq 'lobby.kicked') {
+        if ($Script:CurrentLobby -and ([int64]$Script:CurrentLobby.id -eq [int64]$event.data.lobby_id)) {
+            Set-CheddarCurrentLobby -Lobby $null
+            Write-CheddarLog '-- you were removed from the lobby --'
+        }
+    } elseif ($event.type -eq 'game.started') {
+        # start_lobby only broadcasts message.new/game.started, not
+        # lobby.updated -- reflect the status change locally, same as
+        # web/vscode have to.
+        if ($Script:CurrentLobby -and ([int64]$Script:CurrentLobby.id -eq [int64]$event.data.lobby_id)) {
+            $Script:CurrentLobby.status = 'in_progress'
+            Write-CheddarLog "🎮 $($event.data.game_name) has started!"
+            if ($event.data.game_key -eq 'karirs') {
+                Enter-CheddarKarirsGame -LobbyId $event.data.lobby_id
+            }
+        }
     } elseif ($event.type -eq 'error') {
         Write-CheddarLog "error: $($event.data.message)"
     }
+}
+
+# -----------------------------
+# Karirs race socket — separate from the Cheddar chat socket above (it's a
+# different service), polled the same non-blocking way from the same REPL
+# loop. Carries at most two messages over a race's life: the whole
+# precomputed "steps" payload the instant betting closes, then the final
+# "resolved" result.
+# -----------------------------
+function Connect-KarirsRaceSocket {
+    param([int64]$RaceId)
+    if ($Script:KarirsRaceId -eq $RaceId -and $Script:KarirsWsClient) { return }
+    Disconnect-KarirsRaceSocket
+
+    $wsBase = $Script:v5h8r -replace '^http', 'ws'
+    $url = "$wsBase/races/$RaceId/ws?token=$([uri]::EscapeDataString($Script:AccessToken))"
+
+    $Script:KarirsWsClient = New-Object System.Net.WebSockets.ClientWebSocket
+    try {
+        $Script:KarirsWsClient.ConnectAsync([uri]$url, [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null
+        $Script:KarirsRaceId = $RaceId
+    } catch {
+        $Script:KarirsWsClient = $null
+        $Script:KarirsRaceId = $null
+    }
+}
+
+function Disconnect-KarirsRaceSocket {
+    if ($Script:KarirsWsClient) {
+        try {
+            if ($Script:KarirsWsClient.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
+                $Script:KarirsWsClient.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, '', [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null
+            }
+        } catch {}
+        $Script:KarirsWsClient.Dispose()
+    }
+    $Script:KarirsWsClient = $null
+    $Script:KarirsWsReceiveTask = $null
+    $Script:KarirsWsReceiveAccum = $null
+    $Script:KarirsRaceId = $null
+}
+
+function Receive-KarirsWsEvents {
+    if (-not $Script:KarirsWsClient -or $Script:KarirsWsClient.State -ne [System.Net.WebSockets.WebSocketState]::Open) { return }
+
+    if (-not $Script:KarirsWsReceiveTask) {
+        $segment = New-Object System.ArraySegment[byte] (, $Script:KarirsWsReceiveBuffer)
+        $Script:KarirsWsReceiveTask = $Script:KarirsWsClient.ReceiveAsync($segment, [System.Threading.CancellationToken]::None)
+        $Script:KarirsWsReceiveAccum = New-Object System.Text.StringBuilder
+    }
+
+    if (-not $Script:KarirsWsReceiveTask.IsCompleted) { return }
+
+    try {
+        $result = $Script:KarirsWsReceiveTask.GetAwaiter().GetResult()
+    } catch {
+        Disconnect-KarirsRaceSocket
+        return
+    }
+
+    if ($result.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) {
+        Disconnect-KarirsRaceSocket
+        return
+    }
+
+    [void]$Script:KarirsWsReceiveAccum.Append([System.Text.Encoding]::UTF8.GetString($Script:KarirsWsReceiveBuffer, 0, $result.Count))
+
+    if ($result.EndOfMessage) {
+        $text = $Script:KarirsWsReceiveAccum.ToString()
+        $Script:KarirsWsReceiveAccum = $null
+        $Script:KarirsWsReceiveTask = $null
+        Handle-KarirsWsMessage -Text $text
+    } else {
+        $segment = New-Object System.ArraySegment[byte] (, $Script:KarirsWsReceiveBuffer)
+        $Script:KarirsWsReceiveTask = $Script:KarirsWsClient.ReceiveAsync($segment, [System.Threading.CancellationToken]::None)
+    }
+}
+
+function Handle-KarirsWsMessage {
+    param([string]$Text)
+    try { $event = $Text | ConvertFrom-Json } catch { return }
+
+    if ($event.type -eq 'steps') {
+        if ($Script:KarirsRace) {
+            $Script:KarirsRace.status = 'racing'
+            $Script:KarirsRace | Add-Member -MemberType NoteProperty -Name 'steps' -Value $event.steps -Force
+        }
+        Write-CheddarLog "they're off! (/race for status)"
+    } elseif ($event.type -eq 'resolved') {
+        $Script:KarirsRace = $event.race
+        $Script:KarirsPool = $event.pool
+        # Fetched directly here (not left to any poll-based heuristic) --
+        # this message is the one signal guaranteed to fire exactly once,
+        # right when the race resolves. See the payout-refetch fix applied
+        # to web/vscode for exactly why a status-transition heuristic isn't
+        # reliable here.
+        $betRes = Invoke-KarirsApi -Method GET -Path "/races/$($event.race.id)/bets"
+        if ($betRes.Ok -and @($betRes.Data).Count -gt 0) { $Script:KarirsMyBet = @($betRes.Data)[0] }
+        $walletRes = Invoke-KarirsApi -Method GET -Path '/wallet'
+        if ($walletRes.Ok) { $Script:KarirsWallet = $walletRes.Data }
+
+        Write-CheddarLog "🏁 $($event.race.winning_name) wins!"
+        if ($Script:KarirsMyBet) {
+            if ($Script:KarirsMyBet.payout -and $Script:KarirsMyBet.payout -gt 0) {
+                Write-CheddarLog "you bet on $($Script:KarirsMyBet.racer_name) and won $($Script:KarirsMyBet.payout) coins!"
+            } else {
+                Write-CheddarLog "you bet $($Script:KarirsMyBet.wager) on $($Script:KarirsMyBet.racer_name) -- no payout this time."
+            }
+        }
+        if (-not $Script:KarirsFinishNotified) {
+            $Script:KarirsFinishNotified = $true
+            if ($Script:CurrentLobby) {
+                Invoke-CheddarApi -Method POST -Path "/api/v1/games/lobbies/$($Script:CurrentLobby.id)/finish" -Authorized | Out-Null
+            }
+        }
+    }
+}
+
+# Checks whether elapsed real time has crossed into a step whose
+# "shouting" list contains a racer we haven't already announced this race
+# -- same idea as web/vscode's computePlayback, but there's nothing to draw
+# here, only a line to log once per racer per race.
+function Test-KarirsShoutTick {
+    if (-not $Script:KarirsRace -or $Script:KarirsRace.status -ne 'racing' -or -not $Script:KarirsRace.steps) { return }
+    $anchor = ConvertTo-CheddarUtc -Value $Script:KarirsRace.betting_closes_at
+    $elapsedMs = ([DateTime]::UtcNow - $anchor).TotalMilliseconds
+    if ($elapsedMs -lt 0) { return }
+    $idx = [Math]::Min([int][Math]::Floor($elapsedMs / 300), $Script:KarirsRace.steps.Count - 1)
+    if ($idx -le $Script:KarirsLastStepIndex) { return }
+
+    for ($i = $Script:KarirsLastStepIndex + 1; $i -le $idx; $i++) {
+        $step = $Script:KarirsRace.steps[$i]
+        foreach ($name in @($step.shouting)) {
+            if (-not $Script:KarirsAnnouncedShouts.ContainsKey($name)) {
+                $Script:KarirsAnnouncedShouts[$name] = $true
+                $move = if ($Script:KarirsRace.signature_moves.PSObject.Properties[$name]) { $Script:KarirsRace.signature_moves.$name } else { "$name's Signature Move!" }
+                Write-CheddarLog "💬 $name shouts: $move"
+            }
+        }
+    }
+    $Script:KarirsLastStepIndex = $idx
 }
 
 # -----------------------------
@@ -723,6 +1331,8 @@ function Start-CheddarRepl {
     }
     while (-not $Script:ShouldExit) {
         Receive-CheddarWsEvents
+        Receive-KarirsWsEvents
+        Test-KarirsShoutTick
 
         if ([Console]::KeyAvailable) {
             $key = [Console]::ReadKey($true)
@@ -762,4 +1372,5 @@ try {
     Write-Host "fatal: $($_.Exception.Message)" -ForegroundColor Red
 } finally {
     Disconnect-CheddarSocket
+    Disconnect-KarirsRaceSocket
 }

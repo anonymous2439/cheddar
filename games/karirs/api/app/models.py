@@ -44,6 +44,10 @@ class Race(Base):
     # 1) — clients replay it locally against betting_closes_at as the anchor
     # instead of us live-broadcasting one step at a time.
     steps = Column(JSON, nullable=True)
+    # Frozen at race creation (see roster.compute_payout_multipliers) so the
+    # odds a bettor saw before wagering are exactly what pays out later, even
+    # if the racers' overall stats move on in the meantime.
+    payout_multipliers = Column(JSON, nullable=True)
     created_by = Column(BigInteger, nullable=False)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     betting_closes_at = Column(DateTime, nullable=False)

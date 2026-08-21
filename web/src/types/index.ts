@@ -133,6 +133,10 @@ export interface KarirsRace {
   // Every racer's catchphrase for this race's roster (see signature_moves.py)
   // — shown when playback.shouting includes their name.
   signature_moves: Record<string, string>;
+  // Fixed payout odds per racer, frozen the moment betting opened — a
+  // favorite (stronger overall win/loss record) pays less, a longshot pays
+  // more. Same numbers used for the actual payout at resolution time.
+  payout_multipliers: Record<string, number>;
   created_by: number;
   created_at: string;
   betting_closes_at: string;
