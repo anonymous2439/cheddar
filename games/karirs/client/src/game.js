@@ -52,6 +52,21 @@
     let trackDots = {};
     let trackRaceId = null;
 
+    // Which "phase" of chromeTopEl is currently built (race id + status +
+    // whether a bet's been placed + whether an error is showing) — as long
+    // as this doesn't change, render() only updates text in place instead of
+    // wiping and recreating the racer/Place Bet buttons. Without this, the
+    // 200ms animation tick and the 2s pool poll (both of which fire
+    // continuously while betting is open) tore the buttons down and rebuilt
+    // them out from under an in-progress click, silently dropping it if the
+    // rebuild landed between mousedown and mouseup.
+    let chromePhaseKey = null;
+    let walletLineEl = null;
+    let bettingCountdownEl = null;
+    let racingTitleEl = null;
+    let racerButtonEls = {};
+    let racerPoolEls = {};
+
     function mount(el, mountCtx) {
         container = el;
         ctx = mountCtx;
@@ -66,6 +81,12 @@
         trackWrapperEl = null;
         trackDots = {};
         trackRaceId = null;
+        chromePhaseKey = null;
+        walletLineEl = null;
+        bettingCountdownEl = null;
+        racingTitleEl = null;
+        racerButtonEls = {};
+        racerPoolEls = {};
         render();
 
         window.CheddarHost.send('sync_race', { lobbyId: ctx.lobbyId });
@@ -211,49 +232,78 @@
     function render() {
         if (!container) return;
         ensureLayout();
-        chromeTopEl.innerHTML = '';
-        chromeBottomEl.innerHTML = '';
 
-        const walletLine = document.createElement('p');
-        walletLine.textContent = wallet ? `💰 ${wallet.coins} coins` : '💰 …';
-        chromeTopEl.appendChild(walletLine);
-
-        if (!race) {
-            const p = document.createElement('p');
-            p.textContent = 'loading race…';
-            chromeTopEl.appendChild(p);
-            clearTrack();
-            return;
-        }
-
-        const isRacing = race.status === 'racing';
-        const isResolved = race.status === 'resolved';
+        const isRacing = !!race && race.status === 'racing';
+        const isResolved = !!race && race.status === 'resolved';
+        const isBetting = !!race && !isRacing && !isResolved;
         const stepInfo = isRacing || isResolved ? currentStepInfo() : null;
 
-        if (!isRacing && !isResolved) {
-            const title = document.createElement('p');
-            title.textContent = `🏇 betting closes in ${secondsLeft()}s`;
-            chromeTopEl.appendChild(title);
-            clearTrack();
-            renderBetting();
-        } else {
-            const title = document.createElement('p');
-            title.textContent = isResolved
-                ? `🏁 ${race.winning_name} wins!`
-                : `🏇 racing… (${stepInfo ? stepInfo.step : 0}/${stepInfo ? stepInfo.total : 0})`;
-            chromeTopEl.appendChild(title);
-            if (stepInfo) {
-                ensureTrackDom();
-                updateTrackDots(stepInfo.positions, stepInfo.shouting);
+        // myBet's payout specifically (not just whether myBet exists) has to
+        // be part of this key — a bet is placed with payout still null, and
+        // the real payout only arrives later via a separate my_bet refetch
+        // once the race resolves. Keying on presence alone meant that second
+        // update landed on an unchanged key, skipped the rebuild below, and
+        // renderResult() (which only runs inside it) never re-ran — so a win
+        // could sit there forever still showing the placeholder "no payout
+        // this time" from before the real number arrived.
+        const myBetPayoutKey = myBet ? (myBet.payout == null ? 'pending' : myBet.payout) : 'none';
+        const phaseKey = !race ? 'loading' : `${race.id}:${race.status}:${myBetPayoutKey}:${!!errorText}`;
+
+        if (phaseKey !== chromePhaseKey) {
+            chromePhaseKey = phaseKey;
+            chromeTopEl.innerHTML = '';
+            chromeBottomEl.innerHTML = '';
+            racerButtonEls = {};
+            racerPoolEls = {};
+
+            walletLineEl = document.createElement('p');
+            chromeTopEl.appendChild(walletLineEl);
+
+            if (!race) {
+                bettingCountdownEl = null;
+                racingTitleEl = null;
+                const p = document.createElement('p');
+                p.textContent = 'loading race…';
+                chromeTopEl.appendChild(p);
+                clearTrack();
+            } else if (isBetting) {
+                racingTitleEl = null;
+                bettingCountdownEl = document.createElement('p');
+                chromeTopEl.appendChild(bettingCountdownEl);
+                clearTrack();
+                renderBetting();
+            } else {
+                bettingCountdownEl = null;
+                racingTitleEl = document.createElement('p');
+                chromeTopEl.appendChild(racingTitleEl);
+                if (isResolved) renderResult();
             }
-            if (isResolved) renderResult();
+
+            if (errorText) {
+                const e = document.createElement('p');
+                e.textContent = `⚠ ${errorText}`;
+                e.style.color = '#ff8080';
+                chromeBottomEl.appendChild(e);
+            }
         }
 
-        if (errorText) {
-            const e = document.createElement('p');
-            e.textContent = `⚠ ${errorText}`;
-            e.style.color = '#ff8080';
-            chromeBottomEl.appendChild(e);
+        // Safe to update in place every call, whether or not the phase
+        // above just changed — none of this touches the interactive
+        // elements themselves, only their text/track positions.
+        if (walletLineEl) walletLineEl.textContent = wallet ? `💰 ${wallet.coins} coins` : '💰 …';
+        if (bettingCountdownEl) bettingCountdownEl.textContent = `🏇 betting closes in ${secondsLeft()}s`;
+        if (isBetting) {
+            updateBettingPoolText();
+            updateSelectedRacerStyle();
+        }
+        if (racingTitleEl) {
+            racingTitleEl.textContent = isResolved
+                ? `🏁 ${race.winning_name} wins!`
+                : `🏇 racing… (${stepInfo ? stepInfo.step : 0}/${stepInfo ? stepInfo.total : 0})`;
+        }
+        if (isRacing && stepInfo) {
+            ensureTrackDom();
+            updateTrackDots(stepInfo.positions, stepInfo.shouting);
         }
     }
 
@@ -359,30 +409,51 @@
         });
     }
 
-    // Plain unstyled <button>/<input> render with the browser's own default
-    // control chrome, which stands out badly against the app's dark theme.
-    // Same muted, semi-transparent gray already used for every other button
-    // in the lobby chrome (lobby-ready/start/leave/restart/rejoin).
+    // Darker than the default browser control chrome (which stood out badly
+    // against the app's dark theme) — solid, not the old semi-transparent
+    // wash, so the buttons read clearly against the panel background.
     function styleButton(el) {
-        el.style.background = '#c4c4c454';
-        el.style.color = '#ffffffaa';
+        el.style.background = '#2c2c2ce6';
+        el.style.color = '#ffffffdd';
         el.style.border = 'unset';
-        el.style.padding = '2px 12px';
+        el.style.padding = '4px 12px';
     }
 
     function styleInput(el) {
-        el.style.background = '#c4c4c454';
+        el.style.background = '#2c2c2ce6';
         el.style.color = '#ffffffcc';
         el.style.border = 'unset';
-        el.style.padding = '2px 6px';
+        el.style.padding = '4px 6px';
+    }
+
+    // The amber outline standing in for the old "▶ " text marker — an
+    // outline (not a border) so toggling it never shifts the button's size
+    // or the layout around it.
+    function updateSelectedRacerStyle() {
+        Object.keys(racerButtonEls).forEach((name) => {
+            racerButtonEls[name].style.outline = name === selectedRacer ? '2px solid #d9a441' : 'unset';
+        });
+    }
+
+    // Pool totals refresh every 2s while betting is open — updates each
+    // row's count in place rather than through renderBetting's full rebuild,
+    // which runs only once per race/bet-state (see render()'s phaseKey).
+    function updateBettingPoolText() {
+        if (!pool) return;
+        Object.keys(racerPoolEls).forEach((name) => {
+            racerPoolEls[name].textContent = String(pool[name] ?? 0);
+        });
     }
 
     function renderBetting() {
         const list = document.createElement('div');
+        list.style.display = 'flex';
+        list.style.flexDirection = 'column';
+        list.style.gap = '6px';
+        list.style.marginBottom = '10px';
+
         race.racer_names.forEach((name) => {
-            const row = document.createElement('div');
             const total = pool ? (pool[name] ?? 0) : 0;
-            const marker = !myBet && name === selectedRacer ? '▶ ' : '';
             // Frozen the moment betting opened (see karirs' roster.compute_payout_multipliers)
             // — a racer with a stronger overall win/loss record pays less, a longshot pays more.
             const multiplier = race.payout_multipliers ? race.payout_multipliers[name] : null;
@@ -390,22 +461,38 @@
 
             if (myBet) {
                 const label = document.createElement('span');
-                label.textContent = `${name === myBet.racer_name ? '★ ' : ''}${name}${odds} — pool: ${total}`;
-                row.appendChild(label);
+                label.textContent = `${name === myBet.racer_name ? '★ ' : ''}${name}${odds} — pool: `;
+                const poolSpan = document.createElement('span');
+                poolSpan.textContent = String(total);
+                label.appendChild(poolSpan);
+                racerPoolEls[name] = poolSpan;
+                list.appendChild(label);
             } else {
                 const btn = document.createElement('button');
                 btn.type = 'button';
-                btn.textContent = `${marker}${name}${odds} — pool: ${total}`;
+                btn.style.display = 'block';
+                btn.style.width = '100%';
+                btn.style.textAlign = 'left';
                 styleButton(btn);
+
+                const textSpan = document.createElement('span');
+                textSpan.textContent = `${name}${odds} — pool: `;
+                const poolSpan = document.createElement('span');
+                poolSpan.textContent = String(total);
+                btn.appendChild(textSpan);
+                btn.appendChild(poolSpan);
+
+                racerButtonEls[name] = btn;
+                racerPoolEls[name] = poolSpan;
                 btn.addEventListener('click', () => {
                     selectedRacer = name;
                     render();
                 });
-                row.appendChild(btn);
+                list.appendChild(btn);
             }
-            list.appendChild(row);
         });
         chromeTopEl.appendChild(list);
+        updateSelectedRacerStyle();
 
         if (myBet) {
             const p = document.createElement('p');
@@ -414,13 +501,18 @@
             return;
         }
 
+        const controlsRow = document.createElement('div');
+        controlsRow.style.display = 'flex';
+        controlsRow.style.gap = '8px';
+        controlsRow.style.marginTop = '4px';
+
         const wagerInput = document.createElement('input');
         wagerInput.type = 'number';
         wagerInput.min = '1';
         wagerInput.value = '50';
         wagerInput.style.width = '70px';
         styleInput(wagerInput);
-        chromeTopEl.appendChild(wagerInput);
+        controlsRow.appendChild(wagerInput);
 
         const betBtn = document.createElement('button');
         betBtn.type = 'button';
@@ -440,7 +532,8 @@
             }
             window.CheddarHost.send('place_bet', { raceId: race.id, racerName: selectedRacer, wager });
         });
-        chromeTopEl.appendChild(betBtn);
+        controlsRow.appendChild(betBtn);
+        chromeTopEl.appendChild(controlsRow);
     }
 
     function renderResult() {

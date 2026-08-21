@@ -40,23 +40,44 @@ SPEED_FACTOR_DAMPING = 0.10
 MIN_SPEED_FACTOR = 0.75
 MAX_SPEED_FACTOR = 1.3
 
-# Seeded once on first startup if the table is empty — easy to grow later
-# by just inserting more rows into `racers`.
-SEED_NAMES = [
-    "Neil Axinto", "Aby Calago", "Ashley Bayarcal", "Brian Lisondra",
-    "Carl Perral", "Chaimel Enjambre", "Elieser Tajanlangit", "Jayson Martinez",
-    "Jerome Madelo", "Jhoewell Posas", "Jhon Pabroa", "John Macapaz",
-    "John Leo Salac", "Jonah Taganahan", "Joshua Paulo", "Troy Alonsagay",
-    "Grace Vellina", "Mat Ando", "Michael Tonilon", "Mike Miñoza",
-    "Novel Chavez", "Percival Mansueto", "Rashed Perez", "Roland Clarion",
-    "Xiao",
+# Seeded once on first startup if the table is empty — easy to grow later by
+# just inserting more rows into `racers`. Each racer's signature_move lives
+# on the row itself (see Race.signature_moves in models.py), so it's part of
+# this seed data too, rather than a separate hardcoded map any client would
+# need its own copy of.
+SEED_RACERS = [
+    ("Neil Axinto", "🚀 Turbo Neil!"),
+    ("Aby Calago", "🌪️ Aby Cyclone!"),
+    ("Ashley Bayarcal", "✨ Starlight Dash!"),
+    ("Brian Lisondra", "🔥 Blazing Brian!"),
+    ("Carl Perral", "⚡ Carl's Overdrive!"),
+    ("Chaimel Enjambre", "💀 Newbie Slayer!"),
+    ("Elieser Tajanlangit", "🌊 Tidal Elieser!"),
+    ("Jayson Martinez", "🎯 Bullseye Blitz!"),
+    ("Jerome Madelo", "🥷 Shadow Step!"),
+    ("Jhoewell Posas", "🐉 Dragon's Roar!"),
+    ("Jhon Pabroa", "🌀 Whirlwind Jhon!"),
+    ("John Macapaz", "💥 Sonic Boom!"),
+    ("John Leo Salac", "🦁 Lion's Pride!"),
+    ("Jonah Taganahan", "🌟 Falling Star!"),
+    ("Joshua Paulo", "⚔️ Blade Rush!"),
+    ("Troy Alonsagay", "🏹 Arrow of Troy!"),
+    ("Grace Vellina", "👑 Graceful Fury!"),
+    ("Mat Ando", "🔨 Hammer Time!"),
+    ("Michael Tonilon", "🚨 Code Red!"),
+    ("Mike Miñoza", "🎸 Rockstar Rev!"),
+    ("Novel Chavez", "📖 Plot Twist!"),
+    ("Percival Mansueto", "🛡️ Iron Wall Charge!"),
+    ("Rashed Perez", "💨 Rashed Rocket!"),
+    ("Roland Clarion", "🔔 Clarion Call!"),
+    ("Xiao", "🐼 Panda Dash!"),
 ]
 
 
 def seed_roster_if_empty(db: Session) -> None:
     if db.query(Racer).count() > 0:
         return
-    db.add_all(Racer(name=name) for name in SEED_NAMES)
+    db.add_all(Racer(name=name, signature_move=move) for name, move in SEED_RACERS)
     db.commit()
 
 

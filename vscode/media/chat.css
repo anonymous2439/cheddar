@@ -38,20 +38,14 @@ html, body {
     transition: .6s;
 }
 
-/* Scoped to the lock button and the drawer itself — not #msg:hover broadly,
-   which used to also fire while hovering the plain messages area since
-   #game-drawer-lock lives inside #msg-users rather than beside .msg-options
-   in the DOM. :has() lets the button's hover reach its non-descendant
-   sibling .msg-options; once the drawer is open, hovering it directly keeps
-   it open without needing the pointer back over the button. */
-#msg.unlocked:has(#game-drawer-lock:hover) .msg-options,
-#msg.unlocked .msg-options:hover {
+/* #game-drawer-lock toggles the "unlocked" class on click (see chat.js) —
+   visibility follows that click state alone, no hover needed. */
+#msg.unlocked .msg-options {
     width: 578px;
     opacity: 1;
 }
 
-#msg.unlocked:has(#game-drawer-lock:hover) #msg-users,
-#msg.unlocked:has(.msg-options:hover) #msg-users {
+#msg.unlocked #msg-users {
     width: calc(100% - 578px);
 }
 
