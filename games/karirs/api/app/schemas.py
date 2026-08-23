@@ -6,6 +6,11 @@ from pydantic import BaseModel, ConfigDict, Field
 class WalletOut(BaseModel):
     user_id: int
     coins: int
+    # Computed, not stored — whether 24h has passed since last_claimed_at
+    # (or the user has never claimed at all). Server-computed so clients
+    # never have to reason about clock skew or the naive-datetime-needs-a-
+    # timezone gotcha themselves.
+    daily_bonus_available: bool = False
 
 
 class RaceCreate(BaseModel):
@@ -66,3 +71,11 @@ class RaceResultOut(BaseModel):
     race: RaceOut
     standings: list[str]
     bets: list[BetOut]
+
+
+class HallOfFameEntryOut(BaseModel):
+    display_name: str
+    racer_name: str
+    wager: int
+    payout: int
+    created_at: datetime

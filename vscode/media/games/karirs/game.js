@@ -21,6 +21,17 @@
     let pollTimer = null;
     let tickTimer = null;
 
+    // The 10 biggest wagers that ever actually won — fetched on demand when
+    // the player opens it, not kept live/polled like everything else here.
+    let hallOfFame = null;
+    let showHallOfFame = false;
+    // Bumped every time fresh hall-of-fame data arrives — reopening the
+    // view shows whatever was last loaded immediately (no "loading…"
+    // flicker for data we already have), but a *refresh* landing while
+    // it's already open needs its own key change too, or the response
+    // would replace `hallOfFame` silently without ever being rendered.
+    let hallOfFameVersion = 0;
+
     // The whole precomputed race (index 0 = step 1) plus the wall-clock
     // instant it started — independent of the REST-polled `race` above,
     // which can lag a couple of seconds behind. Positions for "right now"
@@ -87,6 +98,9 @@
         racingTitleEl = null;
         racerButtonEls = {};
         racerPoolEls = {};
+        hallOfFame = null;
+        showHallOfFame = false;
+        hallOfFameVersion = 0;
         render();
 
         window.CheddarHost.send('sync_race', { lobbyId: ctx.lobbyId });
@@ -190,6 +204,9 @@
             window.CheddarHost.send('my_bet', { raceId: race.id });
             window.CheddarHost.send('wallet', {});
             window.CheddarHost.finishGame();
+        } else if (event === 'hall_of_fame') {
+            hallOfFame = data;
+            hallOfFameVersion += 1;
         } else if (event === 'error') {
             errorText = data.message;
         }
@@ -247,7 +264,14 @@
         // could sit there forever still showing the placeholder "no payout
         // this time" from before the real number arrived.
         const myBetPayoutKey = myBet ? (myBet.payout == null ? 'pending' : myBet.payout) : 'none';
-        const phaseKey = !race ? 'loading' : `${race.id}:${race.status}:${myBetPayoutKey}:${!!errorText}`;
+        // Same reasoning as myBetPayoutKey above: the Hall of Fame data
+        // arrives *after* showHallOfFame already flipped true (the button
+        // click and the response are two separate render() calls), so
+        // "loaded vs. still pending" has to be part of the key too, or the
+        // response landing would skip the rebuild and leave "loading…"
+        // on screen forever.
+        const hofKey = showHallOfFame ? `hof-${hallOfFameVersion}` : 'hof-closed';
+        const phaseKey = `${hofKey}:${!race ? 'loading' : `${race.id}:${race.status}:${myBetPayoutKey}:${!!errorText}`}`;
 
         if (phaseKey !== chromePhaseKey) {
             chromePhaseKey = phaseKey;
@@ -259,7 +283,33 @@
             walletLineEl = document.createElement('p');
             chromeTopEl.appendChild(walletLineEl);
 
-            if (!race) {
+            const hofBtn = document.createElement('button');
+            hofBtn.type = 'button';
+            hofBtn.textContent = showHallOfFame ? '✕ Close Hall of Fame' : '🏆 Hall of Fame';
+            styleButton(hofBtn);
+            hofBtn.style.marginBottom = '6px';
+            hofBtn.style.display = 'block';
+            hofBtn.addEventListener('click', () => {
+                showHallOfFame = !showHallOfFame;
+                // Always refetches on open rather than caching indefinitely
+                // — this is small, infrequently-changing data, so the cost
+                // of asking again is trivial next to showing a stale list.
+                // Whatever was already loaded stays visible until the fresh
+                // response replaces it, so reopening doesn't flash "loading…"
+                // for no reason.
+                if (showHallOfFame) {
+                    window.CheddarHost.send('hall_of_fame', {});
+                }
+                render();
+            });
+            chromeTopEl.appendChild(hofBtn);
+
+            if (showHallOfFame) {
+                bettingCountdownEl = null;
+                racingTitleEl = null;
+                clearTrack();
+                renderHallOfFame();
+            } else if (!race) {
                 bettingCountdownEl = null;
                 racingTitleEl = null;
                 const p = document.createElement('p');
@@ -301,7 +351,7 @@
                 ? `🏁 ${race.winning_name} wins!`
                 : `🏇 racing… (${stepInfo ? stepInfo.step : 0}/${stepInfo ? stepInfo.total : 0})`;
         }
-        if (isRacing && stepInfo) {
+        if (isRacing && stepInfo && !showHallOfFame) {
             ensureTrackDom();
             updateTrackDots(stepInfo.positions, stepInfo.shouting);
         }
@@ -496,7 +546,7 @@
 
         if (myBet) {
             const p = document.createElement('p');
-            p.textContent = `you bet ${myBet.wager} coins on ${myBet.racer_name} — nobody else can see that`;
+            p.textContent = '✅ bet placed — check the game chat for the announcement';
             chromeTopEl.appendChild(p);
             return;
         }
@@ -544,6 +594,34 @@
                 ? `you bet on ${myBet.racer_name} and won ${myBet.payout} coins!`
                 : `you bet ${myBet.wager} on ${myBet.racer_name} — no payout this time.`;
         chromeBottomEl.appendChild(p);
+    }
+
+    // The 10 biggest wagers that ever actually won, ranked by wager size
+    // (not payout) — fetched on demand (see the Hall of Fame button in
+    // render()), not kept live.
+    function renderHallOfFame() {
+        const hint = document.createElement('p');
+        hint.textContent = 'The biggest bets that ever actually won.';
+        hint.style.opacity = '0.7';
+        chromeTopEl.appendChild(hint);
+
+        if (!hallOfFame) {
+            const p = document.createElement('p');
+            p.textContent = 'loading…';
+            chromeTopEl.appendChild(p);
+            return;
+        }
+        if (hallOfFame.length === 0) {
+            const p = document.createElement('p');
+            p.textContent = 'no winning bets yet';
+            chromeTopEl.appendChild(p);
+            return;
+        }
+        hallOfFame.forEach((entry, i) => {
+            const p = document.createElement('p');
+            p.textContent = `#${i + 1} ${entry.display_name} bet ${entry.wager} on ${entry.racer_name} — +${entry.payout}`;
+            chromeTopEl.appendChild(p);
+        });
     }
 
     window.CheddarGames = window.CheddarGames || {};

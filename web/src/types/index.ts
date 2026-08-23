@@ -109,6 +109,17 @@ export type WsEvent =
 export interface KarirsWallet {
   user_id: number;
   coins: number;
+  daily_bonus_available: boolean;
+}
+
+// The 10 biggest wagers that ever actually won, ranked by wager size (not
+// payout) — see games/karirs/api/app/schemas.py's HallOfFameEntryOut.
+export interface KarirsHallOfFameEntry {
+  display_name: string;
+  racer_name: string;
+  wager: number;
+  payout: number;
+  created_at: string;
 }
 
 // A single precomputed step of a race — positions get interpolated between

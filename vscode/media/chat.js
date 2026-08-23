@@ -34,6 +34,11 @@ let lastLobby = null;
 let lastSelfId = null;
 let lastTracksCompletion = false;
 
+// The most recently clicked "Claim 250 coins" button — only one claim can
+// realistically be in flight at a time, so tracking just the last one is
+// enough to update it once the host's response comes back.
+let pendingDailyBonusBtn = null;
+
 // Receive messages from extension
 window.addEventListener('message', event => {
     const msg = event.data;
@@ -92,15 +97,51 @@ window.addEventListener('message', event => {
         msgContent.appendChild(p);
         msgContainer.scrollTop = msgContainer.scrollHeight;
     }
+    else if (msg.type === 'log.daily_bonus') {
+        const p = document.createElement('p');
+        p.textContent = msg.text + ' — ';
+        const claimBtn = document.createElement('button');
+        claimBtn.type = 'button';
+        claimBtn.textContent = 'Claim 250 coins';
+        claimBtn.style.background = '#c4c4c454';
+        claimBtn.style.color = '#ffffffaa';
+        claimBtn.style.border = 'unset';
+        claimBtn.style.padding = '0px 8px';
+        claimBtn.style.fontSize = 'inherit';
+        claimBtn.addEventListener('click', () => {
+            claimBtn.disabled = true;
+            claimBtn.textContent = 'Claiming…';
+            pendingDailyBonusBtn = claimBtn;
+            vscode.postMessage({ type: 'game.action', gameKey: 'karirs', action: 'claim_daily_bonus', data: {} });
+        });
+        p.appendChild(claimBtn);
+        msgContent.appendChild(p);
+        msgContainer.scrollTop = msgContainer.scrollHeight;
+    }
     else if (msg.type === 'game.event') {
         // A replay is watchable straight from chat whether or not any karirs
         // game module happens to be mounted right now — it renders into its
         // own dedicated panel below, never through the game module.
         if (msg.event === 'replay_data') {
             renderReplay(msg.data);
+        } else if (msg.event === 'daily_bonus_claimed') {
+            if (pendingDailyBonusBtn) {
+                pendingDailyBonusBtn.textContent = '✅ Claimed!';
+                pendingDailyBonusBtn = null;
+            }
+        } else if (msg.event === 'daily_bonus_claim_conflict') {
+            if (pendingDailyBonusBtn) {
+                pendingDailyBonusBtn.textContent = '✅ Already claimed';
+                pendingDailyBonusBtn = null;
+            }
         } else {
             if (msg.event === 'error' && replayViewEl.style.display === 'block' && !replayRace) {
                 replayStatusEl.textContent = `⚠ ${msg.data.message}`;
+            }
+            if (msg.event === 'error' && pendingDailyBonusBtn) {
+                pendingDailyBonusBtn.disabled = false;
+                pendingDailyBonusBtn.textContent = "Couldn't claim — try again";
+                pendingDailyBonusBtn = null;
             }
             const game = window.CheddarGames && window.CheddarGames[msg.gameKey];
             if (game && game.onEvent) game.onEvent(msg.event, msg.data);

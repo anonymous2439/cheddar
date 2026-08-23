@@ -2,6 +2,8 @@ import axios from "axios";
 import { useEffect, useRef, useState } from "react";
 import * as karirsApi from "../../api/karirs";
 import { computePlayback, renderTrack } from "./render";
+import { onKarirsWalletChanged } from "../../lib/karirsEvents";
+import { KarirsHallOfFameModal } from "./KarirsHallOfFameModal";
 import type { KarirsBet, KarirsPool, KarirsRace, KarirsResolvedMessage, KarirsStepsMessage, KarirsWallet, Lobby } from "../../types";
 
 interface Props {
@@ -17,6 +19,7 @@ export function KarirsGame({ lobby, onFinished }: Props) {
   const [selectedRacer, setSelectedRacer] = useState<string | null>(null);
   const [wager, setWager] = useState(50);
   const [error, setError] = useState("");
+  const [showHallOfFame, setShowHallOfFame] = useState(false);
   const [, forceTick] = useState(0);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -66,6 +69,17 @@ export function KarirsGame({ lobby, onFinished }: Props) {
       cancelled = true;
     };
   }, [lobby.id]);
+
+  // The daily-bonus claim button lives in the chat components (ChatWindow,
+  // LobbyChatDock), not here — claiming there doesn't touch this
+  // component's state at all, so without this the coin total shown above
+  // would just sit stale until something else happened to refetch it (the
+  // next bet, the next race). This is the other end of that notification.
+  useEffect(() => {
+    return onKarirsWalletChanged(() => {
+      karirsApi.getWallet().then(setWallet).catch(() => {});
+    });
+  }, []);
 
   // Pool + my-bet only need fetching twice: once on first load of a race,
   // once more on resolution to pick up the final payout — not on every
@@ -235,7 +249,15 @@ export function KarirsGame({ lobby, onFinished }: Props) {
     <div className="flex h-full flex-col overflow-y-auto p-4">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-lg font-semibold">🏇 {lobby.game_name}</h2>
-        <span className="text-sm text-neutral-500">💰 {wallet ? wallet.coins : "…"} coins</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowHallOfFame(true)}
+            className="text-sm text-neutral-500 hover:text-amber-600 hover:underline"
+          >
+            🏆 Hall of Fame
+          </button>
+          <span className="text-sm text-neutral-500">💰 {wallet ? wallet.coins : "…"} coins</span>
+        </div>
       </div>
 
       <p className="mb-2 text-sm text-neutral-600">
@@ -245,6 +267,8 @@ export function KarirsGame({ lobby, onFinished }: Props) {
       </p>
 
       <canvas ref={canvasRef} className="mb-3 h-48 w-full rounded border border-neutral-200" />
+
+      {showHallOfFame && <KarirsHallOfFameModal onClose={() => setShowHallOfFame(false)} />}
 
       {isBetting && !myBet && (
         <div className="mb-3">
@@ -281,9 +305,7 @@ export function KarirsGame({ lobby, onFinished }: Props) {
       )}
 
       {isBetting && myBet && (
-        <p className="mb-3 text-sm text-neutral-600">
-          You bet {myBet.wager} coins on {myBet.racer_name} — nobody else can see that.
-        </p>
+        <p className="mb-3 text-sm text-neutral-600">✅ Bet placed — check the game chat for the announcement.</p>
       )}
 
       {!isBetting && (

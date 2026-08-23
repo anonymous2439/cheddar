@@ -159,6 +159,12 @@ function Write-CheddarMessage {
     } elseif ($Message.metadata) {
         $body = "[attachment] $($Message.metadata.filename)"
     }
+    # No buttons in a terminal -- the web/vscode clients render this as a
+    # clickable "Claim 250 coins" button, so this just tells the player
+    # what to type instead.
+    if ($Message.metadata -and $Message.metadata.action -eq 'karirs_daily_bonus') {
+        $body = "$body -- /claim to redeem"
+    }
     Write-CheddarLog "$who» $body"
 }
 
@@ -401,6 +407,8 @@ $Script:CommandHelp = [ordered]@{
     )
     race     = @('/race -- show the current Karirs race: each racer''s payout multiplier and pool, your bet if you placed one, and betting/racing status')
     bet      = @('/bet <racer #> <wager> -- bet coins on a racer from /race, by its number -- only while betting is open, one bet per race')
+    claim    = @('/claim -- redeem your daily 250-coin bonus (once every 24 hours) -- watch the game chat for the reminder')
+    hof      = @('/hof -- show the 10 biggest bets that ever actually won, ranked by wager size')
     update   = @('/update -- check for, and install, a Cheddar client update')
     exit     = @('/exit -- close this session (does not log you out -- your saved session is still there next time)')
     help     = @('/help -- list every command', '/help <command> -- show detailed usage for one command')
@@ -446,6 +454,8 @@ function Invoke-CheddarCommand {
             if ($rest.Count -ne 2) { Write-CheddarLog 'usage: /bet <racer #> <wager>'; return }
             Invoke-CheddarPlaceBet -IndexArg $rest[0] -WagerArg $rest[1]
         }
+        'claim' { Invoke-CheddarClaimDailyBonus }
+        'hof' { Invoke-CheddarHallOfFame }
         'update' { Invoke-CheddarUpdate }
         'exit' {
             # Just closes this session -- the stored access/refresh tokens
@@ -460,7 +470,7 @@ function Invoke-CheddarCommand {
                 else { Write-CheddarLog "no help for /$arg -- /help with no arguments lists every command" }
                 return
             }
-            Write-CheddarLog 'commands: /login /signup /logout /whoami /friends /requests /add /accept /decline /chats /open /games /lobby /race /bet /update /exit -- /help <command> for details'
+            Write-CheddarLog 'commands: /login /signup /logout /whoami /friends /requests /add /accept /decline /chats /open /games /lobby /race /bet /claim /hof /update /exit -- /help <command> for details'
         }
         default { Write-CheddarLog "unknown command: /$name" }
     }
@@ -1044,10 +1054,34 @@ function Invoke-CheddarPlaceBet {
     $res = Invoke-KarirsApi -Method POST -Path "/races/$($Script:KarirsRace.id)/bets" -Body @{ racer_name = $racerName; wager = $wager }
     if (-not $res.Ok) { Write-CheddarLog "could not place bet: $(Format-CheddarApiError -Result $res)"; return }
     $Script:KarirsMyBet = $res.Data
-    Write-CheddarLog "you bet $wager coins on $racerName -- nobody else can see that"
+    Write-CheddarLog "bet placed -- check the game chat for the announcement"
 
     $walletRes = Invoke-KarirsApi -Method GET -Path '/wallet'
     if ($walletRes.Ok) { $Script:KarirsWallet = $walletRes.Data }
+}
+
+function Invoke-CheddarClaimDailyBonus {
+    # No lobby/race context needed -- the daily bonus is per-user, not
+    # per-game-session. Works whether or not a race is currently in
+    # progress, reachable straight off the "/claim to redeem" chat hint.
+    $res = Invoke-KarirsApi -Method POST -Path '/wallet/claim-daily'
+    if (-not $res.Ok) { Write-CheddarLog "could not claim: $(Format-CheddarApiError -Result $res)"; return }
+    $Script:KarirsWallet = $res.Data
+    Write-CheddarLog "claimed 250 coins -- wallet: $($res.Data.coins) coins"
+}
+
+function Invoke-CheddarHallOfFame {
+    # The 10 biggest wagers that ever actually won, ranked by wager size
+    # (not payout) -- queryable on demand, not tied to any specific race or
+    # lobby.
+    $res = Invoke-KarirsApi -Method GET -Path '/hall-of-fame'
+    if (-not $res.Ok) { Write-CheddarLog "could not load hall of fame: $(Format-CheddarApiError -Result $res)"; return }
+    if ($res.Data.Count -eq 0) { Write-CheddarLog 'no winning bets yet'; return }
+    Write-CheddarLog '🏆 Hall of Fame -- the biggest bets that ever actually won:'
+    for ($i = 0; $i -lt $res.Data.Count; $i++) {
+        $entry = $res.Data[$i]
+        Write-CheddarLog "  #$($i + 1) $($entry.display_name) bet $($entry.wager) on $($entry.racer_name) -- +$($entry.payout)"
+    }
 }
 
 # -----------------------------

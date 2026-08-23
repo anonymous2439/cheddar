@@ -712,6 +712,14 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             return;
         }
 
+        if (m.type === 'system_action' && m.metadata?.action === 'karirs_daily_bonus') {
+            this.webviewView?.webview.postMessage({
+                type: 'log.daily_bonus',
+                text: m.content ?? '',
+            });
+            return;
+        }
+
         const body = m.content ?? (m.metadata?.filename ? `[attachment] ${m.metadata.filename}` : '');
         this.log(`${who}» ${body}`);
     }
@@ -1236,6 +1244,30 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                     const poolRes = await this.karirsFetch(`/races/${data.raceId}/pool`);
                     const pool = poolRes.ok ? await poolRes.json() : {};
                     await this.sendGameEvent('karirs', 'replay_data', { race, pool });
+                    return;
+                }
+                case 'claim_daily_bonus': {
+                    // Reachable straight from the "your daily bonus is ready"
+                    // chat message, same as view_replay — no game module needs
+                    // to be mounted. A 409 just means it's already been
+                    // claimed (possibly from another device) — that's an
+                    // expected outcome, not a real failure, so it gets its own
+                    // event instead of falling into the generic error path.
+                    const res = await this.karirsFetch('/wallet/claim-daily', { method: 'POST' });
+                    if (res.status === 409) {
+                        await this.sendGameEvent('karirs', 'daily_bonus_claim_conflict', {});
+                        return;
+                    }
+                    if (!res.ok) throw new Error(`claim failed (${res.status})`);
+                    await this.sendGameEvent('karirs', 'daily_bonus_claimed', await res.json());
+                    return;
+                }
+                case 'hall_of_fame': {
+                    // The 10 biggest wagers that ever actually won — queryable
+                    // on demand from the game view itself, not announced.
+                    const res = await this.karirsFetch('/hall-of-fame');
+                    if (!res.ok) throw new Error(`hall of fame fetch failed (${res.status})`);
+                    await this.sendGameEvent('karirs', 'hall_of_fame', await res.json());
                     return;
                 }
                 default:

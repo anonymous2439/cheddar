@@ -1,15 +1,28 @@
 import { useEffect, useRef, useState } from "react";
+import axios from "axios";
 import type { Conversation, Message, MessageAttachment, SystemActionMetadata } from "../types";
 import { applyEmojiShortcuts } from "../lib/emoji";
 import { EmojiPicker } from "./EmojiPicker";
 import { apiBaseUrl } from "../api/client";
 import { uploadAttachment } from "../api/conversations";
+import { claimDailyBonus } from "../api/karirs";
+import { notifyKarirsWalletChanged } from "../lib/karirsEvents";
 import { KarirsReplayModal } from "../games/karirs/KarirsReplayModal";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// created_at has no timezone marker, so this renders in whatever zone the
+// browser itself is in — fine for same-zone viewers, a bit off for anyone
+// elsewhere, but there's no zone info in the string to correct it with.
+function formatMessageTime(createdAt: string): string {
+  const date = new Date(createdAt);
+  const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (date.toDateString() === new Date().toDateString()) return time;
+  return `${date.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
 }
 
 // metadata's shape depends on message type — these two just narrow it back
@@ -25,6 +38,11 @@ function karirsReplayRaceId(m: Message): number | null {
   const metadata = m.metadata as SystemActionMetadata;
   if (metadata.action !== "karirs_race_replay") return null;
   return typeof metadata.race_id === "number" ? metadata.race_id : null;
+}
+
+function isKarirsDailyBonusMessage(m: Message): boolean {
+  if (m.type !== "system_action" || !m.metadata) return false;
+  return (m.metadata as SystemActionMetadata).action === "karirs_daily_bonus";
 }
 
 interface Props {
@@ -59,6 +77,9 @@ export function ChatWindow({
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [replayRaceId, setReplayRaceId] = useState<number | null>(null);
+  // Keyed by message id, not global — a stale reminder from a previous day
+  // sitting further up the scrollback shouldn't share state with today's.
+  const [bonusClaimStatus, setBonusClaimStatus] = useState<Record<number, "loading" | "claimed" | "error">>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -195,6 +216,28 @@ export function ChatWindow({
     onTyping("stop");
   }
 
+  async function handleClaimDailyBonus(messageId: number) {
+    setBonusClaimStatus((prev) => ({ ...prev, [messageId]: "loading" }));
+    try {
+      await claimDailyBonus();
+      setBonusClaimStatus((prev) => ({ ...prev, [messageId]: "claimed" }));
+      // The coin total shown in the game view is entirely separate state
+      // (KarirsGame doesn't render here, and may not even be mounted) —
+      // this is what tells it to refetch instead of sitting stale.
+      notifyKarirsWalletChanged();
+    } catch (err) {
+      // A 409 just means someone (possibly the same player, on another
+      // device) already claimed today's bonus — not a real failure, so it
+      // gets the same "already claimed" treatment as a successful claim
+      // rather than an error state.
+      if (axios.isAxiosError(err) && err.response?.status === 409) {
+        setBonusClaimStatus((prev) => ({ ...prev, [messageId]: "claimed" }));
+      } else {
+        setBonusClaimStatus((prev) => ({ ...prev, [messageId]: "error" }));
+      }
+    }
+  }
+
   async function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -242,6 +285,8 @@ export function ChatWindow({
           const attachment = asAttachment(m);
           const attachmentUrl = attachment ? `${apiBaseUrl}${attachment.url}` : null;
           const replayRaceIdForMessage = karirsReplayRaceId(m);
+          const isDailyBonus = isKarirsDailyBonusMessage(m);
+          const bonusStatus = bonusClaimStatus[m.id];
 
           return (
             <div key={m.id} className={`mb-2 flex ${isMine ? "justify-end" : "justify-start"}`}>
@@ -286,6 +331,25 @@ export function ChatWindow({
                     🏁 Watch Replay
                   </button>
                 )}
+                {isDailyBonus && bonusStatus !== "claimed" && (
+                  <button
+                    onClick={() => handleClaimDailyBonus(m.id)}
+                    disabled={bonusStatus === "loading"}
+                    className="mt-2 block w-full rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+                  >
+                    {bonusStatus === "loading" ? "Claiming…" : bonusStatus === "error" ? "Couldn't claim — try again" : "🎁 Claim 250 coins"}
+                  </button>
+                )}
+                {isDailyBonus && bonusStatus === "claimed" && (
+                  <p className="mt-2 text-xs font-medium text-amber-700">✅ Claimed!</p>
+                )}
+                <div
+                  className={`mt-1 text-[10px] ${
+                    m.type === "system_action" ? "text-neutral-400" : isMine ? "text-amber-100" : "text-neutral-400"
+                  }`}
+                >
+                  {formatMessageTime(m.created_at)}
+                </div>
               </div>
             </div>
           );

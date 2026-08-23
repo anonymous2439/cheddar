@@ -1,6 +1,6 @@
 import axios, { type InternalAxiosRequestConfig } from "axios";
 import { getStoredAuth } from "./client";
-import type { KarirsBet, KarirsPool, KarirsRace, KarirsWallet } from "../types";
+import type { KarirsBet, KarirsHallOfFameEntry, KarirsPool, KarirsRace, KarirsWallet } from "../types";
 
 // Karirs is its own service (games/karirs/api) with its own database — it
 // only trusts the same Cheddar-issued JWT (verified with Cheddar's own
@@ -28,6 +28,10 @@ export function getWallet() {
   return karirsApi.get<KarirsWallet>("/wallet").then((r) => r.data);
 }
 
+export function claimDailyBonus() {
+  return karirsApi.post<KarirsWallet>("/wallet/claim-daily").then((r) => r.data);
+}
+
 export function syncRace(lobbyId: number) {
   return karirsApi.post<KarirsRace>("/races", { lobby_id: lobbyId }).then((r) => r.data);
 }
@@ -46,4 +50,8 @@ export function getMyBet(raceId: number) {
 
 export function placeBet(raceId: number, racerName: string, wager: number) {
   return karirsApi.post<KarirsBet>(`/races/${raceId}/bets`, { racer_name: racerName, wager }).then((r) => r.data);
+}
+
+export function getHallOfFame() {
+  return karirsApi.get<KarirsHallOfFameEntry[]>("/hall-of-fame").then((r) => r.data);
 }

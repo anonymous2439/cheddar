@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -20,13 +21,15 @@ from app.roster import (
     seed_roster_if_empty,
     speed_factor_for_multiplier,
 )
-from app.schemas import BetCreate, BetOut, RaceCreate, RaceOut, RaceResultOut, WalletOut
+from app.schemas import BetCreate, BetOut, HallOfFameEntryOut, RaceCreate, RaceOut, RaceResultOut, WalletOut
 from app.security import decode_user_id, get_current_user_id
 
 Base.metadata.create_all(bind=engine)
 
 BETTING_SECONDS = 30
 STEP_DELAY_SECONDS = 0.3
+DAILY_BONUS_COINS = 250
+DAILY_BONUS_INTERVAL = timedelta(hours=24)
 
 app = FastAPI(title="Karirs API")
 
@@ -74,6 +77,31 @@ race_sockets = RaceConnectionManager()
 # race.
 _scheduled: set[int] = set()
 
+# create_race's "reuse the existing race, or deal a fresh one" logic is a
+# classic check-then-insert race: two players' clients both call POST
+# /races for the same lobby within milliseconds of the same game.started
+# broadcast (this is a sync endpoint, so FastAPI runs it in a threadpool —
+# genuinely concurrent threads, not just concurrent asyncio tasks), and both
+# can see "no race yet" before either has committed one. Without a lock,
+# each thread then calls pick_racers() independently and inserts its own
+# Race row — two separate races for one lobby, each with its own random
+# roster and its own auto-resolve timer, and each player's client stays
+# pinned to whichever one its own request happened to create/receive for
+# the rest of betting and racing (nothing ever re-fetches the "other"
+# race). One lock per lobby_id serializes the whole check-then-insert
+# section so the second caller always finds the first one's committed row.
+_race_creation_locks: dict[int, threading.Lock] = {}
+_race_creation_locks_guard = threading.Lock()
+
+
+def _lock_for_lobby(lobby_id: int) -> threading.Lock:
+    with _race_creation_locks_guard:
+        lock = _race_creation_locks.get(lobby_id)
+        if lock is None:
+            lock = threading.Lock()
+            _race_creation_locks[lobby_id] = lock
+        return lock
+
 # Sync endpoints (matching the main Cheddar API's own style) run in FastAPI's
 # worker threadpool, which has no running event loop of its own — asyncio.
 # create_task would fail there. The startup handler is async, so it's the one
@@ -94,6 +122,20 @@ def _get_or_create_wallet(db: Session, user_id: int) -> Wallet:
         db.commit()
         db.refresh(wallet)
     return wallet
+
+
+def _daily_bonus_available(wallet: Wallet) -> bool:
+    if wallet.last_claimed_at is None:
+        return True
+    return _now() - wallet.last_claimed_at >= DAILY_BONUS_INTERVAL
+
+
+def _wallet_out(wallet: Wallet) -> WalletOut:
+    return WalletOut(
+        user_id=wallet.user_id,
+        coins=wallet.coins,
+        daily_bonus_available=_daily_bonus_available(wallet),
+    )
 
 
 def _finish_race(db: Session, race: Race) -> RaceResultOut:
@@ -142,8 +184,7 @@ def _speed_factors_for_race(race: Race, db: Session) -> dict[str, float]:
     multipliers = race.payout_multipliers
     if not multipliers:
         multipliers = compute_payout_multipliers(db, list(race.racer_names))
-    field_size = len(race.racer_names)
-    return {name: speed_factor_for_multiplier(m, field_size) for name, m in multipliers.items()}
+    return {name: speed_factor_for_multiplier(m) for name, m in multipliers.items()}
 
 
 def _run_to_completion_now(db: Session, race: Race) -> RaceResultOut:
@@ -255,6 +296,96 @@ async def _post_race_replay_message(race: RaceOut) -> None:
         pass
 
 
+async def _lookup_display_name(lobby_id: int, user_id: int) -> str:
+    """Karirs has no users table of its own — user_id is just the JWT's
+    trusted "sub" claim — so a bettor's display name has to be borrowed from
+    Cheddar's own lobby record, the one place this service can already reach
+    with a minted token. Best-effort: a bland fallback beats failing the
+    whole announcement over a name lookup."""
+    token = _mint_cheddar_token(user_id)
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{settings.cheddar_api_base_url}/api/v1/games/lobbies/{lobby_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if resp.status_code == 200:
+            for p in resp.json().get("participants", []):
+                if int(p["user"]["id"]) == user_id:
+                    return p["user"].get("display_name") or p["user"].get("username") or "Someone"
+    except Exception:
+        pass
+    return "Someone"
+
+
+async def _post_bet_placed_message(lobby_id: int, user_id: int, wager: int) -> None:
+    """Announces who placed a bet and how much — never which racer, keeping
+    the same anonymity picks always had (only aggregate pool totals are ever
+    shown for that). Best-effort, same as the replay announcement: a failed
+    notification shouldn't undo an already-placed bet."""
+    display_name = await _lookup_display_name(lobby_id, user_id)
+    token = _mint_cheddar_token(user_id)
+    payload = {
+        "content": f"\U0001f4b0 {display_name} bet {wager} coins",
+        "action": "karirs_bet_placed",
+        "action_data": {},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{settings.cheddar_api_base_url}/api/v1/games/lobbies/{lobby_id}/system-message",
+                json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except Exception:
+        pass
+
+
+async def _post_daily_bonus_message(lobby_id: int, user_id: int) -> None:
+    """Announces the daily coin bonus is ready to claim. Best-effort, same
+    as the other system messages: a failed notification just means the
+    chat doesn't get the reminder this time — the claim endpoint itself
+    doesn't depend on it."""
+    token = _mint_cheddar_token(user_id)
+    payload = {
+        "content": f"\U0001f381 Your daily {DAILY_BONUS_COINS} coins are ready! Tap below to claim.",
+        "action": "karirs_daily_bonus",
+        "action_data": {},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{settings.cheddar_api_base_url}/api/v1/games/lobbies/{lobby_id}/system-message",
+                json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except Exception:
+        pass
+
+
+def _maybe_announce_daily_bonus(db: Session, user_id: int, lobby_id: int) -> None:
+    """Called whenever a player enters a lobby's Karirs game (see
+    create_race) — posts the "claim your daily bonus" reminder into that
+    lobby's chat if the bonus is available and hasn't already been
+    announced for this claim window. Tracking daily_bonus_notified_at
+    separately from last_claimed_at is what keeps this from spamming the
+    same reminder every time create_race gets called — including vscode's
+    periodic re-sync during betting, which hits this endpoint every couple
+    of seconds."""
+    wallet = _get_or_create_wallet(db, user_id)
+    if not _daily_bonus_available(wallet):
+        return
+    already_notified_this_window = wallet.daily_bonus_notified_at is not None and (
+        wallet.last_claimed_at is None or wallet.daily_bonus_notified_at >= wallet.last_claimed_at
+    )
+    if already_notified_this_window:
+        return
+    wallet.daily_bonus_notified_at = _now()
+    db.commit()
+    assert _loop is not None, "daily bonus announced before app startup ran"
+    asyncio.run_coroutine_threadsafe(_post_daily_bonus_message(lobby_id, user_id), _loop)
+
+
 async def _delay_then_run(race_id: int, delay_seconds: float) -> None:
     await asyncio.sleep(max(delay_seconds, 0))
     await _run_race(race_id)
@@ -302,7 +433,19 @@ def health():
 @app.get("/wallet", response_model=WalletOut)
 def get_wallet(db: Session = Depends(get_db), user_id: int = Depends(get_current_user_id)):
     wallet = _get_or_create_wallet(db, user_id)
-    return WalletOut(user_id=wallet.user_id, coins=wallet.coins)
+    return _wallet_out(wallet)
+
+
+@app.post("/wallet/claim-daily", response_model=WalletOut)
+def claim_daily_bonus(db: Session = Depends(get_db), user_id: int = Depends(get_current_user_id)):
+    wallet = _get_or_create_wallet(db, user_id)
+    if not _daily_bonus_available(wallet):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Daily bonus already claimed — check back tomorrow")
+    wallet.coins += DAILY_BONUS_COINS
+    wallet.last_claimed_at = _now()
+    db.commit()
+    db.refresh(wallet)
+    return _wallet_out(wallet)
 
 
 @app.post("/races", response_model=RaceOut, status_code=201)
@@ -313,38 +456,46 @@ def create_race(
 ):
     # One lobby plays one race at a time — reuse whatever's still open
     # instead of creating a duplicate table every time a player reopens it.
-    existing = (
-        db.query(Race)
-        .filter(Race.lobby_id == payload.lobby_id, Race.status != "resolved")
-        .order_by(Race.id.desc())
-        .first()
-    )
-    if existing is not None:
-        if existing.status == "betting_open":
-            _schedule_auto_resolve(existing)
-        return existing
+    # Locked per-lobby: see _lock_for_lobby's comment — without this, two
+    # players' clients hitting this at nearly the same moment (both reacting
+    # to the same game.started broadcast) could each see "no race yet" and
+    # both create one, leaving each player's client pinned to a different
+    # race with a different random roster for the rest of the game.
+    with _lock_for_lobby(payload.lobby_id):
+        existing = (
+            db.query(Race)
+            .filter(Race.lobby_id == payload.lobby_id, Race.status != "resolved")
+            .order_by(Race.id.desc())
+            .first()
+        )
+        if existing is not None:
+            if existing.status == "betting_open":
+                _schedule_auto_resolve(existing)
+            _maybe_announce_daily_bonus(db, user_id, payload.lobby_id)
+            return existing
 
-    try:
-        racer_names = pick_racers(db)
-    except ValueError as err:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(err))
+        try:
+            racer_names = pick_racers(db)
+        except ValueError as err:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(err))
 
-    # Frozen now, while betting is still open — this is the one moment the
-    # odds shown to bettors and the odds later used to pay them out are
-    # guaranteed to be the exact same numbers.
-    payout_multipliers = compute_payout_multipliers(db, racer_names)
+        # Frozen now, while betting is still open — this is the one moment the
+        # odds shown to bettors and the odds later used to pay them out are
+        # guaranteed to be the exact same numbers.
+        payout_multipliers = compute_payout_multipliers(db, racer_names)
 
-    race = Race(
-        lobby_id=payload.lobby_id,
-        racer_names=racer_names,
-        status="betting_open",
-        created_by=user_id,
-        betting_closes_at=_now() + timedelta(seconds=BETTING_SECONDS),
-        payout_multipliers=payout_multipliers,
-    )
-    db.add(race)
-    db.commit()
-    db.refresh(race)
+        race = Race(
+            lobby_id=payload.lobby_id,
+            racer_names=racer_names,
+            status="betting_open",
+            created_by=user_id,
+            betting_closes_at=_now() + timedelta(seconds=BETTING_SECONDS),
+            payout_multipliers=payout_multipliers,
+        )
+        db.add(race)
+        db.commit()
+        db.refresh(race)
+        _maybe_announce_daily_bonus(db, user_id, payload.lobby_id)
 
     _schedule_auto_resolve(race)
     return race
@@ -407,7 +558,7 @@ def list_my_bets(race_id: int, db: Session = Depends(get_db), user_id: int = Dep
 
 
 @app.post("/races/{race_id}/bets", response_model=BetOut, status_code=201)
-def place_bet(
+async def place_bet(
     race_id: int,
     payload: BetCreate,
     db: Session = Depends(get_db),
@@ -434,7 +585,39 @@ def place_bet(
     db.add(bet)
     db.commit()
     db.refresh(bet)
+    # Fire-and-forget — the bettor shouldn't wait on the lobby-lookup +
+    # chat-post round trips just to see their own bet confirmed.
+    asyncio.create_task(_post_bet_placed_message(race.lobby_id, user_id, payload.wager))
     return bet
+
+
+@app.get("/hall-of-fame", response_model=list[HallOfFameEntryOut])
+async def get_hall_of_fame(db: Session = Depends(get_db), _user_id: int = Depends(get_current_user_id)):
+    """The 10 biggest wagers that ever actually won — ranked by wager size,
+    not payout (a small bet on a huge underdog can pay out more than a
+    large bet on a favorite, but this is specifically celebrating "bet the
+    most and it hit", not "won the most"). Queryable on demand, not
+    announced anywhere, unlike the bet-placed/daily-bonus chat messages —
+    this is a fixed record, not a live event."""
+    bets = db.query(Bet).filter(Bet.payout > 0).order_by(Bet.wager.desc()).limit(10).all()
+    if not bets:
+        return []
+
+    race_ids = {bet.race_id for bet in bets}
+    races_by_id = {race.id: race for race in db.query(Race).filter(Race.id.in_(race_ids)).all()}
+
+    async def _entry_for(bet: Bet) -> HallOfFameEntryOut:
+        race = races_by_id.get(bet.race_id)
+        display_name = await _lookup_display_name(race.lobby_id, bet.user_id) if race else "Someone"
+        return HallOfFameEntryOut(
+            display_name=display_name,
+            racer_name=bet.racer_name,
+            wager=bet.wager,
+            payout=bet.payout,
+            created_at=bet.created_at,
+        )
+
+    return list(await asyncio.gather(*(_entry_for(bet) for bet in bets)))
 
 
 @app.post("/races/{race_id}/resolve", response_model=RaceResultOut)

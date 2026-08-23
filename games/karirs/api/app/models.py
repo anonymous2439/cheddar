@@ -14,6 +14,16 @@ class Wallet(Base):
     # secret Cheddar signs with.
     user_id = Column(BigInteger, primary_key=True)
     coins = Column(BigInteger, nullable=False, default=500)
+    # When the daily 250-coin bonus was last claimed — null means never.
+    # Claiming is only allowed once DAILY_BONUS_INTERVAL has passed since
+    # this (see main.py's _daily_bonus_available).
+    last_claimed_at = Column(DateTime, nullable=True)
+    # When the "your daily bonus is ready" chat reminder was last posted —
+    # separate from last_claimed_at so re-entering the game (or vscode's
+    # periodic re-sync during betting) doesn't repost the same reminder
+    # every time; only a *new* claim window (one that opened after this
+    # timestamp) triggers another one.
+    daily_bonus_notified_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
 
