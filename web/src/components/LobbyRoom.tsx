@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Lobby, Message, User } from "../types";
 import { KarirsGame } from "../games/karirs/KarirsGame";
+import { ChessGame } from "../games/chess/ChessGame";
 import { LobbyChatDock } from "./LobbyChatDock";
 
 interface Props {
@@ -75,6 +76,17 @@ export function LobbyRoom({
         <div className="flex h-full flex-col">
           <div className="min-h-0 flex-1 overflow-hidden">
             <KarirsGame lobby={lobby} onFinished={onGameFinished} />
+          </div>
+          {backToLobbyChrome}
+          {chatDock}
+        </div>
+      );
+    }
+    if (lobby.game_key === "chess") {
+      return (
+        <div className="flex h-full flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <ChessGame lobby={lobby} currentUserId={currentUserId} onFinished={onGameFinished} />
           </div>
           {backToLobbyChrome}
           {chatDock}

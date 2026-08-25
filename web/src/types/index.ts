@@ -102,7 +102,27 @@ export type WsEvent =
   | { type: "lobby.updated"; data: Lobby }
   | { type: "lobby.invited"; data: Lobby }
   | { type: "lobby.kicked"; data: { lobby_id: number } }
-  | { type: "game.started"; data: { lobby_id: number; game_key: string; game_name: string } };
+  | { type: "game.started"; data: { lobby_id: number; game_key: string; game_name: string } }
+  | { type: "chess.move"; data: ChessState };
+
+// Chess — lives in the main Cheddar API (app/models/chess_game.py), not a
+// separate game microservice like Karirs. Server (python-chess) is the sole
+// authority on legal moves and game-end conditions; the client's own
+// chess.js instance is only ever used for immediate drag-and-drop UX.
+export interface ChessState {
+  lobby_id: number;
+  fen: string;
+  moves: string[];
+  moves_san: string[];
+  turn: "white" | "black";
+  white_user_id: number;
+  black_user_id: number;
+  status: "in_progress" | "checkmate" | "stalemate" | "draw" | "resigned";
+  winner_user_id: number | null;
+  is_check: boolean;
+  created_at: string;
+  updated_at: string;
+}
 
 // Karirs game API — a separate service (games/karirs/api), not the main
 // Cheddar API. See its RaceOut/BetOut/WalletOut schemas.

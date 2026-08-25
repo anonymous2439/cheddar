@@ -1160,14 +1160,96 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
     }
 
     // A mounted module only ever reaches its own game's API through this —
-    // it holds no token and makes no network calls of its own. Right now
-    // 'karirs' is the only game with a backend; a future game with its own
-    // API would get its own branch here rather than a shared one, since each
-    // game's action set and base URL are its own concern.
+    // it holds no token and makes no network calls of its own. Karirs has
+    // its own separate backend/base URL; chess lives in the main Cheddar API
+    // (see api/app/api/v1/endpoints/chess.py) so it reuses authorizedFetch
+    // instead of a dedicated fetch helper like karirsFetch.
     private async handleGameHostAction(gameKey: string, action: string, data: any) {
         if (gameKey === 'karirs') {
             await this.handleKarirsAction(action, data);
+        } else if (gameKey === 'chess') {
+            await this.handleChessAction(action, data);
         }
+    }
+
+    private async handleChessAction(action: string, data: any) {
+        try {
+            switch (action) {
+                case 'get_state': {
+                    const res = await this.authorizedFetch(`/api/v1/chess/${data.lobbyId}/state`);
+                    if (!res.ok) throw new Error(`chess state fetch failed (${res.status})`);
+                    await this.sendGameEvent('chess', 'state', await res.json());
+                    return;
+                }
+                case 'move': {
+                    const res = await this.authorizedFetch(`/api/v1/chess/${data.lobbyId}/move`, {
+                        method: 'POST',
+                        body: JSON.stringify({ move: data.move }),
+                    });
+                    if (!res.ok) {
+                        const body = await res.json().catch(() => ({}) as { detail?: string });
+                        throw new Error(body.detail ?? `move failed (${res.status})`);
+                    }
+                    await this.sendGameEvent('chess', 'state', await res.json());
+                    return;
+                }
+                case 'resign': {
+                    const res = await this.authorizedFetch(`/api/v1/chess/${data.lobbyId}/resign`, { method: 'POST' });
+                    if (!res.ok) {
+                        const body = await res.json().catch(() => ({}) as { detail?: string });
+                        throw new Error(body.detail ?? `resign failed (${res.status})`);
+                    }
+                    await this.sendGameEvent('chess', 'state', await res.json());
+                    return;
+                }
+                default:
+                    throw new Error(`unknown chess action: ${action}`);
+            }
+        } catch (err) {
+            await this.sendGameEvent('chess', 'error', { message: (err as Error).message });
+        }
+    }
+
+    // The mounted board's own "Moves" panel already shows the full history
+    // live, but this also drops one line per move into the persistent chat
+    // log — that scrollback survives switching to another lobby's chat,
+    // where the mounted view doesn't. Builds the line from the same
+    // ChessStateOut the board renders, using the current lobby's
+    // participant list to turn user ids into @usernames.
+    private handleChessMoveEvent(data: {
+        moves: string[];
+        moves_san: string[];
+        turn: 'white' | 'black';
+        white_user_id: number;
+        black_user_id: number;
+        status: string;
+        winner_user_id: number | null;
+        is_check: boolean;
+    }) {
+        const lobby = this.currentLobby;
+        const nameFor = (userId: number) =>
+            lobby?.participants.find((p) => p.user.id === userId)?.user.username ?? `user#${userId}`;
+
+        if (data.status === 'resigned') {
+            const loserId = data.winner_user_id === data.white_user_id ? data.black_user_id : data.white_user_id;
+            this.log(`♟️ @${nameFor(loserId)} resigned — @${nameFor(data.winner_user_id!)} wins.`);
+        } else {
+            const lastMove = data.moves_san[data.moves_san.length - 1] ?? data.moves[data.moves.length - 1];
+            if (lastMove) {
+                const moverColor = data.turn === 'white' ? 'black' : 'white';
+                const moverName = nameFor(moverColor === 'white' ? data.white_user_id : data.black_user_id);
+                let line = `♟️ @${moverName} played ${lastMove}`;
+                if (data.status === 'checkmate') line += ` — checkmate! @${nameFor(data.winner_user_id!)} wins.`;
+                else if (data.status === 'stalemate') line += ' — stalemate, draw.';
+                else if (data.status === 'draw') line += ' — draw.';
+                else if (data.is_check) line += ' — check!';
+                this.log(line);
+            }
+        }
+
+        // Live-updates the board too, in case it happens to be mounted —
+        // onEvent no-ops harmlessly if it isn't (see game.js's render()).
+        void this.sendGameEvent('chess', 'state', data);
     }
 
     private async karirsFetch(path: string, init: RequestInit = {}): Promise<Response> {
@@ -1405,6 +1487,8 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                     this.mountGame(event.data.game_key, event.data.game_name);
                     this.renderLobby();
                 }
+            } else if (event.type === 'chess.move') {
+                this.handleChessMoveEvent(event.data);
             } else if (event.type === 'conversation.invited') {
                 const name = event.data?.name ?? `conversation #${event.data?.id}`;
                 this.log(`— added to a group chat: ${name} — /chats to see it —`);

@@ -1,9 +1,0 @@
-{
-  "name": "cheddar-game-hello-world",
-  "version": "0.1.0",
-  "description": "Example Cheddar game — proves out the vendored-module contract with a trivial hello-world screen.",
-  "private": true,
-  "scripts": {
-    "build": "bash build.sh"
-  }
-}

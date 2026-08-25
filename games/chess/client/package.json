@@ -1,0 +1,9 @@
+{
+  "name": "cheddar-game-chess-client",
+  "version": "0.1.0",
+  "description": "Chess vscode client module — vendored into the Cheddar extension.",
+  "private": true,
+  "scripts": {
+    "build": "bash build.sh"
+  }
+}

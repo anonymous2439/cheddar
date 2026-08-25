@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import applications, auth, blocks, conversations, friends, games, users
+from app.api.v1.endpoints import applications, auth, blocks, chess, conversations, friends, games, users
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -10,3 +10,4 @@ api_router.include_router(friends.router, prefix="/friends", tags=["friends"])
 api_router.include_router(blocks.router, prefix="/blocks", tags=["blocks"])
 api_router.include_router(users.router, prefix="/users", tags=["users"])
 api_router.include_router(games.router, prefix="/games", tags=["games"])
+api_router.include_router(chess.router, prefix="/chess", tags=["chess"])
