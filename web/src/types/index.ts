@@ -103,7 +103,9 @@ export type WsEvent =
   | { type: "lobby.invited"; data: Lobby }
   | { type: "lobby.kicked"; data: { lobby_id: number } }
   | { type: "game.started"; data: { lobby_id: number; game_key: string; game_name: string } }
-  | { type: "chess.move"; data: ChessState };
+  | { type: "chess.move"; data: ChessState }
+  | { type: "beats.session_started"; data: BeatsState }
+  | { type: "beats.standing"; data: BeatsStandingOut };
 
 // Chess — lives in the main Cheddar API (app/models/chess_game.py), not a
 // separate game microservice like Karirs. Server (python-chess) is the sole
@@ -198,4 +200,57 @@ export interface KarirsResolvedMessage {
   race: KarirsRace;
   standings: string[];
   pool: KarirsPool;
+}
+
+// Cheddar Beats — lives in the main Cheddar API (app/models/beats_*.py),
+// same reasoning as chess: no separate wallet/economy, so no need for a
+// dedicated microservice like Karirs has.
+//
+// Players don't share one synchronized note timeline — each independently
+// cycles level 1→9→1... at their own pace, pressing a level-length key
+// sequence then timing a spacebar press against a sliding gauge — so the
+// live leaderboard just updates continuously as each player's own attempts
+// land, with no barrier/waiting on anyone else (see beats.py's
+// submit_attempt).
+export type BeatsJudgment = "miss" | "bad" | "cool" | "great" | "perfect";
+
+export interface BeatsStandingEntry {
+  user_id: number;
+  score: number;
+  rank: number;
+}
+
+export interface BeatsState {
+  lobby_id: number;
+  mode: "4key" | "8key";
+  // Host-chosen at session creation, fixed for the whole match — bpm drives
+  // the gauge's sweep speed, pulse_count how many times the target circle's
+  // heartbeat glow pulses over one round's sweep.
+  bpm: number;
+  pulse_count: number;
+  // The shared match-clock anchor — every client counts its own 60s window
+  // down from this same server timestamp (like Karirs' betting_closes_at),
+  // so everyone's match ends at the same wall-clock moment even though each
+  // player's own level/round progress differs.
+  started_at: string;
+  duration_seconds: number;
+  standings: BeatsStandingEntry[];
+}
+
+export interface BeatsRound {
+  level: number;
+  mode: "4key" | "8key";
+  sequence: string[];
+  move_name: string;
+}
+
+export interface BeatsAttemptAck {
+  judgment: BeatsJudgment;
+  points: number;
+  total_score: number;
+}
+
+export interface BeatsStandingOut {
+  lobby_id: number;
+  standings: BeatsStandingEntry[];
 }

@@ -1,0 +1,9 @@
+{
+  "name": "cheddar-game-cheddar-beats-client",
+  "version": "0.1.0",
+  "description": "Cheddar Beats vscode client module — vendored into the Cheddar extension.",
+  "private": true,
+  "scripts": {
+    "build": "bash build.sh"
+  }
+}

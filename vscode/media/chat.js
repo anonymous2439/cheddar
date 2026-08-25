@@ -19,6 +19,10 @@ const lobbyInviteRow = document.getElementById('lobby-invite-row');
 const lobbyInviteInput = document.getElementById('lobby-invite-input');
 const lobbyInviteSendBtn = document.getElementById('lobby-invite-send');
 const lobbyHintEl = document.getElementById('lobby-hint');
+const lobbyBeatsConfigEl = document.getElementById('lobby-beats-config');
+const beatsModeSelect = document.getElementById('beats-mode');
+const beatsBpmSelect = document.getElementById('beats-bpm');
+const beatsPulseCountSelect = document.getElementById('beats-pulse-count');
 const chatTitleEl = document.getElementById('chat-title');
 const gameStageEl = document.getElementById('game-stage');
 
@@ -391,6 +395,7 @@ function renderLobby(lobby, selfId, tracksCompletion) {
     lobbyReadyBtn.textContent = me?.is_ready ? 'Unready' : 'Ready';
     lobbyStartBtn.style.display = isLeader && !gameLive ? 'inline-block' : 'none';
     lobbyStartBtn.disabled = !allReady;
+    lobbyBeatsConfigEl.style.display = isLeader && !gameLive && lobby.game_key === 'cheddar_beats' ? 'block' : 'none';
     lobbyHintEl.textContent = isOngoing
         ? '🎮 game in progress — invites disabled until it finishes'
         : gameLive
@@ -447,7 +452,14 @@ window.addEventListener('click', (e) => {
         vscode.postMessage({ type: 'game', action: 'ready' });
     }
     else if (e.target.id === 'lobby-start') {
-        vscode.postMessage({ type: 'game', action: 'start' });
+        const isBeats = lastLobby && lastLobby.game_key === 'cheddar_beats';
+        vscode.postMessage({
+            type: 'game',
+            action: 'start',
+            beatsMode: isBeats ? beatsModeSelect.value : undefined,
+            beatsBpm: isBeats ? Number(beatsBpmSelect.value) : undefined,
+            beatsPulseCount: isBeats ? Number(beatsPulseCountSelect.value) : undefined,
+        });
     }
     else if (e.target.id === 'lobby-leave') {
         vscode.postMessage({ type: 'game', action: 'leave' });

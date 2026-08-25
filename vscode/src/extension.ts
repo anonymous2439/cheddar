@@ -212,7 +212,14 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             }
 
             if (msg.type === 'game') {
-                void this.handleGameAction(msg.action, msg.lobbyId, msg.username);
+                void this.handleGameAction(
+                    msg.action,
+                    msg.lobbyId,
+                    msg.username,
+                    msg.beatsMode,
+                    msg.beatsBpm,
+                    msg.beatsPulseCount,
+                );
             }
 
             if (msg.type === 'game.action') {
@@ -1008,7 +1015,14 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         this.renderLobby();
     }
 
-    private async handleGameAction(action: string, lobbyIdArg?: number, username?: string) {
+    private async handleGameAction(
+        action: string,
+        lobbyIdArg?: number,
+        username?: string,
+        beatsMode?: string,
+        beatsBpm?: number,
+        beatsPulseCount?: number,
+    ) {
         if (action === 'resume_lobby' && lobbyIdArg != null) {
             const res = await this.authorizedFetch(`/api/v1/games/lobbies/${lobbyIdArg}`);
             if (res.ok) {
@@ -1047,6 +1061,23 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             if (res.ok) {
                 this.currentLobby = (await res.json()) as LobbyState;
                 this.renderLobby();
+                // The generic start above just flips the lobby to
+                // in_progress — Cheddar Beats' actual match (the mode the
+                // leader picked; level always starts at 1 and cycles
+                // automatically) is its own separate call, same reasoning
+                // chess/karirs have for lazily creating their own session
+                // state instead of teaching the generic lobby endpoints
+                // about every game's specific setup.
+                if (this.currentLobby.game_key === 'cheddar_beats' && beatsMode && beatsBpm && beatsPulseCount) {
+                    const sessionRes = await this.authorizedFetch(`/api/v1/beats/${lobbyId}/session`, {
+                        method: 'POST',
+                        body: JSON.stringify({ mode: beatsMode, bpm: beatsBpm, pulse_count: beatsPulseCount }),
+                    });
+                    if (!sessionRes.ok) {
+                        const body = await sessionRes.json().catch(() => ({}) as { detail?: string });
+                        this.log(`could not start the match: ${body.detail ?? sessionRes.status}`);
+                    }
+                }
             } else {
                 const body = await res.json().catch(() => ({}) as { detail?: string });
                 this.log(`could not start: ${body.detail ?? res.status}`);
@@ -1169,6 +1200,49 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             await this.handleKarirsAction(action, data);
         } else if (gameKey === 'chess') {
             await this.handleChessAction(action, data);
+        } else if (gameKey === 'cheddar_beats') {
+            await this.handleBeatsAction(action, data);
+        }
+    }
+
+    private async handleBeatsAction(action: string, data: any) {
+        try {
+            switch (action) {
+                case 'get_state': {
+                    const res = await this.authorizedFetch(`/api/v1/beats/${data.lobbyId}/state`);
+                    if (!res.ok) throw new Error(`not started yet (${res.status})`);
+                    await this.sendGameEvent('cheddar_beats', 'state', await res.json());
+                    return;
+                }
+                case 'round': {
+                    // Stateless on the server — just a fresh random
+                    // key-sequence for this level, since rounds aren't
+                    // synchronized across players (see beats.py's
+                    // get_round).
+                    const res = await this.authorizedFetch(`/api/v1/beats/${data.lobbyId}/round?level=${data.level}`);
+                    if (!res.ok) throw new Error(`round fetch failed (${res.status})`);
+                    await this.sendGameEvent('cheddar_beats', 'round', await res.json());
+                    return;
+                }
+                case 'attempt': {
+                    const res = await this.authorizedFetch(`/api/v1/beats/${data.lobbyId}/attempt`, {
+                        method: 'POST',
+                        body: JSON.stringify({ level: data.level, judgment: data.judgment }),
+                    });
+                    if (!res.ok) {
+                        const body = await res.json().catch(() => ({}) as { detail?: string });
+                        throw new Error(body.detail ?? `attempt submit failed (${res.status})`);
+                    }
+                    // The live leaderboard update arrives over the
+                    // websocket as beats.standing, not here — this response
+                    // is just this player's own ack, nothing to forward.
+                    return;
+                }
+                default:
+                    throw new Error(`unknown cheddar_beats action: ${action}`);
+            }
+        } catch (err) {
+            await this.sendGameEvent('cheddar_beats', 'error', { message: (err as Error).message });
         }
     }
 
@@ -1489,6 +1563,10 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                 }
             } else if (event.type === 'chess.move') {
                 this.handleChessMoveEvent(event.data);
+            } else if (event.type === 'beats.session_started') {
+                void this.sendGameEvent('cheddar_beats', 'state', event.data);
+            } else if (event.type === 'beats.standing') {
+                void this.sendGameEvent('cheddar_beats', 'standing', event.data);
             } else if (event.type === 'conversation.invited') {
                 const name = event.data?.name ?? `conversation #${event.data?.id}`;
                 this.log(`— added to a group chat: ${name} — /chats to see it —`);

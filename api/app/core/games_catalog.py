@@ -20,6 +20,16 @@ GAMES = [
         # resolution instead of a race resolving.
         "tracks_completion": True,
     },
+    {
+        "key": "cheddar_beats",
+        "name": "Cheddar Beats",
+        "min_players": 1,
+        "max_players": 8,
+        # A chart has to finish playing out before the leader can "Back to
+        # Lobby" — same completion-gating as Karirs/Chess, driven by
+        # beats.py's own session resolution.
+        "tracks_completion": True,
+    },
 ]
 
 GAMES_BY_KEY = {game["key"]: game for game in GAMES}

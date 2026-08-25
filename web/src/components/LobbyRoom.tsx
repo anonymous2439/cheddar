@@ -2,6 +2,8 @@ import { useState } from "react";
 import type { Lobby, Message, User } from "../types";
 import { KarirsGame } from "../games/karirs/KarirsGame";
 import { ChessGame } from "../games/chess/ChessGame";
+import { BeatsGame } from "../games/beats/BeatsGame";
+import { createBeatsSession } from "../api/beats";
 import { LobbyChatDock } from "./LobbyChatDock";
 
 interface Props {
@@ -11,7 +13,7 @@ interface Props {
   chatMessages: Message[];
   onSendChat: (content: string) => void;
   onReady: (isReady: boolean) => void;
-  onStart: () => void;
+  onStart: () => Promise<unknown>;
   onLeave: () => void;
   onRestart: () => void;
   onKick: (userId: number) => void;
@@ -42,6 +44,9 @@ export function LobbyRoom({
   const [showInvite, setShowInvite] = useState(false);
   const [inviteCode, setInviteCode] = useState<string | null>(lobby.invite_code);
   const [copied, setCopied] = useState(false);
+  const [beatsMode, setBeatsMode] = useState<"4key" | "8key">("4key");
+  const [beatsBpm, setBeatsBpm] = useState(100);
+  const [beatsPulseCount, setBeatsPulseCount] = useState(5);
 
   const me = lobby.participants.find((p) => p.user.id === currentUserId);
   const isLeader = !!me?.is_leader;
@@ -93,6 +98,17 @@ export function LobbyRoom({
         </div>
       );
     }
+    if (lobby.game_key === "cheddar_beats") {
+      return (
+        <div className="flex h-full flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <BeatsGame lobby={lobby} currentUserId={currentUserId} onFinished={onGameFinished} />
+          </div>
+          {backToLobbyChrome}
+          {chatDock}
+        </div>
+      );
+    }
     return (
       <div className="flex h-full flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto p-6 text-sm text-neutral-500">
@@ -102,6 +118,18 @@ export function LobbyRoom({
         {chatDock}
       </div>
     );
+  }
+
+  async function handleStartClick() {
+    await onStart();
+    if (lobby.game_key === "cheddar_beats") {
+      // The generic start above just flips the lobby to in_progress — the
+      // actual chart (level/mode the leader picked, which random chart to
+      // play) is its own separate call, same reasoning chess/karirs have
+      // for lazily creating their own session state instead of teaching the
+      // generic lobby endpoints about every game's specific setup.
+      await createBeatsSession(lobby.id, beatsMode, beatsBpm, beatsPulseCount);
+    }
   }
 
   async function handleShowInviteCode() {
@@ -152,6 +180,50 @@ export function LobbyRoom({
           ))}
         </ul>
 
+        {isLeader && lobby.game_key === "cheddar_beats" && (
+          <div className="mb-3 flex flex-wrap items-center gap-3 rounded border border-neutral-200 p-3 text-sm">
+            <label className="flex items-center gap-2">
+              Mode
+              <select
+                value={beatsMode}
+                onChange={(e) => setBeatsMode(e.target.value as "4key" | "8key")}
+                className="rounded border border-neutral-300 px-2 py-1"
+              >
+                <option value="4key">4 keys</option>
+                <option value="8key">8 keys</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-2">
+              BPM
+              <select
+                value={beatsBpm}
+                onChange={(e) => setBeatsBpm(Number(e.target.value))}
+                className="rounded border border-neutral-300 px-2 py-1"
+              >
+                {[80, 90, 100, 110, 120, 130].map((bpm) => (
+                  <option key={bpm} value={bpm}>
+                    {bpm}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-2">
+              Heartbeats
+              <select
+                value={beatsPulseCount}
+                onChange={(e) => setBeatsPulseCount(Number(e.target.value))}
+                className="rounded border border-neutral-300 px-2 py-1"
+              >
+                {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+
         <div className="mb-4 flex flex-wrap gap-2">
           <button
             onClick={() => onReady(!me?.is_ready)}
@@ -161,7 +233,7 @@ export function LobbyRoom({
           </button>
           {isLeader && (
             <button
-              onClick={onStart}
+              onClick={handleStartClick}
               disabled={!allReady}
               className="rounded bg-amber-500 px-3 py-1.5 text-sm text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-neutral-300"
             >

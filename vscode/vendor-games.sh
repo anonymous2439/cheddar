@@ -12,6 +12,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 GAMES=(
     "karirs:../games/karirs/client/dist"
     "chess:../games/chess/client/dist"
+    "cheddar_beats:../games/cheddar_beats/client/dist"
 )
 
 DEST_ROOT="media/games"
