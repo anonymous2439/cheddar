@@ -15,6 +15,8 @@ export function getBeatsRound(lobbyId: number, level: number) {
   return api.get<BeatsRound>(`/beats/${lobbyId}/round`, { params: { level } }).then((r) => r.data);
 }
 
-export function submitBeatsAttempt(lobbyId: number, level: number, judgment: BeatsJudgment) {
-  return api.post<BeatsAttemptAck>(`/beats/${lobbyId}/attempt`, { level, judgment }).then((r) => r.data);
+export function submitBeatsAttempt(lobbyId: number, level: number, judgment: BeatsJudgment, revActive: boolean) {
+  return api
+    .post<BeatsAttemptAck>(`/beats/${lobbyId}/attempt`, { level, judgment, rev_active: revActive })
+    .then((r) => r.data);
 }

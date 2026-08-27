@@ -248,6 +248,13 @@ export interface BeatsAttemptAck {
   judgment: BeatsJudgment;
   points: number;
   total_score: number;
+  // Consecutive-perfect streak length after this attempt (0 once broken).
+  // The multiplier is this value once it reaches 2+.
+  chain: number;
+  // Effective multiplier actually applied to this attempt's points (chain
+  // multiplier, times 1.1 on top if Reverse Mode was active).
+  multiplier: number;
+  rev_active: boolean;
 }
 
 export interface BeatsStandingOut {

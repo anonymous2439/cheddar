@@ -29,6 +29,57 @@
         up: '↑', down: '↓', left: '←', right: '→',
         up_left: '↖', up_right: '↗', down_left: '↙', down_right: '↘',
     };
+    const JUDGMENT_COLOR = {
+        perfect: '#ffd700',
+        great: '#4caf50',
+        cool: '#38bdf8',
+        bad: '#8b4513',
+        miss: '#ef4444',
+    };
+    // How long the spacebar-press "explosion" burst on the bar takes to
+    // expand and fade out.
+    const EXPLOSION_DURATION_MS = 400;
+
+    // Reverse Mode (DEL key): up to 6 of the round's keys are displayed as
+    // their opposite direction, in red, as a "what you see is not what you
+    // press" challenge — the player still has to press the true, un-flipped
+    // symbol (the sequence itself never changes, only the glyph shown does).
+    const OPPOSITE_SYMBOL = {
+        up: 'down', down: 'up', left: 'right', right: 'left',
+        up_left: 'down_right', down_right: 'up_left',
+        up_right: 'down_left', down_left: 'up_right',
+    };
+    const MAX_REVERSED_KEYS = 6;
+    // Flat bonus Reverse Mode adds on top of the chain multiplier — mirrors
+    // REV_MODE_BONUS in beats.py; kept in sync for the instant local
+    // display, while the server independently computes (and trusts) the
+    // real score.
+    const REV_MODE_BONUS = 1.1;
+
+    function pickReversedIndices(sequenceLength) {
+        const indices = Array.from({ length: sequenceLength }, (_, i) => i);
+        if (indices.length <= MAX_REVERSED_KEYS) return new Set(indices);
+        for (let i = indices.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [indices[i], indices[j]] = [indices[j], indices[i]];
+        }
+        return new Set(indices.slice(0, MAX_REVERSED_KEYS));
+    }
+
+    function effectiveMultiplier(chainValue, rev) {
+        const chainMultiplier = chainValue >= 2 ? chainValue : 1;
+        return rev ? Math.round(chainMultiplier * REV_MODE_BONUS * 100) / 100 : chainMultiplier;
+    }
+
+    function formatMultiplier(m) {
+        if (Number.isInteger(m)) return String(m);
+        return m.toFixed(2).replace(/0$/, '');
+    }
+
+    function hexToRgbTriplet(hex) {
+        const n = parseInt(hex.slice(1), 16);
+        return `${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}`;
+    }
     // 8key is the 4 arrows plus the 4 diagonals, reachable from the numpad's
     // navigation cluster with Num Lock off — 7/9/1/3 send Home/PageUp/End/
     // PageDown, the corners of the 7-8-9/4-5-6/1-2-3 grid, diagonal to the
@@ -52,13 +103,33 @@
     let roundSettled = false;
     let finished = false;
     let flash = null;
+    // A one-shot burst drawn on the bar at the exact spot the sliding
+    // circle was when the player pressed space — self-clears after
+    // EXPLOSION_DURATION_MS. { judgment, x, startTime } | null.
+    let explosion = null;
+    // Consecutive-perfect streak, from the server's own attempt_ack (see
+    // beats.py's submit_attempt) — the multiplier is this value once it
+    // reaches 2+; below that it's a normal, unmultiplied score and stays
+    // hidden.
+    let chain = 0;
+    // Reverse Mode: a player-local toggle (DEL key), not synced with other
+    // players — each player challenges themself independently.
+    let revActive = false;
+    // Indices into round.sequence currently displayed flipped/red — recomputed
+    // whenever a round starts/rolls over, so each round gets its own random
+    // set (not the same positions reused all match).
+    let reversedIndices = new Set();
 
     let matchStartTimer = null;
     let flashTimer = null;
     let rafId = null;
     let keydownHandler = null;
 
-    let titleEl, infoEl, sequenceRowEl, canvas, hintEl, standingsListEl;
+    let titleEl, infoEl, sequenceRowEl, canvas, chainEl, revLabelEl, hintEl, standingsListEl;
+
+    function refreshReversedIndices(sequenceLength) {
+        reversedIndices = revActive ? pickReversedIndices(sequenceLength) : new Set();
+    }
 
     function sweepMs(bpm) {
         return (60000 / bpm) * SWEEP_BEATS;
@@ -90,6 +161,10 @@
         roundSettled = false;
         finished = false;
         flash = null;
+        explosion = null;
+        chain = 0;
+        revActive = false;
+        reversedIndices = new Set();
 
         buildChrome();
         render();
@@ -108,7 +183,7 @@
         if (flashTimer) clearTimeout(flashTimer);
         if (matchStartTimer) clearTimeout(matchStartTimer);
         container = null;
-        titleEl = infoEl = sequenceRowEl = canvas = hintEl = standingsListEl = null;
+        titleEl = infoEl = sequenceRowEl = canvas = chainEl = revLabelEl = hintEl = standingsListEl = null;
     }
 
     function requestRound(lvl) {
@@ -142,6 +217,7 @@
                 activeCycle = 0;
                 sequenceProgress = 0;
                 roundSettled = false;
+                refreshReversedIndices(round.sequence.length);
                 requestRound((level % 9) + 1);
             } else {
                 // A prefetch for the cycle after the one currently playing.
@@ -150,6 +226,9 @@
             render();
         } else if (event === 'standing') {
             standings = data.standings;
+            render();
+        } else if (event === 'attempt_ack') {
+            chain = data.chain;
             render();
         } else if (event === 'error') {
             // Only surface this if it isn't just a stale response for a
@@ -176,23 +255,48 @@
         flashTimer = setTimeout(() => {
             flash = null;
         }, 700);
-        window.CheddarHost.send('attempt', { lobbyId: ctx.lobbyId, level, judgment });
+        window.CheddarHost.send('attempt', { lobbyId: ctx.lobbyId, level, judgment, revActive });
+    }
+
+    // `progress` is the sliding circle's position (0-1 along the bar) at
+    // the instant space was pressed — the burst appears right where the
+    // circle actually was, not at the target, so it visually shows how
+    // close the press was.
+    function triggerExplosion(judgment, progress) {
+        if (!canvas) return;
+        const pad = 16;
+        const barWidth = canvas.width - pad * 2;
+        const x = pad + Math.max(0, Math.min(1, progress)) * barWidth;
+        explosion = { judgment, x, startTime: Date.now() };
     }
 
     function onKeyDown(e) {
+        if (e.key === 'Delete') {
+            e.preventDefault();
+            if (!matchState || finished) return;
+            revActive = !revActive;
+            refreshReversedIndices(round ? round.sequence.length : 0);
+            render();
+            return;
+        }
+
         if (!matchState || !round || roundSettled || finished) return;
 
         if (e.key === ' ' || e.code === 'Space') {
-            if (sequenceProgress < round.sequence.length) {
-                recordAttempt('miss');
-                return;
-            }
             const startedAtMs = new Date(matchState.started_at + 'Z').getTime();
             const matchElapsed = Date.now() - startedAtMs;
             const cycleMs = sweepMs(matchState.bpm);
             const withinCycle = matchElapsed - activeCycle * cycleMs;
+
+            if (sequenceProgress < round.sequence.length) {
+                triggerExplosion('miss', withinCycle / cycleMs);
+                recordAttempt('miss');
+                return;
+            }
             const perfectMs = STATIC_POS * cycleMs;
-            recordAttempt(judgmentFor(withinCycle - perfectMs));
+            const judgment = judgmentFor(withinCycle - perfectMs);
+            triggerExplosion(judgment, withinCycle / cycleMs);
+            recordAttempt(judgment);
             return;
         }
 
@@ -234,6 +338,7 @@
                     nextRound = null;
                     sequenceProgress = 0;
                     roundSettled = false;
+                    refreshReversedIndices(round ? round.sequence.length : 0);
                     requestRound((nextLevel % 9) + 1);
                     render();
                 }
@@ -269,6 +374,28 @@
         canvas.style.border = '1px solid #374151';
         container.appendChild(canvas);
 
+        const multiplierEl = document.createElement('div');
+        multiplierEl.style.display = 'flex';
+        multiplierEl.style.alignItems = 'center';
+        multiplierEl.style.justifyContent = 'center';
+        multiplierEl.style.gap = '4px';
+        // Matches canvas.width below — otherwise centering would span the
+        // whole (possibly much wider) container instead of sitting under
+        // the beat bar itself.
+        multiplierEl.style.width = '320px';
+        multiplierEl.style.margin = '4px 0 0';
+        multiplierEl.style.fontWeight = 'bold';
+        multiplierEl.style.fontSize = '16px';
+        container.appendChild(multiplierEl);
+
+        revLabelEl = document.createElement('span');
+        revLabelEl.style.color = JUDGMENT_COLOR.miss;
+        multiplierEl.appendChild(revLabelEl);
+
+        chainEl = document.createElement('span');
+        chainEl.style.color = JUDGMENT_COLOR.perfect;
+        multiplierEl.appendChild(chainEl);
+
         hintEl = document.createElement('p');
         hintEl.style.fontSize = '12px';
         hintEl.style.opacity = '0.7';
@@ -293,10 +420,13 @@
         const matchElapsed = Date.now() - new Date(matchState.started_at + 'Z').getTime();
         const secondsLeft = Math.max(0, Math.ceil((matchState.duration_seconds * 1000 - matchElapsed) / 1000));
         if (matchElapsed < 0) {
+            infoEl.style.color = '';
             infoEl.textContent = `Level ${level} · ${matchState.mode} — starting in ${Math.ceil(-matchElapsed / 1000)}…`;
         } else if (flash) {
+            infoEl.style.color = JUDGMENT_COLOR[flash.judgment];
             infoEl.textContent = `${flash.judgment.toUpperCase()}${flash.moveName ? ' — ' + flash.moveName : ''}`;
         } else {
+            infoEl.style.color = '';
             infoEl.textContent = `Level ${level} · ${matchState.mode} · ${secondsLeft}s left`;
         }
     }
@@ -324,11 +454,17 @@
                 box.style.borderColor = '#555';
                 box.style.color = '#888';
             }
-            box.textContent = ARROW_GLYPH[sym] || sym;
+            const isReversed = reversedIndices.has(i);
+            const displaySym = isReversed ? (OPPOSITE_SYMBOL[sym] || sym) : sym;
+            if (isReversed) box.style.color = JUDGMENT_COLOR.miss;
+            box.textContent = ARROW_GLYPH[displaySym] || displaySym;
             sequenceRowEl.appendChild(box);
         });
 
         renderInfoLine();
+
+        revLabelEl.textContent = revActive ? 'REV' : '';
+        chainEl.textContent = `×${formatMultiplier(effectiveMultiplier(chain, revActive))}`;
 
         standingsListEl.textContent = standings
             .map((s) => `#${s.rank} @${nameFor(s.user_id)} — ${s.score}`)
@@ -364,6 +500,20 @@
         c.fill();
     }
 
+    // Reads the pending explosion (if any) and clears it once its animation
+    // has fully played out — read once per frame and shared by both places
+    // it gets drawn (the full-bar wash and the localized burst), rather
+    // than each re-reading (and potentially racing to clear) the variable.
+    function readExplosion() {
+        if (!explosion) return null;
+        const elapsed = Date.now() - explosion.startTime;
+        if (elapsed > EXPLOSION_DURATION_MS) {
+            explosion = null;
+            return null;
+        }
+        return { judgment: explosion.judgment, x: explosion.x, progress: elapsed / EXPLOSION_DURATION_MS };
+    }
+
     // withinCycle is always in [0, sweepMs) — the position sawtooths back to
     // the start at each cycle boundary rather than pausing, the same way a
     // metronome needle snaps back rather than freezing.
@@ -374,9 +524,20 @@
         const barY = h / 2;
         const pad = 16;
         const barWidth = w - pad * 2;
+        const ex = readExplosion();
 
         c.fillStyle = '#111827';
         c.fillRect(0, 0, w, h);
+
+        // A judgment-colored wash across the whole bar container, on top of
+        // the base background but under everything else — the localized
+        // burst below is the sharp, precise part of the effect; this is the
+        // container-wide reaction to it.
+        if (ex) {
+            const rgb = hexToRgbTriplet(JUDGMENT_COLOR[ex.judgment]);
+            c.fillStyle = `rgba(${rgb}, ${(1 - ex.progress) * 0.35})`;
+            c.fillRect(0, 0, w, h);
+        }
 
         c.strokeStyle = '#374151';
         c.lineWidth = 4;
@@ -399,6 +560,21 @@
         c.arc(slideX, barY, 6, 0, Math.PI * 2);
         c.fillStyle = '#4caf50';
         c.fill();
+
+        // The sharp, localized burst — drawn last so it sits on top of the
+        // bar, heartbeat, and both circles.
+        if (ex) {
+            const radius = 8 + ex.progress * 35;
+            const alpha = (1 - ex.progress) * 0.9;
+            const rgb = hexToRgbTriplet(JUDGMENT_COLOR[ex.judgment]);
+            const gradient = c.createRadialGradient(ex.x, barY, 0, ex.x, barY, radius);
+            gradient.addColorStop(0, `rgba(${rgb}, ${alpha})`);
+            gradient.addColorStop(1, `rgba(${rgb}, 0)`);
+            c.fillStyle = gradient;
+            c.beginPath();
+            c.arc(ex.x, barY, radius, 0, Math.PI * 2);
+            c.fill();
+        }
     }
 
     window.CheddarGames = window.CheddarGames || {};

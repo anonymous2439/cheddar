@@ -14,7 +14,13 @@ class BeatsScore(Base):
     *timing* (only it knows the real input event time, same simplification
     every client-authoritative rhythm judgment makes); `points` is still
     looked up server-side from `judgment` (see beats.py's
-    _POINTS_BY_JUDGMENT) rather than trusting a client-submitted score."""
+    _POINTS_BY_JUDGMENT) rather than trusting a client-submitted score.
+
+    `chain` is this attempt's consecutive-perfect streak length (0 if this
+    attempt isn't a perfect, or if it broke a streak) — computed server-side
+    from the player's own previous row (see submit_attempt), same
+    reasoning as `points`: only the tier the client asserts is trusted, the
+    streak/multiplier math is entirely the server's."""
 
     __tablename__ = "beats_scores"
 
@@ -24,4 +30,5 @@ class BeatsScore(Base):
     level = Column(Integer, nullable=False)
     judgment = Column(Enum("miss", "bad", "cool", "great", "perfect"), nullable=False)
     points = Column(Integer, nullable=False)
+    chain = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, nullable=False, server_default=func.now())

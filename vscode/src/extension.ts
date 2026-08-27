@@ -1227,15 +1227,18 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                 case 'attempt': {
                     const res = await this.authorizedFetch(`/api/v1/beats/${data.lobbyId}/attempt`, {
                         method: 'POST',
-                        body: JSON.stringify({ level: data.level, judgment: data.judgment }),
+                        body: JSON.stringify({ level: data.level, judgment: data.judgment, rev_active: !!data.revActive }),
                     });
                     if (!res.ok) {
                         const body = await res.json().catch(() => ({}) as { detail?: string });
                         throw new Error(body.detail ?? `attempt submit failed (${res.status})`);
                     }
-                    // The live leaderboard update arrives over the
-                    // websocket as beats.standing, not here — this response
-                    // is just this player's own ack, nothing to forward.
+                    // The live leaderboard update arrives over the websocket
+                    // as beats.standing separately — this ack is just this
+                    // player's own result, including their current perfect-
+                    // chain streak, which only they need (see game.js's
+                    // 'attempt_ack' handling for the ×N multiplier display).
+                    await this.sendGameEvent('cheddar_beats', 'attempt_ack', await res.json());
                     return;
                 }
                 default:

@@ -42,6 +42,10 @@ _VALID_MODES = {"4key", "8key"}
 # glow pulses over one round's sweep.
 _VALID_BPM = {80, 90, 100, 110, 120, 130}
 _VALID_PULSE_COUNT = set(range(1, 11))
+# Reverse Mode (DEL key) is a player-toggled challenge — while active, the
+# effective multiplier is the chain multiplier times this, e.g. chain x3 +
+# Reverse Mode = x3.3.
+REV_MODE_BONUS = 1.1
 
 # The key alphabet a sequence's symbols are drawn from, per mode — matches
 # what each frontend binds to actual keyboard keys. 8key is the 4 arrows
@@ -238,8 +242,35 @@ async def submit_attempt(
     if payload.judgment not in _VALID_JUDGMENTS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid judgment")
 
-    points = _POINTS_BY_JUDGMENT[payload.judgment]
-    db.add(BeatsScore(game_id=game.id, user_id=user.id, level=payload.level, judgment=payload.judgment, points=points))
+    # Chain length is derived from this player's own previous attempt in
+    # this game, not tracked in any separate running-counter state — a
+    # perfect extends the streak the last row left off (if that row was
+    # itself a perfect), anything else breaks it back to 0. Only the
+    # *tier* the client asserts is trusted; the streak/multiplier math is
+    # entirely the server's, same as `points` itself.
+    last = (
+        db.query(BeatsScore)
+        .filter(BeatsScore.game_id == game.id, BeatsScore.user_id == user.id)
+        .order_by(BeatsScore.id.desc())
+        .first()
+    )
+    if payload.judgment == "perfect":
+        chain = last.chain + 1 if last is not None and last.judgment == "perfect" else 1
+    else:
+        chain = 0
+    chain_multiplier = chain if chain >= 2 else 1
+    # Reverse Mode adds a flat +10% on top of the chain multiplier, not on
+    # top of the base points — e.g. chain x3 + Reverse Mode = x3.3, not x4.
+    multiplier = round(chain_multiplier * REV_MODE_BONUS, 2) if payload.rev_active else float(chain_multiplier)
+    # The multiplier scales this one attempt's own base score, not the
+    # cumulative total — the total is just the natural sum of already-
+    # multiplied per-attempt points below, never multiplied again itself.
+    points = round(_POINTS_BY_JUDGMENT[payload.judgment] * multiplier)
+    db.add(
+        BeatsScore(
+            game_id=game.id, user_id=user.id, level=payload.level, judgment=payload.judgment, points=points, chain=chain
+        )
+    )
     db.commit()
 
     active_ids = {p.user_id for p in _active_participants(db, lobby.id)}
@@ -248,4 +279,11 @@ async def submit_attempt(
 
     out = BeatsStandingOut(lobby_id=lobby.id, standings=standings)
     await manager.broadcast(list(active_ids), {"type": "beats.standing", "data": out.model_dump(mode="json")})
-    return BeatsAttemptAck(judgment=payload.judgment, points=points, total_score=total_score)
+    return BeatsAttemptAck(
+        judgment=payload.judgment,
+        points=points,
+        total_score=total_score,
+        chain=chain,
+        multiplier=multiplier,
+        rev_active=payload.rev_active,
+    )
