@@ -105,7 +105,8 @@ export type WsEvent =
   | { type: "game.started"; data: { lobby_id: number; game_key: string; game_name: string } }
   | { type: "chess.move"; data: ChessState }
   | { type: "beats.session_started"; data: BeatsState }
-  | { type: "beats.standing"; data: BeatsStandingOut };
+  | { type: "beats.standing"; data: BeatsStandingOut }
+  | { type: "mtg.state"; data: MtgState };
 
 // Chess — lives in the main Cheddar API (app/models/chess_game.py), not a
 // separate game microservice like Karirs. Server (python-chess) is the sole
@@ -260,4 +261,82 @@ export interface BeatsAttemptAck {
 export interface BeatsStandingOut {
   lobby_id: number;
   standings: BeatsStandingEntry[];
+}
+
+// Cheddar MTG — no rules engine. The server only owns zones (library/hand/
+// battlefield/graveyard/exile), turn/phase structure, and per-viewer hidden
+// info (a card's name/image_url come back null when it's in someone else's
+// hand) — players read their own cards and self-apply them, same honor
+// system Cockatrice/Tabletop Simulator use.
+export type MtgZone = "library" | "hand" | "battlefield" | "graveyard" | "exile";
+
+export const MTG_PHASES = [
+  "untap",
+  "upkeep",
+  "draw",
+  "main1",
+  "combat_begin",
+  "attackers",
+  "blockers",
+  "damage",
+  "combat_end",
+  "main2",
+  "end",
+  "cleanup",
+] as const;
+export type MtgPhase = (typeof MTG_PHASES)[number];
+
+export interface MtgCard {
+  id: string;
+  // null when this card is in an opponent's hand, or a face-down
+  // battlefield permanent viewed by anyone but its owner — the client
+  // renders a card-back placeholder instead of the real name/image.
+  name: string | null;
+  image_url: string | null;
+  tapped: boolean;
+  counters: Record<string, number>;
+  x: number;
+  y: number;
+  // Battlefield-only. Sent even when hidden, so the client can tell "face
+  // down" apart from "someone else's hand".
+  face_down: boolean;
+}
+
+export interface MtgPlayerState {
+  user_id: number;
+  life: number;
+  library_count: number;
+  hand: MtgCard[];
+  battlefield: MtgCard[];
+  graveyard: MtgCard[];
+  exile: MtgCard[];
+}
+
+export interface MtgState {
+  lobby_id: number;
+  turn_number: number;
+  active_user_id: number;
+  phase: MtgPhase;
+  status: "in_progress" | "finished";
+  winner_user_id: number | null;
+  // The fixed reference seat battlefield (x, y) is stored relative to — the
+  // client rotates the board 180° for whichever viewer isn't this player
+  // (both x and y flip), so each player always sees their own side at the
+  // bottom, the way two people facing each other across a table would.
+  player1_user_id: number;
+  players: MtgPlayerState[];
+}
+
+export interface MtgDeckImportResult {
+  card_count: number;
+  unresolved_names: string[];
+}
+
+export interface MtgDeckStatusEntry {
+  user_id: number;
+  card_count: number;
+}
+
+export interface MtgDeckStatusOut {
+  players: MtgDeckStatusEntry[];
 }

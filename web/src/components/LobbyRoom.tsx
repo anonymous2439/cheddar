@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Lobby, Message, User } from "../types";
 import { KarirsGame } from "../games/karirs/KarirsGame";
 import { ChessGame } from "../games/chess/ChessGame";
 import { BeatsGame } from "../games/beats/BeatsGame";
+import { MtgGame } from "../games/mtg/MtgGame";
 import { createBeatsSession } from "../api/beats";
+import { createMtgSession, getMtgDeckStatus, importMtgDeck } from "../api/mtg";
 import { LobbyChatDock } from "./LobbyChatDock";
 
 interface Props {
@@ -47,6 +49,34 @@ export function LobbyRoom({
   const [beatsMode, setBeatsMode] = useState<"4key" | "8key">("4key");
   const [beatsBpm, setBeatsBpm] = useState(100);
   const [beatsPulseCount, setBeatsPulseCount] = useState(5);
+  const [mtgDecklist, setMtgDecklist] = useState("");
+  const [mtgImportResult, setMtgImportResult] = useState<{ card_count: number; unresolved_names: string[] } | null>(null);
+  const [mtgImportError, setMtgImportError] = useState("");
+  const [mtgDeckCounts, setMtgDeckCounts] = useState<Record<number, number>>({});
+
+  // Deck imports aren't part of the Lobby model (each player submits their
+  // own independently, before there's any MtgGame row to broadcast from —
+  // see mtg.py's MtgDeckImport), so there's no websocket push for "the
+  // other player just imported a deck": a light poll while still waiting
+  // is the simplest way to reflect their progress.
+  useEffect(() => {
+    if (lobby.game_key !== "cheddar_mtg" || lobby.status !== "waiting") return;
+    let cancelled = false;
+    function poll() {
+      getMtgDeckStatus(lobby.id)
+        .then((s) => {
+          if (cancelled) return;
+          setMtgDeckCounts(Object.fromEntries(s.players.map((p) => [p.user_id, p.card_count])));
+        })
+        .catch(() => {});
+    }
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [lobby.id, lobby.game_key, lobby.status]);
 
   const me = lobby.participants.find((p) => p.user.id === currentUserId);
   const isLeader = !!me?.is_leader;
@@ -109,6 +139,17 @@ export function LobbyRoom({
         </div>
       );
     }
+    if (lobby.game_key === "cheddar_mtg") {
+      return (
+        <div className="flex h-full flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <MtgGame lobby={lobby} currentUserId={currentUserId} onFinished={onGameFinished} />
+          </div>
+          {backToLobbyChrome}
+          {chatDock}
+        </div>
+      );
+    }
     return (
       <div className="flex h-full flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto p-6 text-sm text-neutral-500">
@@ -129,6 +170,21 @@ export function LobbyRoom({
       // for lazily creating their own session state instead of teaching the
       // generic lobby endpoints about every game's specific setup.
       await createBeatsSession(lobby.id, beatsMode, beatsBpm, beatsPulseCount);
+    }
+    if (lobby.game_key === "cheddar_mtg") {
+      await createMtgSession(lobby.id);
+    }
+  }
+
+  async function handleMtgImport() {
+    setMtgImportError("");
+    try {
+      const result = await importMtgDeck(lobby.id, mtgDecklist);
+      setMtgImportResult(result);
+      setMtgDeckCounts((prev) => ({ ...prev, [currentUserId]: result.card_count }));
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setMtgImportError(detail ?? "Could not import that decklist");
     }
   }
 
@@ -224,6 +280,42 @@ export function LobbyRoom({
           </div>
         )}
 
+        {lobby.game_key === "cheddar_mtg" && (
+          <div className="mb-3 rounded border border-neutral-200 p-3 text-sm">
+            <p className="mb-2 text-xs font-semibold uppercase text-neutral-500">Import your deck</p>
+            <textarea
+              value={mtgDecklist}
+              onChange={(e) => setMtgDecklist(e.target.value)}
+              placeholder={"4 Lightning Bolt\n4 Mountain\n1 Black Lotus\n..."}
+              rows={4}
+              className="mb-2 w-full rounded border border-neutral-300 p-2 font-mono text-xs"
+            />
+            <button
+              onClick={handleMtgImport}
+              disabled={!mtgDecklist.trim()}
+              className="rounded bg-neutral-800 px-3 py-1.5 text-xs text-white hover:bg-neutral-900 disabled:cursor-not-allowed disabled:bg-neutral-300"
+            >
+              Import deck
+            </button>
+            {mtgImportError && <p className="mt-2 text-xs text-red-600">{mtgImportError}</p>}
+            {mtgImportResult && (
+              <p className="mt-2 text-xs text-green-700">
+                Imported {mtgImportResult.card_count} cards.
+                {mtgImportResult.unresolved_names.length > 0 && (
+                  <span className="text-amber-600"> Couldn't find: {mtgImportResult.unresolved_names.join(", ")}</span>
+                )}
+              </p>
+            )}
+            <ul className="mt-3 space-y-0.5 text-xs text-neutral-500">
+              {lobby.participants.map((p) => (
+                <li key={p.user.id}>
+                  {p.user.display_name}: {mtgDeckCounts[p.user.id] ? `${mtgDeckCounts[p.user.id]} cards imported` : "no deck imported yet"}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <div className="mb-4 flex flex-wrap gap-2">
           <button
             onClick={() => onReady(!me?.is_ready)}
@@ -234,7 +326,7 @@ export function LobbyRoom({
           {isLeader && (
             <button
               onClick={handleStartClick}
-              disabled={!allReady}
+              disabled={!allReady || (lobby.game_key === "cheddar_mtg" && lobby.participants.some((p) => !mtgDeckCounts[p.user.id]))}
               className="rounded bg-amber-500 px-3 py-1.5 text-sm text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-neutral-300"
             >
               Start
