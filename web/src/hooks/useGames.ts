@@ -90,6 +90,11 @@ export function useGames() {
     [applyLobby],
   );
 
+  const renameLobby = useCallback(
+    async (lobbyId: number, name: string) => applyLobby(await gamesApi.renameLobby(lobbyId, name)),
+    [applyLobby],
+  );
+
   const inviteToLobby = useCallback(
     async (lobbyId: number, userId: number) => applyLobby(await gamesApi.inviteToLobby(lobbyId, userId)),
     [applyLobby],
@@ -130,6 +135,7 @@ export function useGames() {
     finishGame,
     kickFromLobby,
     transferLeader,
+    renameLobby,
     inviteToLobby,
     getInviteCode,
     joinLobbyByCode,

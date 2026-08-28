@@ -11,6 +11,13 @@ class GameCatalogEntry(BaseModel):
     min_players: int
     max_players: int
     tracks_completion: bool = False
+    # Which clients actually have a playable UI for this game — each client
+    # filters its own "Host a game" list against this so it doesn't offer
+    # to host something it can't render (e.g. Cheddar MTG is web-only for
+    # now). A lobby for a game missing from the current client's platform
+    # can still be joined/viewed (LobbyRoom falls back to a "not available
+    # here" message) — this only gates *hosting a new one*.
+    platforms: list[str] = ["web", "vscode"]
 
 
 class LobbyParticipantOut(BaseModel):
@@ -27,6 +34,10 @@ class LobbyOut(BaseModel):
     conversation_id: int
     game_key: str
     game_name: str
+    # Display name for this lobby's chat — defaults to "{game_name} lobby"
+    # at creation (see games.py's create_lobby) and is renameable by the
+    # leader afterward (see rename_lobby); always populated, never null.
+    name: str
     status: str
     leader_id: int | None
     invite_code: str | None = None
@@ -58,6 +69,10 @@ class LobbyKick(BaseModel):
 
 class LobbyLeaderTransfer(BaseModel):
     user_id: int
+
+
+class LobbyRename(BaseModel):
+    name: str
 
 
 class SystemMessageCreate(BaseModel):

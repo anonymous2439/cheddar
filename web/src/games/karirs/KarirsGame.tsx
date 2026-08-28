@@ -248,7 +248,7 @@ export function KarirsGame({ lobby, onFinished }: Props) {
   return (
     <div className="flex h-full flex-col overflow-y-auto p-4">
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-lg font-semibold">🏇 {lobby.game_name}</h2>
+        <h2 className="text-lg font-semibold">🏇 {lobby.name}</h2>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setShowHallOfFame(true)}

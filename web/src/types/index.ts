@@ -70,6 +70,9 @@ export interface GameCatalogEntry {
   min_players: number;
   max_players: number;
   tracks_completion: boolean;
+  // Which clients have a playable UI for this game — filter "Host a game"
+  // against this so we don't offer to host something with no web client.
+  platforms: string[];
 }
 
 export interface LobbyParticipant {
@@ -84,6 +87,9 @@ export interface Lobby {
   conversation_id: number;
   game_key: string;
   game_name: string;
+  // Display name for this lobby's chat — defaults to "{game_name} lobby",
+  // renameable by the leader. Always populated, never null.
+  name: string;
   status: "waiting" | "in_progress" | "finished";
   leader_id: number | null;
   invite_code: string | null;

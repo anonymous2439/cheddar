@@ -25,6 +25,7 @@ from app.schemas.game import (
     LobbyLeaderTransfer,
     LobbyOut,
     LobbyReadyUpdate,
+    LobbyRename,
     SystemMessageCreate,
 )
 from app.schemas.conversation import MessageOut
@@ -91,12 +92,15 @@ def _serialize_lobby(db: Session, lobby: GameLobby) -> LobbyOut:
     user_ids = [p.user_id for p in participants]
     users_by_id = {u.id: u for u in db.query(User).filter(User.id.in_(user_ids)).all()} if user_ids else {}
     game = GAMES_BY_KEY.get(lobby.game_key, {"name": lobby.game_key})
+    conversation = db.get(Conversation, lobby.conversation_id)
+    name = (conversation.name if conversation else None) or f"{game['name']} lobby"
 
     return LobbyOut(
         id=lobby.id,
         conversation_id=lobby.conversation_id,
         game_key=lobby.game_key,
         game_name=game["name"],
+        name=name,
         status=lobby.status,
         leader_id=lobby.leader_id,
         invite_code=lobby.invite_code,
@@ -444,6 +448,33 @@ async def transfer_leader(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User is not in this lobby")
 
     lobby.leader_id = payload.user_id
+    db.commit()
+
+    await _broadcast_lobby(db, lobby)
+    return _serialize_lobby(db, lobby)
+
+
+@router.post("/lobbies/{lobby_id}/rename", response_model=LobbyOut)
+async def rename_lobby(
+    lobby_id: int,
+    payload: LobbyRename,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    lobby = _get_lobby_or_404(db, lobby_id)
+    _require_participant(db, lobby, user)
+    _require_leader(lobby, user)
+
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name can't be empty")
+    if len(name) > 100:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name is too long (100 characters max)")
+
+    conversation = db.get(Conversation, lobby.conversation_id)
+    if conversation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Lobby conversation not found")
+    conversation.name = name
     db.commit()
 
     await _broadcast_lobby(db, lobby)

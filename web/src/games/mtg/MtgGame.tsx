@@ -573,7 +573,7 @@ export function MtgGame({ lobby, currentUserId, onFinished }: Props) {
   return (
     <div className="flex h-full flex-col gap-2 overflow-y-auto p-3">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">🃏 {lobby.game_name}</h2>
+        <h2 className="text-lg font-semibold">🃏 {lobby.name}</h2>
         {!isFinished && (
           <button onClick={() => run(mtgApi.concedeMtg(lobby.id))} className="text-xs text-neutral-500 hover:text-red-600 hover:underline">
             Concede

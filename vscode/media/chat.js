@@ -374,7 +374,7 @@ function renderLobby(lobby, selfId, tracksCompletion) {
     if (lobby.status === 'waiting') {
         unmountGame();
     }
-    lobbyTitleEl.textContent = `${lobby.game_name} — ${lobby.status}`;
+    lobbyTitleEl.textContent = `${lobby.name} — ${lobby.status}`;
 
     const me = lobby.participants.find(p => p.user.id === selfId);
     const isLeader = !!me?.is_leader;

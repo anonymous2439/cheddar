@@ -8,6 +8,7 @@ GAMES = [
         # animated race), so the leader can't "Back to Lobby" until the game
         # module itself reports the race resolved via POST .../finish.
         "tracks_completion": True,
+        "platforms": ["web", "vscode"],
     },
     {
         "key": "chess",
@@ -19,6 +20,7 @@ GAMES = [
         # completion-gating as Karirs, just driven by chess.py's own
         # resolution instead of a race resolving.
         "tracks_completion": True,
+        "platforms": ["web", "vscode"],
     },
     {
         "key": "cheddar_beats",
@@ -29,6 +31,7 @@ GAMES = [
         # Lobby" — same completion-gating as Karirs/Chess, driven by
         # beats.py's own session resolution.
         "tracks_completion": True,
+        "platforms": ["web", "vscode"],
     },
     {
         "key": "cheddar_mtg",
@@ -41,6 +44,8 @@ GAMES = [
         # gating mechanism as Chess/Beats, just driven manually instead of
         # a checkmate/timer.
         "tracks_completion": True,
+        # Web-only for now — no vscode client implementation yet.
+        "platforms": ["web"],
     },
 ]
 

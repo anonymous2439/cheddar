@@ -20,6 +20,11 @@ interface Props {
 export function GamesPanel({ catalog, myLobbies, selectedLobbyId, onHost, onSelect, onJoinByCode }: Props) {
   const [code, setCode] = useState("");
   const [joinError, setJoinError] = useState("");
+  // Only offer to host games with a web client — an existing lobby for a
+  // web-only game (or one only vscode implements) still shows up under
+  // "Your lobbies" and opens fine there, LobbyRoom just falls back to a
+  // "not available on this platform" message; this only gates *hosting*.
+  const hostable = catalog.filter((g) => g.platforms.includes("web"));
 
   async function handleJoin() {
     if (!code.trim()) return;
@@ -37,11 +42,11 @@ export function GamesPanel({ catalog, myLobbies, selectedLobbyId, onHost, onSele
     <div>
       <div className="border-b border-neutral-200 p-3">
         <h3 className="mb-2 text-xs font-semibold uppercase text-neutral-500">Host a game</h3>
-        {catalog.length === 0 ? (
+        {hostable.length === 0 ? (
           <p className="text-sm text-neutral-500">No games available.</p>
         ) : (
           <ul className="space-y-1">
-            {catalog.map((g) => (
+            {hostable.map((g) => (
               <li key={g.key} className="flex items-center justify-between text-sm">
                 <span>
                   {g.name} <span className="text-xs text-neutral-400">({g.min_players}-{g.max_players})</span>
@@ -86,7 +91,7 @@ export function GamesPanel({ catalog, myLobbies, selectedLobbyId, onHost, onSele
                     selectedLobbyId === lobby.id ? "bg-amber-50" : ""
                   }`}
                 >
-                  <span>{lobby.game_name}</span>
+                  <span>{lobby.name}</span>
                   <span className="text-xs text-neutral-400">{STATUS_LABELS[lobby.status]}</span>
                 </button>
               </li>

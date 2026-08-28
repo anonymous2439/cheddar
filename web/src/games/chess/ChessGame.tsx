@@ -142,7 +142,7 @@ export function ChessGame({ lobby, currentUserId, onFinished }: Props) {
   return (
     <div className="flex h-full flex-col overflow-y-auto p-4">
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-lg font-semibold">♟️ {lobby.game_name}</h2>
+        <h2 className="text-lg font-semibold">♟️ {lobby.name}</h2>
         {myColor && state.status === "in_progress" && (
           <button onClick={handleResign} className="text-xs text-neutral-500 hover:text-red-600 hover:underline">
             Resign

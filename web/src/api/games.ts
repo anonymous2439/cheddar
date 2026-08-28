@@ -41,6 +41,10 @@ export function transferLeader(lobbyId: number, userId: number) {
   return api.post<Lobby>(`/games/lobbies/${lobbyId}/leader`, { user_id: userId }).then((r) => r.data);
 }
 
+export function renameLobby(lobbyId: number, name: string) {
+  return api.post<Lobby>(`/games/lobbies/${lobbyId}/rename`, { name }).then((r) => r.data);
+}
+
 export function leaveLobby(lobbyId: number) {
   return api.post<Lobby>(`/games/lobbies/${lobbyId}/leave`).then((r) => r.data);
 }

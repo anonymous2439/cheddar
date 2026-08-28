@@ -53,6 +53,7 @@ interface GameCatalogEntry {
     min_players: number;
     max_players: number;
     tracks_completion: boolean;
+    platforms: string[];
 }
 
 interface LobbyParticipant {
@@ -66,6 +67,9 @@ interface LobbyState {
     conversation_id: number;
     game_key: string;
     game_name: string;
+    // Display name for this lobby's chat — defaults to "{game_name} lobby",
+    // renameable by the leader (see doRenameLobby). Always populated.
+    name: string;
     status: string;
     leader_id: number | null;
     invite_code?: string | null;
@@ -105,6 +109,7 @@ const COMMAND_HELP: Record<string, string[]> = {
         '/lobby invite <username> — invite a friend directly into your current lobby',
         '/lobby kick <username> — remove a player from your lobby (leader only)',
         '/lobby leader <username> — hand lobby leadership to another player (leader only)',
+        '/lobby rename <name> — rename your current lobby (leader only)',
         "/lobby list — list every lobby you're currently in",
         '/lobby resume <n> — switch focus to a lobby from /lobby list, by its number',
         '/lobby code — get (or create) a shareable code for your current lobby',
@@ -283,7 +288,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         if (!lobbies.length) return;
 
         this.currentLobby = lobbies[0];
-        this.log(`— resumed ${this.currentLobby.game_name} lobby (${this.currentLobby.status}) —`);
+        this.log(`— resumed ${this.currentLobby.name} (${this.currentLobby.status}) —`);
         this.renderLobby();
     }
 
@@ -506,6 +511,13 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                 }
                 await this.doTransferLeader(subArgs[0]);
                 return;
+            case 'rename':
+                if (!subArgs.length) {
+                    this.log('usage: /lobby rename <name>');
+                    return;
+                }
+                await this.doRenameLobby(subArgs.join(' '));
+                return;
             case 'list':
                 await this.doListLobbies();
                 return;
@@ -649,13 +661,24 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         }
         const conversations = (await res.json()) as Array<{
             id: number;
+            type: 'direct' | 'group';
             name: string | null;
             participants: Array<{ id: number; display_name: string }>;
             last_message_id: number | null;
             last_read_message_id: number | null;
         }>;
 
-        this.conversationCache = conversations.map((c) => {
+        // Every group conversation is a game lobby's chat (that's the only
+        // way one gets created — see games.py's create_lobby) — listing
+        // lobbies before DMs, under their own header, separates "who am I
+        // playing with" from "who am I just talking to" instead of one
+        // flat mixed numbered list. conversationCache stays in this same
+        // grouped order so its indices keep matching what's printed.
+        const lobbyChats = conversations.filter((c) => c.type === 'group');
+        const directChats = conversations.filter((c) => c.type !== 'group');
+        const ordered = [...lobbyChats, ...directChats];
+
+        this.conversationCache = ordered.map((c) => {
             const peer = c.participants.find((p) => p.id !== this.userId);
             const label = c.name ?? peer?.display_name ?? `conversation #${c.id}`;
             const unread = c.last_message_id != null && c.last_message_id !== c.last_read_message_id;
@@ -667,7 +690,21 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             this.log('no chats yet — message a friend from the Cheddar web app to start one');
             return;
         }
-        this.conversationCache.forEach((c, i) => this.log(`${i + 1}) ${c.label}${c.unread ? '  *' : ''}`));
+        let i = 0;
+        if (lobbyChats.length) {
+            this.log('— Game Lobbies —');
+            for (; i < lobbyChats.length; i++) {
+                const c = this.conversationCache[i];
+                this.log(`${i + 1}) ${c.label}${c.unread ? '  *' : ''}`);
+            }
+        }
+        if (directChats.length) {
+            this.log('— Direct Messages —');
+            for (; i < this.conversationCache.length; i++) {
+                const c = this.conversationCache[i];
+                this.log(`${i + 1}) ${c.label}${c.unread ? '  *' : ''}`);
+            }
+        }
     }
 
     private async doOpenChat(indexArg: string) {
@@ -831,7 +868,11 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             this.log('not logged in');
             return;
         }
-        this.gameCatalogCache = (await res.json()) as GameCatalogEntry[];
+        // Only games with a vscode client — the catalog is shared with the
+        // web app, which also has entries (e.g. Cheddar MTG) with no vscode
+        // UI to render yet.
+        const allGames = (await res.json()) as GameCatalogEntry[];
+        this.gameCatalogCache = allGames.filter((g) => g.platforms.includes('vscode'));
         if (!this.gameCatalogCache.length) {
             this.log('no games available yet');
             return;
@@ -950,6 +991,25 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         this.renderLobby();
     }
 
+    private async doRenameLobby(name: string) {
+        if (!this.currentLobby) {
+            this.log('no active lobby');
+            return;
+        }
+        const res = await this.authorizedFetch(`/api/v1/games/lobbies/${this.currentLobby.id}/rename`, {
+            method: 'POST',
+            body: JSON.stringify({ name }),
+        });
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}) as { detail?: string });
+            this.log(`could not rename the lobby: ${body.detail ?? res.status}`);
+            return;
+        }
+        this.currentLobby = (await res.json()) as LobbyState;
+        this.log(`lobby renamed to "${this.currentLobby.name}"`);
+        this.renderLobby();
+    }
+
     // You can be an active participant in more than one lobby at once —
     // nothing stops that — so "the current lobby" the drawer shows is just
     // whichever one you last touched. These let you see the others and
@@ -967,7 +1027,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         }
         this.lobbyListCache.forEach((lobby, i) => {
             const mine = this.currentLobby?.id === lobby.id ? ' (current)' : '';
-            this.log(`${i + 1}) ${lobby.game_name} — ${lobby.status}${mine}`);
+            this.log(`${i + 1}) ${lobby.name} — ${lobby.status}${mine}`);
         });
         this.log('— /lobby resume <n> to switch to one —');
     }
@@ -980,7 +1040,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             return;
         }
         this.currentLobby = lobby;
-        this.log(`— resumed ${lobby.game_name} lobby (${lobby.status}) —`);
+        this.log(`— resumed ${lobby.name} (${lobby.status}) —`);
         this.renderLobby();
     }
 
@@ -1011,7 +1071,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             return;
         }
         this.currentLobby = (await res.json()) as LobbyState;
-        this.log(`— joined ${this.currentLobby.game_name} lobby —`);
+        this.log(`— joined ${this.currentLobby.name} —`);
         this.renderLobby();
     }
 
@@ -1027,7 +1087,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             const res = await this.authorizedFetch(`/api/v1/games/lobbies/${lobbyIdArg}`);
             if (res.ok) {
                 this.currentLobby = (await res.json()) as LobbyState;
-                this.log(`— resumed ${this.currentLobby.game_name} lobby —`);
+                this.log(`— resumed ${this.currentLobby.name} —`);
                 this.renderLobby();
             } else {
                 this.log('could not open that lobby — it may have ended');
@@ -1123,7 +1183,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
     }
 
     private lobbyChatTitle(lobby: LobbyState): string {
-        return `${lobby.game_name} lobby`;
+        return lobby.name;
     }
 
     private logLobbyStatus() {
@@ -1132,7 +1192,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             this.log('no active lobby — /games then /lobby create <n>');
             return;
         }
-        this.log(`— ${lobby.game_name} lobby (${lobby.status}) —`);
+        this.log(`— ${lobby.name} (${lobby.status}) —`);
         lobby.participants.forEach((p) => {
             const tags = [p.is_leader ? 'leader' : null, p.is_ready ? 'ready' : 'not ready']
                 .filter(Boolean)
@@ -1533,7 +1593,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                 const lobby = event.data as LobbyState;
                 this.currentLobby = lobby;
                 this.setActiveConversation(lobby.conversation_id, this.lobbyChatTitle(lobby));
-                this.log(`— invited to ${lobby.game_name} lobby by a friend — now chatting here —`);
+                this.log(`— invited to ${lobby.name} by a friend — now chatting here —`);
                 this.logLobbyStatus();
                 this.renderLobby();
             } else if (event.type === 'lobby.kicked') {

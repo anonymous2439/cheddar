@@ -20,6 +20,7 @@ interface Props {
   onRestart: () => void;
   onKick: (userId: number) => void;
   onTransferLeader: (userId: number) => void;
+  onRename: (name: string) => Promise<unknown>;
   onInviteFriend: (userId: number) => void;
   onGetInviteCode: () => Promise<string>;
   onGameFinished: () => void;
@@ -38,6 +39,7 @@ export function LobbyRoom({
   onRestart,
   onKick,
   onTransferLeader,
+  onRename,
   onInviteFriend,
   onGetInviteCode,
   onGameFinished,
@@ -46,6 +48,9 @@ export function LobbyRoom({
   const [showInvite, setShowInvite] = useState(false);
   const [inviteCode, setInviteCode] = useState<string | null>(lobby.invite_code);
   const [copied, setCopied] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [nameDraft, setNameDraft] = useState(lobby.name);
+  const [renameError, setRenameError] = useState("");
   const [beatsMode, setBeatsMode] = useState<"4key" | "8key">("4key");
   const [beatsBpm, setBeatsBpm] = useState(100);
   const [beatsPulseCount, setBeatsPulseCount] = useState(5);
@@ -200,15 +205,68 @@ export function LobbyRoom({
     setTimeout(() => setCopied(false), 1500);
   }
 
+  async function handleRename() {
+    const trimmed = nameDraft.trim();
+    if (!trimmed) {
+      setRenameError("Name can't be empty");
+      return;
+    }
+    setRenameError("");
+    try {
+      await onRename(trimmed);
+      setShowSettings(false);
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setRenameError(detail ?? "Could not rename the lobby");
+    }
+  }
+
   return (
     <div className="flex h-full flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-lg font-semibold">{lobby.game_name}</h2>
-          <button onClick={onLeave} className="text-xs text-neutral-500 hover:underline">
-            Leave
-          </button>
+          <h2 className="text-lg font-semibold">{lobby.name}</h2>
+          <div className="flex items-center gap-3">
+            {isLeader && (
+              <button
+                onClick={() => {
+                  setNameDraft(lobby.name);
+                  setRenameError("");
+                  setShowSettings((v) => !v);
+                }}
+                className="text-xs text-neutral-500 hover:underline"
+                aria-label="Lobby settings"
+              >
+                ⚙ Settings
+              </button>
+            )}
+            <button onClick={onLeave} className="text-xs text-neutral-500 hover:underline">
+              Leave
+            </button>
+          </div>
         </div>
+
+        {showSettings && isLeader && (
+          <div className="mb-4 rounded border border-neutral-200 p-3">
+            <p className="mb-2 text-xs font-semibold uppercase text-neutral-500">Lobby name</p>
+            <div className="flex gap-2">
+              <input
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleRename()}
+                maxLength={100}
+                className="flex-1 rounded border border-neutral-300 px-2 py-1 text-sm"
+              />
+              <button
+                onClick={handleRename}
+                className="rounded bg-amber-500 px-3 py-1 text-sm text-white hover:bg-amber-600"
+              >
+                Save
+              </button>
+            </div>
+            {renameError && <p className="mt-1 text-xs text-red-600">{renameError}</p>}
+          </div>
+        )}
 
         <ul className="mb-4 space-y-1">
           {lobby.participants.map((p) => (

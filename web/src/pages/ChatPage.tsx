@@ -44,6 +44,7 @@ export function ChatPage() {
     finishGame,
     kickFromLobby,
     transferLeader,
+    renameLobby,
     inviteToLobby,
     getInviteCode,
     joinLobbyByCode,
@@ -228,6 +229,7 @@ export function ChatPage() {
                 onRestart={() => restartLobby(currentLobby.id)}
                 onKick={(userId) => kickFromLobby(currentLobby.id, userId)}
                 onTransferLeader={(userId) => transferLeader(currentLobby.id, userId)}
+                onRename={(name) => renameLobby(currentLobby.id, name)}
                 onInviteFriend={(userId) => inviteToLobby(currentLobby.id, userId)}
                 onGetInviteCode={() => getInviteCode(currentLobby.id)}
                 onGameFinished={() => finishGame(currentLobby.id)}

@@ -437,7 +437,7 @@ export function BeatsGame({ lobby, currentUserId, onFinished }: Props) {
     <div className="flex h-full flex-col overflow-y-auto p-4 md:flex-row md:gap-4">
       <div className="flex-1">
         <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-lg font-semibold">🎵 {lobby.game_name}</h2>
+          <h2 className="text-lg font-semibold">🎵 {lobby.name}</h2>
           <span className="text-sm text-neutral-500">
             Level {level} · {matchState.mode} · {secondsLeft}s left
           </span>
