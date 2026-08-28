@@ -2,7 +2,7 @@
   "name": "cheddar",
   "displayName": "Cheddar",
   "description": "VS Code extension with a custom bottom panel tab",
-  "version": "0.0.59",
+  "version": "0.0.60",
   "engines": {
     "vscode": "^1.108.1"
   },

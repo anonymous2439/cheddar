@@ -129,6 +129,9 @@ export interface ChessState {
   status: "in_progress" | "checkmate" | "stalemate" | "draw" | "resigned";
   winner_user_id: number | null;
   is_check: boolean;
+  // None for a human-vs-human game — set (0-20) when black is the
+  // Stockfish bot.
+  ai_skill_level: number | null;
   created_at: string;
   updated_at: string;
 }

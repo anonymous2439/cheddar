@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import BIGINT
 from sqlalchemy.sql import func
 
@@ -28,5 +28,9 @@ class ChessGame(Base):
         default="in_progress",
     )
     winner_user_id = Column(BIGINT(unsigned=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # None for a human-vs-human game. Set at vs-AI creation time (0-20,
+    # Stockfish's own "Skill Level" UCI option) and read back every time the
+    # bot needs to move — see chess.py's _maybe_play_ai_move.
+    ai_skill_level = Column(Integer, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())

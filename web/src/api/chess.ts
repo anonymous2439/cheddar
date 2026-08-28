@@ -1,5 +1,5 @@
 import { api } from "./client";
-import type { ChessState } from "../types";
+import type { ChessState, Lobby } from "../types";
 
 export function getChessState(lobbyId: number) {
   return api.get<ChessState>(`/chess/${lobbyId}/state`).then((r) => r.data);
@@ -14,4 +14,11 @@ export function makeChessMove(lobbyId: number, uci: string) {
 
 export function resignChess(lobbyId: number) {
   return api.post<ChessState>(`/chess/${lobbyId}/resign`).then((r) => r.data);
+}
+
+export function playChessVsAi(lobbyId: number, skillLevel: number) {
+  // Returns the updated Lobby (not ChessState) — same shape as the generic
+  // /start endpoint, so callers can applyLobby() it directly. ChessGame
+  // fetches the actual board itself on mount, same as any other game.
+  return api.post<Lobby>(`/chess/${lobbyId}/vs-ai`, { skill_level: skillLevel }).then((r) => r.data);
 }

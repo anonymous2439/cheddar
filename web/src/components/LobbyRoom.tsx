@@ -21,6 +21,7 @@ interface Props {
   onKick: (userId: number) => void;
   onTransferLeader: (userId: number) => void;
   onRename: (name: string) => Promise<unknown>;
+  onPlayVsAi: (skillLevel: number) => Promise<unknown>;
   onInviteFriend: (userId: number) => void;
   onGetInviteCode: () => Promise<string>;
   onGameFinished: () => void;
@@ -40,6 +41,7 @@ export function LobbyRoom({
   onKick,
   onTransferLeader,
   onRename,
+  onPlayVsAi,
   onInviteFriend,
   onGetInviteCode,
   onGameFinished,
@@ -58,6 +60,8 @@ export function LobbyRoom({
   const [mtgImportResult, setMtgImportResult] = useState<{ card_count: number; unresolved_names: string[] } | null>(null);
   const [mtgImportError, setMtgImportError] = useState("");
   const [mtgDeckCounts, setMtgDeckCounts] = useState<Record<number, number>>({});
+  const [aiSkillLevel, setAiSkillLevel] = useState(10);
+  const [aiError, setAiError] = useState("");
 
   // Deck imports aren't part of the Lobby model (each player submits their
   // own independently, before there's any MtgGame row to broadcast from —
@@ -221,6 +225,16 @@ export function LobbyRoom({
     }
   }
 
+  async function handlePlayVsAi() {
+    setAiError("");
+    try {
+      await onPlayVsAi(aiSkillLevel);
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setAiError(detail ?? "Could not start a game vs AI");
+    }
+  }
+
   return (
     <div className="flex h-full flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -335,6 +349,29 @@ export function LobbyRoom({
                 ))}
               </select>
             </label>
+          </div>
+        )}
+
+        {isLeader && lobby.game_key === "chess" && lobby.participants.length === 1 && (
+          <div className="mb-3 flex flex-wrap items-center gap-3 rounded border border-neutral-200 p-3 text-sm">
+            <label className="flex items-center gap-2">
+              Stockfish skill
+              <select
+                value={aiSkillLevel}
+                onChange={(e) => setAiSkillLevel(Number(e.target.value))}
+                className="rounded border border-neutral-300 px-2 py-1"
+              >
+                {Array.from({ length: 21 }, (_, i) => i).map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button onClick={handlePlayVsAi} className="rounded bg-amber-500 px-3 py-1.5 text-white hover:bg-amber-600">
+              Play vs AI
+            </button>
+            {aiError && <p className="text-xs text-red-600">{aiError}</p>}
           </div>
         )}
 

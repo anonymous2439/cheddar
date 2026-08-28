@@ -119,12 +119,13 @@
     function statusText() {
         if (!state) return 'loading…';
         const color = myColor();
+        const aiSuffix = state.ai_skill_level != null ? ` · vs AI (skill ${state.ai_skill_level})` : '';
         if (state.status === 'in_progress') {
-            if (!color) return state.turn === 'white' ? 'White to move' : 'Black to move';
+            if (!color) return (state.turn === 'white' ? 'White to move' : 'Black to move') + aiSuffix;
             const isMyTurn = color === state.turn;
             let t = isMyTurn ? 'Your move' : 'Waiting for opponent';
             if (state.is_check) t += isMyTurn ? ' — you are in check' : ' (check)';
-            return t;
+            return t + aiSuffix;
         }
         if (state.status === 'checkmate') {
             if (!color) return 'Checkmate';

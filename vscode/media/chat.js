@@ -23,6 +23,8 @@ const lobbyBeatsConfigEl = document.getElementById('lobby-beats-config');
 const beatsModeSelect = document.getElementById('beats-mode');
 const beatsBpmSelect = document.getElementById('beats-bpm');
 const beatsPulseCountSelect = document.getElementById('beats-pulse-count');
+const lobbyChessAiConfigEl = document.getElementById('lobby-chess-ai-config');
+const chessAiSkillSelect = document.getElementById('chess-ai-skill');
 const chatTitleEl = document.getElementById('chat-title');
 const gameStageEl = document.getElementById('game-stage');
 
@@ -396,6 +398,8 @@ function renderLobby(lobby, selfId, tracksCompletion) {
     lobbyStartBtn.style.display = isLeader && !gameLive ? 'inline-block' : 'none';
     lobbyStartBtn.disabled = !allReady;
     lobbyBeatsConfigEl.style.display = isLeader && !gameLive && lobby.game_key === 'cheddar_beats' ? 'block' : 'none';
+    lobbyChessAiConfigEl.style.display =
+        isLeader && !gameLive && lobby.game_key === 'chess' && lobby.participants.length === 1 ? 'block' : 'none';
     lobbyHintEl.textContent = isOngoing
         ? '🎮 game in progress — invites disabled until it finishes'
         : gameLive
@@ -460,6 +464,9 @@ window.addEventListener('click', (e) => {
             beatsBpm: isBeats ? Number(beatsBpmSelect.value) : undefined,
             beatsPulseCount: isBeats ? Number(beatsPulseCountSelect.value) : undefined,
         });
+    }
+    else if (e.target.id === 'chess-play-vs-ai') {
+        vscode.postMessage({ type: 'game', action: 'play_vs_ai', skillLevel: Number(chessAiSkillSelect.value) });
     }
     else if (e.target.id === 'lobby-leave') {
         vscode.postMessage({ type: 'game', action: 'leave' });

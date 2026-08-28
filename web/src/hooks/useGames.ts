@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import * as gamesApi from "../api/games";
+import { playChessVsAi } from "../api/chess";
 import { useWebSocket } from "../context/WebSocketContext";
 import { useAuth } from "../context/AuthContext";
 import type { GameCatalogEntry, Lobby } from "../types";
@@ -95,6 +96,11 @@ export function useGames() {
     [applyLobby],
   );
 
+  const playVsAi = useCallback(
+    async (lobbyId: number, skillLevel: number) => applyLobby(await playChessVsAi(lobbyId, skillLevel)),
+    [applyLobby],
+  );
+
   const inviteToLobby = useCallback(
     async (lobbyId: number, userId: number) => applyLobby(await gamesApi.inviteToLobby(lobbyId, userId)),
     [applyLobby],
@@ -136,6 +142,7 @@ export function useGames() {
     kickFromLobby,
     transferLeader,
     renameLobby,
+    playVsAi,
     inviteToLobby,
     getInviteCode,
     joinLobbyByCode,

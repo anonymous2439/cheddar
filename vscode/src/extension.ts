@@ -224,6 +224,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                     msg.beatsMode,
                     msg.beatsBpm,
                     msg.beatsPulseCount,
+                    msg.skillLevel,
                 );
             }
 
@@ -1082,6 +1083,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         beatsMode?: string,
         beatsBpm?: number,
         beatsPulseCount?: number,
+        skillLevel?: number,
     ) {
         if (action === 'resume_lobby' && lobbyIdArg != null) {
             const res = await this.authorizedFetch(`/api/v1/games/lobbies/${lobbyIdArg}`);
@@ -1141,6 +1143,25 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             } else {
                 const body = await res.json().catch(() => ({}) as { detail?: string });
                 this.log(`could not start: ${body.detail ?? res.status}`);
+            }
+            return;
+        }
+
+        if (action === 'play_vs_ai') {
+            // Fills the second seat with the shared Stockfish bot and
+            // starts the game in one call — no ready-up to wait on, so this
+            // skips the generic /start endpoint entirely (see chess.py's
+            // play_vs_ai).
+            const res = await this.authorizedFetch(`/api/v1/chess/${lobbyId}/vs-ai`, {
+                method: 'POST',
+                body: JSON.stringify({ skill_level: skillLevel ?? 10 }),
+            });
+            if (res.ok) {
+                this.currentLobby = (await res.json()) as LobbyState;
+                this.renderLobby();
+            } else {
+                const body = await res.json().catch(() => ({}) as { detail?: string });
+                this.log(`could not start vs AI: ${body.detail ?? res.status}`);
             }
             return;
         }

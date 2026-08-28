@@ -150,7 +150,10 @@ export function ChessGame({ lobby, currentUserId, onFinished }: Props) {
         )}
       </div>
 
-      <p className="mb-3 text-sm text-neutral-600">{statusText}</p>
+      <p className="mb-3 text-sm text-neutral-600">
+        {statusText}
+        {state.ai_skill_level != null && <span className="text-neutral-400"> · vs AI (skill {state.ai_skill_level})</span>}
+      </p>
 
       <div className="mx-auto w-full max-w-md">
         <Chessboard
