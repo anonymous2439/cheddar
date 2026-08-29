@@ -176,6 +176,9 @@ export interface KarirsRace {
   // Every racer's catchphrase for this race's roster (see signature_moves.py)
   // — shown when playback.shouting includes their name.
   signature_moves: Record<string, string>;
+  // Static link for now (no upload flow yet) — a flat decal on the 3D
+  // racer's head (see render3d.ts), null for a racer with nothing set.
+  face_image_urls: Record<string, string | null>;
   // Fixed payout odds per racer, frozen the moment betting opened — a
   // favorite (stronger overall win/loss record) pays less, a longshot pays
   // more. Same numbers used for the actual payout at resolution time.

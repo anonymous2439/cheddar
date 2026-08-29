@@ -27,6 +27,7 @@ const PHASE_LABEL: Record<MtgPhase, string> = {
   cleanup: "Cleanup",
 };
 
+const ALL_ZONES: MtgZone[] = ["hand", "battlefield", "graveyard", "exile", "library"];
 const CANVAS_HEIGHT = 360;
 const CARD_W = 64;
 const CARD_H = 90;
@@ -76,17 +77,23 @@ function DraggableCard({
   ownerUserId,
   fromZone,
   small,
+  selectable = true,
   onDragStart,
 }: {
   card: MtgCard;
   ownerUserId: number;
   fromZone: MtgZone;
   small?: boolean;
-  onDragStart: (e: React.PointerEvent, card: MtgCard, ownerUserId: number, fromZone: MtgZone) => void;
+  // A plain click/tap (no real drag movement) opens the selected-card
+  // panel — except for a Pile's own top-card preview, where a click should
+  // instead open that pile's full browse modal (see Pile below); only a
+  // card clicked *inside* that browse modal is selectable.
+  selectable?: boolean;
+  onDragStart: (e: React.PointerEvent, card: MtgCard, ownerUserId: number, fromZone: MtgZone, selectable: boolean) => void;
 }) {
   return (
     <div
-      onPointerDown={(e) => onDragStart(e, card, ownerUserId, fromZone)}
+      onPointerDown={(e) => onDragStart(e, card, ownerUserId, fromZone, selectable)}
       style={{ touchAction: "none" }}
       className="cursor-grab active:cursor-grabbing"
     >
@@ -229,7 +236,7 @@ function Pile({
   zone: "graveyard" | "exile";
   onOpen: (userId: number, zone: "graveyard" | "exile") => void;
   containerRef: (el: HTMLDivElement | null) => void;
-  onCardDragStart: (e: React.PointerEvent, card: MtgCard, ownerUserId: number, fromZone: MtgZone) => void;
+  onCardDragStart: (e: React.PointerEvent, card: MtgCard, ownerUserId: number, fromZone: MtgZone, selectable: boolean) => void;
 }) {
   const cards = playerState[zone];
   const top = cards[cards.length - 1];
@@ -241,7 +248,10 @@ function Pile({
       title={`${zone} (${cards.length})`}
     >
       {top ? (
-        <DraggableCard card={top} ownerUserId={playerState.user_id} fromZone={zone} small onDragStart={onCardDragStart} />
+        // Clicking the top-card preview opens this pile's browse modal
+        // (via the wrapping div's onClick above), not the selected-card
+        // panel — only a card clicked inside that modal is selectable.
+        <DraggableCard card={top} ownerUserId={playerState.user_id} fromZone={zone} small selectable={false} onDragStart={onCardDragStart} />
       ) : (
         <span className="capitalize">{zone}</span>
       )}
@@ -297,12 +307,12 @@ export function MtgGame({ lobby, currentUserId, onFinished }: Props) {
   const [state, setState] = useState<MtgState | null>(null);
   const [error, setError] = useState("");
   const [pileView, setPileView] = useState<{ userId: number; zone: "graveyard" | "exile" } | null>(null);
-  // Which battlefield card is selected (clicked) — stored as an id
-  // reference rather than a snapshot, so the options panel and magnified
-  // preview always reflect the card's live server state (tap/counters)
-  // rather than freezing whatever it looked like at click time.
-  const [selectedCard, setSelectedCard] = useState<{ instanceId: string; ownerUserId: number } | null>(null);
-  const [bigCardView, setBigCardView] = useState<{ instanceId: string; ownerUserId: number } | null>(null);
+  // Which card is selected (clicked) — from any zone, not just the
+  // battlefield — stored as an id+zone reference rather than a snapshot, so
+  // the options panel always reflects the card's live server state
+  // (tap/counters) rather than freezing whatever it looked like at click
+  // time, and quietly disappears once the card leaves that zone.
+  const [selectedCard, setSelectedCard] = useState<{ instanceId: string; ownerUserId: number; zone: MtgZone } | null>(null);
   // Set the instant a hand card is dropped onto the battlefield — the move
   // itself waits on the face-up/face-down choice below before it's sent.
   const [pendingSummon, setPendingSummon] = useState<{ instanceId: string; ownerUserId: number; x: number; y: number } | null>(null);
@@ -323,7 +333,15 @@ export function MtgGame({ lobby, currentUserId, onFinished }: Props) {
   // since drop-target detection only needs its value at pointerup, not a
   // re-render on every move; dragGhost is the bit that actually needs to
   // re-render (the floating preview following the pointer).
-  const dragStateRef = useRef<{ instanceId: string; ownerUserId: number; fromZone: MtgZone; card: MtgCard } | null>(null);
+  const dragStateRef = useRef<{
+    instanceId: string;
+    ownerUserId: number;
+    fromZone: MtgZone;
+    card: MtgCard;
+    startX: number;
+    startY: number;
+    selectable: boolean;
+  } | null>(null);
   const [dragGhost, setDragGhost] = useState<{ card: MtgCard; clientX: number; clientY: number } | null>(null);
 
   function attachCanvasWrapRef(el: HTMLDivElement | null) {
@@ -405,16 +423,19 @@ export function MtgGame({ lobby, currentUserId, onFinished }: Props) {
   }
 
   // Resolves a stored selection reference against the live state, so the
-  // options panel / big card view always show current tap/counter values
-  // instead of a stale snapshot — and quietly disappear if the card left
-  // the battlefield (moved to a pile, etc.) while selected.
+  // options panel always shows current tap/counter values instead of a
+  // stale snapshot — and quietly disappears once the card leaves the zone
+  // it was selected from (moved to a pile, played from hand, etc). Works
+  // for any of the four browsable zones (library isn't sent to the client
+  // card-by-card, only as a count, so it's never a selection source).
   function resolveSelection(
-    sel: { instanceId: string; ownerUserId: number } | null,
-  ): { card: MtgCard; ownerUserId: number } | null {
+    sel: { instanceId: string; ownerUserId: number; zone: MtgZone } | null,
+  ): { card: MtgCard; ownerUserId: number; zone: MtgZone } | null {
     if (!sel || !state) return null;
     const owner = state.players.find((p) => p.user_id === sel.ownerUserId);
-    const card = owner?.battlefield.find((c) => c.id === sel.instanceId);
-    return card ? { card, ownerUserId: sel.ownerUserId } : null;
+    if (!owner || sel.zone === "library") return null;
+    const card = owner[sel.zone].find((c) => c.id === sel.instanceId);
+    return card ? { card, ownerUserId: sel.ownerUserId, zone: sel.zone } : null;
   }
 
   function pointInRect(point: { x: number; y: number } | null, rect: DOMRect | null | undefined): boolean {
@@ -478,9 +499,9 @@ export function MtgGame({ lobby, currentUserId, onFinished }: Props) {
   // so this one path works everywhere. Drop-target detection is a rect-
   // overlap check at pointerup, the same technique already used for
   // dragging a battlefield card off the Konva canvas (handleBattlefieldDragEnd).
-  function handleCardPointerDown(e: React.PointerEvent, card: MtgCard, ownerUserId: number, fromZone: MtgZone) {
+  function handleCardPointerDown(e: React.PointerEvent, card: MtgCard, ownerUserId: number, fromZone: MtgZone, selectable: boolean) {
     e.preventDefault();
-    dragStateRef.current = { instanceId: card.id, ownerUserId, fromZone, card };
+    dragStateRef.current = { instanceId: card.id, ownerUserId, fromZone, card, startX: e.clientX, startY: e.clientY, selectable };
     setDragGhost({ card, clientX: e.clientX, clientY: e.clientY });
     window.addEventListener("pointermove", handleDragPointerMove);
     window.addEventListener("pointerup", handleDragPointerUp);
@@ -509,6 +530,21 @@ export function MtgGame({ lobby, currentUserId, onFinished }: Props) {
     endCardDrag();
     if (!drag) return;
     const point = { x: e.clientX, y: e.clientY };
+
+    // Barely any movement since pointerdown — treat this as a tap/click
+    // rather than a drag-and-drop. If this card is selectable (hand cards,
+    // and cards inside a pile's browse modal), that means opening the same
+    // selected-card panel a battlefield card click opens (see
+    // BattlefieldCardNode's onSelect). A Pile's own top-card preview isn't
+    // selectable this way — its plain click is left alone so it falls
+    // through to that pile's own onClick, which opens the browse modal
+    // instead (see Pile below).
+    if (Math.hypot(point.x - drag.startX, point.y - drag.startY) < 6) {
+      if (drag.selectable) {
+        setSelectedCard({ instanceId: drag.instanceId, ownerUserId: drag.ownerUserId, zone: drag.fromZone });
+      }
+      return;
+    }
 
     const canvasRect = canvasWrapRef.current?.getBoundingClientRect();
     if (pointInRect(point, canvasRect) && canvasRect) {
@@ -568,7 +604,8 @@ export function MtgGame({ lobby, currentUserId, onFinished }: Props) {
     ...me.battlefield.map((c) => ({ card: c, ownerUserId: me.user_id, isMine: true })),
   ];
   const selected = resolveSelection(selectedCard);
-  const bigCard = resolveSelection(bigCardView);
+  // Every zone but wherever the card currently sits is a valid transfer target.
+  const moveTargets = selected ? ALL_ZONES.filter((z) => z !== selected.zone) : [];
 
   return (
     <div className="flex h-full flex-col gap-2 overflow-y-auto p-3">
@@ -604,77 +641,181 @@ export function MtgGame({ lobby, currentUserId, onFinished }: Props) {
         onShuffle={() => {}}
       />
 
-      <div className="flex items-start gap-2">
-        <div
-          ref={attachCanvasWrapRef}
-          className="relative flex-1 overflow-hidden rounded border border-neutral-300 bg-gradient-to-b from-neutral-50 to-green-50"
-          style={{ height: CANVAS_HEIGHT }}
-        >
-          <div className="pointer-events-none absolute left-2 top-2 text-[10px] font-semibold uppercase text-neutral-400">Battlefield</div>
-          <div className="pointer-events-none absolute inset-x-0 top-1/2 border-t border-dashed border-neutral-300" />
-          <Stage width={canvasWidth} height={CANVAS_HEIGHT}>
-            <Layer>
-              {allBattlefieldCards.map(({ card, ownerUserId, isMine }) => (
-                <BattlefieldCardNode
-                  key={card.id}
-                  card={card}
-                  isMine={isMine}
-                  canvasWidth={canvasWidth}
-                  flipped={flipped}
-                  onSelect={() => setSelectedCard({ instanceId: card.id, ownerUserId })}
-                  onDragEnd={(point, node) => handleBattlefieldDragEnd(card, ownerUserId, point, node)}
-                />
-              ))}
-            </Layer>
-          </Stage>
+      {/* Main column (battlefield, "You" bar, hand) all share the
+          battlefield's own width. The selected-card/zones panel is a true
+          aside next to it — stretched (via items-stretch, the flex default)
+          to match the column's full height rather than just the canvas's,
+          so it has the whole column to scroll alongside instead of a
+          fixed, canvas-only sliver. */}
+      <div className="flex items-stretch gap-2">
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          <div
+            ref={attachCanvasWrapRef}
+            className="relative overflow-hidden rounded border border-neutral-300 bg-gradient-to-b from-neutral-50 to-green-50"
+            style={{ height: CANVAS_HEIGHT }}
+          >
+            <div className="pointer-events-none absolute left-2 top-2 text-[10px] font-semibold uppercase text-neutral-400">Battlefield</div>
+            <div className="pointer-events-none absolute inset-x-0 top-1/2 border-t border-dashed border-neutral-300" />
+            <Stage width={canvasWidth} height={CANVAS_HEIGHT}>
+              <Layer>
+                {allBattlefieldCards.map(({ card, ownerUserId, isMine }) => (
+                  <BattlefieldCardNode
+                    key={card.id}
+                    card={card}
+                    isMine={isMine}
+                    canvasWidth={canvasWidth}
+                    flipped={flipped}
+                    onSelect={() => setSelectedCard({ instanceId: card.id, ownerUserId, zone: "battlefield" })}
+                    onDragEnd={(point, node) => handleBattlefieldDragEnd(card, ownerUserId, point, node)}
+                  />
+                ))}
+              </Layer>
+            </Stage>
+          </div>
+
+          <PlayerInfoBar
+            playerState={me}
+            label="You"
+            isSelf={true}
+            onLifeChange={(d) => run(mtgApi.adjustMtgLife(lobby.id, me.user_id, d))}
+            onDraw={() => run(mtgApi.drawMtgCard(lobby.id))}
+            onShuffle={() => run(mtgApi.shuffleMtgLibrary(lobby.id))}
+          />
+
+          <div ref={handRef} className="flex min-h-[104px] flex-wrap gap-1 rounded border border-blue-200 bg-blue-50/40 p-2">
+            <span className="w-full text-[10px] font-semibold uppercase text-neutral-400">Your hand ({me.hand.length})</span>
+            {me.hand.map((card) => (
+              <DraggableCard key={card.id} card={card} ownerUserId={currentUserId} fromZone="hand" onDragStart={handleCardPointerDown} />
+            ))}
+          </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-1">
-          <Pile
-            playerState={opponent}
-            zone="graveyard"
-            onOpen={(userId, zone) => setPileView({ userId, zone })}
-            containerRef={(el) => (graveyardRefs.current[opponent.user_id] = el)}
-            onCardDragStart={handleCardPointerDown}
-          />
-          <Pile
-            playerState={opponent}
-            zone="exile"
-            onOpen={(userId, zone) => setPileView({ userId, zone })}
-            containerRef={(el) => (exileRefs.current[opponent.user_id] = el)}
-            onCardDragStart={handleCardPointerDown}
-          />
-          <Pile
-            playerState={me}
-            zone="graveyard"
-            onOpen={(userId, zone) => setPileView({ userId, zone })}
-            containerRef={(el) => (graveyardRefs.current[me.user_id] = el)}
-            onCardDragStart={handleCardPointerDown}
-          />
-          <Pile
-            playerState={me}
-            zone="exile"
-            onOpen={(userId, zone) => setPileView({ userId, zone })}
-            containerRef={(el) => (exileRefs.current[me.user_id] = el)}
-            onCardDragStart={handleCardPointerDown}
-          />
+        {/* Selected-card panel lives in-flow beside the board instead of
+            floating over it — it never covers board state, and its
+            presence/absence never steals focus the way a modal overlay
+            would. */}
+        <div className="flex w-60 flex-shrink-0 flex-col gap-2">
+          <div className="min-h-0 flex-1 overflow-y-auto rounded border border-neutral-300 bg-white p-2 shadow-sm">
+            {selected ? (
+              <>
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-xs font-semibold uppercase text-neutral-500">
+                    Selected card <span className="capitalize text-neutral-400">· {selected.zone}</span>
+                  </span>
+                  <button onClick={() => setSelectedCard(null)} className="text-xs text-neutral-500 hover:underline">
+                    Close
+                  </button>
+                </div>
+                <div className="mb-2 flex justify-center">
+                  {selected.card.name && selected.card.image_url ? (
+                    <img src={selected.card.image_url} alt={selected.card.name} className="w-full max-w-[160px] rounded shadow" />
+                  ) : (
+                    <div className="flex h-44 w-full max-w-[160px] items-center justify-center rounded bg-gradient-to-br from-red-900 to-red-950 text-3xl text-red-200">
+                      🂠
+                    </div>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  {selected.zone === "battlefield" && (
+                    <>
+                      <button
+                        onClick={() => toggleTap(selected.card, selected.ownerUserId)}
+                        className="w-full rounded bg-neutral-800 px-2 py-1 text-xs text-white hover:bg-neutral-900"
+                      >
+                        {selected.card.tapped ? "Untap" : "Tap"}
+                      </button>
+                      <div className="flex items-center justify-between rounded border border-neutral-200 px-2 py-1">
+                        <span className="text-xs">+1/+1: {selected.card.counters["+1/+1"] ?? 0}</span>
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => bumpCounter(selected.card, selected.ownerUserId, -1)}
+                            className="rounded bg-neutral-200 px-2 text-xs hover:bg-neutral-300"
+                          >
+                            −
+                          </button>
+                          <button
+                            onClick={() => bumpCounter(selected.card, selected.ownerUserId, 1)}
+                            className="rounded bg-neutral-200 px-2 text-xs hover:bg-neutral-300"
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                  <div className="rounded border border-neutral-200 p-1">
+                    <span className="mb-1 block text-[10px] font-semibold uppercase text-neutral-400">Move to zone</span>
+                    <div className="grid grid-cols-2 gap-1">
+                      {moveTargets.map((zone) => (
+                        <button
+                          key={zone}
+                          onClick={() => {
+                            // Summoning from hand offers a face-up/face-down
+                            // choice — same prompt a hand->battlefield drag
+                            // triggers (see resolvePendingSummon) — every
+                            // other transfer applies immediately.
+                            if (selected.zone === "hand" && zone === "battlefield") {
+                              setPendingSummon({ instanceId: selected.card.id, ownerUserId: selected.ownerUserId, x: 0.5, y: 0.5 });
+                              setSelectedCard(null);
+                              return;
+                            }
+                            run(
+                              mtgApi.moveMtgCard(lobby.id, {
+                                instanceId: selected.card.id,
+                                ownerUserId: selected.ownerUserId,
+                                fromZone: selected.zone,
+                                toZone: zone,
+                                ...(zone === "battlefield" ? { x: 0.5, y: 0.5 } : {}),
+                              }),
+                            );
+                          }}
+                          className="rounded border border-neutral-300 px-1.5 py-1 text-[11px] capitalize hover:bg-neutral-100"
+                        >
+                          {zone}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="flex h-32 items-center justify-center text-center text-xs text-neutral-400">
+                Click any card — battlefield, hand, graveyard, or exile — to view it here
+              </div>
+            )}
+          </div>
+
+          <div className="grid flex-shrink-0 grid-cols-4 gap-1">
+            <Pile
+              playerState={opponent}
+              zone="graveyard"
+              onOpen={(userId, zone) => setPileView({ userId, zone })}
+              containerRef={(el) => (graveyardRefs.current[opponent.user_id] = el)}
+              onCardDragStart={handleCardPointerDown}
+            />
+            <Pile
+              playerState={opponent}
+              zone="exile"
+              onOpen={(userId, zone) => setPileView({ userId, zone })}
+              containerRef={(el) => (exileRefs.current[opponent.user_id] = el)}
+              onCardDragStart={handleCardPointerDown}
+            />
+            <Pile
+              playerState={me}
+              zone="graveyard"
+              onOpen={(userId, zone) => setPileView({ userId, zone })}
+              containerRef={(el) => (graveyardRefs.current[me.user_id] = el)}
+              onCardDragStart={handleCardPointerDown}
+            />
+            <Pile
+              playerState={me}
+              zone="exile"
+              onOpen={(userId, zone) => setPileView({ userId, zone })}
+              containerRef={(el) => (exileRefs.current[me.user_id] = el)}
+              onCardDragStart={handleCardPointerDown}
+            />
+          </div>
         </div>
-      </div>
-
-      <PlayerInfoBar
-        playerState={me}
-        label="You"
-        isSelf={true}
-        onLifeChange={(d) => run(mtgApi.adjustMtgLife(lobby.id, me.user_id, d))}
-        onDraw={() => run(mtgApi.drawMtgCard(lobby.id))}
-        onShuffle={() => run(mtgApi.shuffleMtgLibrary(lobby.id))}
-      />
-
-      <div ref={handRef} className="flex min-h-[104px] flex-wrap gap-1 rounded border border-blue-200 bg-blue-50/40 p-2">
-        <span className="w-full text-[10px] font-semibold uppercase text-neutral-400">Your hand ({me.hand.length})</span>
-        {me.hand.map((card) => (
-          <DraggableCard key={card.id} card={card} ownerUserId={currentUserId} fromZone="hand" onDragStart={handleCardPointerDown} />
-        ))}
       </div>
 
       {error && <p className="text-sm text-red-600">{error}</p>}
@@ -685,77 +826,6 @@ export function MtgGame({ lobby, currentUserId, onFinished }: Props) {
           style={{ left: dragGhost.clientX - 34, top: dragGhost.clientY - 48 }}
         >
           <CardFace card={dragGhost.card} />
-        </div>
-      )}
-
-      {selected && (
-        <div className="fixed right-4 top-24 z-40 w-60 rounded border border-neutral-300 bg-white p-3 shadow-xl">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs font-semibold uppercase text-neutral-500">Card options</span>
-            <button onClick={() => setSelectedCard(null)} className="text-xs text-neutral-500 hover:underline">
-              Close
-            </button>
-          </div>
-          <div className="mb-3 flex justify-center">
-            {selected.card.name && selected.card.image_url ? (
-              <img src={selected.card.image_url} alt={selected.card.name} className="w-40 rounded shadow" />
-            ) : (
-              <div className="flex h-56 w-40 items-center justify-center rounded bg-gradient-to-br from-red-900 to-red-950 text-3xl text-red-200">
-                🂠
-              </div>
-            )}
-          </div>
-          <div className="space-y-2">
-            <button
-              onClick={() => toggleTap(selected.card, selected.ownerUserId)}
-              className="w-full rounded bg-neutral-800 px-2 py-1.5 text-xs text-white hover:bg-neutral-900"
-            >
-              {selected.card.tapped ? "Untap" : "Tap"}
-            </button>
-            <button
-              onClick={() => setBigCardView(selectedCard)}
-              className="w-full rounded border border-neutral-300 px-2 py-1.5 text-xs hover:bg-neutral-100"
-            >
-              View full card
-            </button>
-            <div className="flex items-center justify-between rounded border border-neutral-200 px-2 py-1.5">
-              <span className="text-xs">+1/+1: {selected.card.counters["+1/+1"] ?? 0}</span>
-              <div className="flex gap-1">
-                <button
-                  onClick={() => bumpCounter(selected.card, selected.ownerUserId, -1)}
-                  className="rounded bg-neutral-200 px-2 text-xs hover:bg-neutral-300"
-                >
-                  −
-                </button>
-                <button
-                  onClick={() => bumpCounter(selected.card, selected.ownerUserId, 1)}
-                  className="rounded bg-neutral-200 px-2 text-xs hover:bg-neutral-300"
-                >
-                  +
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {bigCard && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setBigCardView(null)}>
-          {bigCard.card.name && bigCard.card.image_url ? (
-            <img
-              src={bigCard.card.image_url}
-              alt={bigCard.card.name}
-              className="max-h-[85vh] rounded-lg shadow-2xl"
-              onClick={(e) => e.stopPropagation()}
-            />
-          ) : (
-            <div
-              className="flex h-[70vh] w-[50vh] items-center justify-center rounded-lg bg-gradient-to-br from-red-900 to-red-950 text-6xl text-red-200"
-              onClick={(e) => e.stopPropagation()}
-            >
-              🂠
-            </div>
-          )}
         </div>
       )}
 

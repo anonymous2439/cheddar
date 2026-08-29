@@ -52,6 +52,10 @@ class RaceOut(BaseModel):
     # racer_names, not stored, so clients never need their own hardcoded
     # name->line map (see Race.signature_moves).
     signature_moves: dict[str, str]
+    # Static link for now (no upload flow yet) — see Race.face_image_urls.
+    # None for a racer with nothing set; client falls back to a plain
+    # colored head in that case.
+    face_image_urls: dict[str, str | None]
     # Fixed payout odds per racer, frozen at race creation (see
     # roster.compute_payout_multipliers) — a favorite pays less, a longshot
     # pays more, both derived from that racer's overall win/loss record.

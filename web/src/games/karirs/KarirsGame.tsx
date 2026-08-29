@@ -2,6 +2,8 @@ import axios from "axios";
 import { useEffect, useRef, useState } from "react";
 import * as karirsApi from "../../api/karirs";
 import { computePlayback, renderTrack } from "./render";
+import { createKarirsScene3D } from "./render3d";
+import type { Karirs3DCameraMode, Karirs3DScene } from "./render3d";
 import { onKarirsWalletChanged } from "../../lib/karirsEvents";
 import { KarirsHallOfFameModal } from "./KarirsHallOfFameModal";
 import type { KarirsBet, KarirsPool, KarirsRace, KarirsResolvedMessage, KarirsStepsMessage, KarirsWallet, Lobby } from "../../types";
@@ -20,9 +22,17 @@ export function KarirsGame({ lobby, onFinished }: Props) {
   const [wager, setWager] = useState(50);
   const [error, setError] = useState("");
   const [showHallOfFame, setShowHallOfFame] = useState(false);
+  const [cameraMode, setCameraMode] = useState<Karirs3DCameraMode>("chase");
   const [, forceTick] = useState(0);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const canvas3dRef = useRef<HTMLCanvasElement | null>(null);
+  const scene3dRef = useRef<Karirs3DScene | null>(null);
+  // Populated by callback refs on the per-racer profile-square canvases
+  // below (see the JSX) — read fresh every animation frame rather than
+  // needing its own effect, since setFaceCanvases is cheap to call
+  // redundantly (see its own doc comment in render3d.ts).
+  const faceCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const raceRef = useRef<KarirsRace | null>(null);
   const myBetRef = useRef<KarirsBet | null>(null);
   const lastProcessedRef = useRef<{ id: number; status: string } | null>(null);
@@ -30,6 +40,7 @@ export function KarirsGame({ lobby, onFinished }: Props) {
   // reconnect every time the parent re-renders with a new inline callback —
   // it only needs the latest onFinished at the moment resolution fires.
   const onFinishedRef = useRef(onFinished);
+  const cameraModeRef = useRef(cameraMode);
 
   useEffect(() => {
     raceRef.current = race;
@@ -37,6 +48,9 @@ export function KarirsGame({ lobby, onFinished }: Props) {
   useEffect(() => {
     myBetRef.current = myBet;
   }, [myBet]);
+  useEffect(() => {
+    cameraModeRef.current = cameraMode;
+  }, [cameraMode]);
   useEffect(() => {
     onFinishedRef.current = onFinished;
   }, [onFinished]);
@@ -184,7 +198,10 @@ export function KarirsGame({ lobby, onFinished }: Props) {
 
   // Draw loop runs continuously off refs — no need to depend on state that
   // changes every animation frame. Recomputes playback position from
-  // scratch every frame off race.steps + elapsed wall-clock time.
+  // scratch every frame off race.steps + elapsed wall-clock time. Drives
+  // both the 2D canvas and the 3D scene off the exact same computed
+  // playback — they're two views of one race, never allowed to drift out
+  // of sync with each other.
   useEffect(() => {
     let rafId: number;
     function draw() {
@@ -193,20 +210,40 @@ export function KarirsGame({ lobby, onFinished }: Props) {
       if (canvas && currentRace) {
         const anchor = new Date(currentRace.betting_closes_at + "Z").getTime();
         const playback = computePlayback(currentRace.steps ?? [], anchor, Date.now());
+        const isResolved = currentRace.status === "resolved";
         renderTrack(
           canvas,
           currentRace.racer_names,
           currentRace.winning_name,
-          currentRace.status === "resolved",
+          isResolved,
           playback,
           myBetRef.current?.racer_name ?? null,
           currentRace.signature_moves,
         );
+
+        const canvas3d = canvas3dRef.current;
+        if (canvas3d) {
+          if (!scene3dRef.current) scene3dRef.current = createKarirsScene3D(canvas3d);
+          scene3dRef.current.setCameraMode(cameraModeRef.current);
+          scene3dRef.current.setFaceCanvases(faceCanvasesRef.current);
+          scene3dRef.current.update({
+            racerNames: currentRace.racer_names,
+            playback,
+            winningName: currentRace.winning_name,
+            isResolved,
+            myBetRacerName: myBetRef.current?.racer_name ?? null,
+            faceImageUrls: currentRace.face_image_urls,
+          });
+        }
       }
       rafId = requestAnimationFrame(draw);
     }
     rafId = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(rafId);
+    return () => {
+      cancelAnimationFrame(rafId);
+      scene3dRef.current?.dispose();
+      scene3dRef.current = null;
+    };
   }, []);
 
   async function handlePlaceBet() {
@@ -267,6 +304,46 @@ export function KarirsGame({ lobby, onFinished }: Props) {
       </p>
 
       <canvas ref={canvasRef} className="mb-3 h-48 w-full rounded border border-neutral-200" />
+
+      {/* Same race, same live playback data, an alternate 3D view — kept
+          alongside the 2D track rather than replacing it, so whoever's
+          watching can just look at whichever one they prefer. */}
+      <div className="mb-1 flex items-center justify-between">
+        <p className="text-[10px] font-semibold uppercase text-neutral-400">3D View</p>
+        <button
+          onClick={() => setCameraMode((m) => (m === "overview" ? "chase" : m === "chase" ? "front" : "overview"))}
+          className={`rounded px-2 py-0.5 text-xs ${
+            cameraMode !== "overview" ? "bg-amber-500 text-white hover:bg-amber-600" : "border border-neutral-300 hover:bg-neutral-100"
+          }`}
+        >
+          {cameraMode === "overview" && "🎥 Follow leader"}
+          {cameraMode === "chase" && "🎥 Following (behind)"}
+          {cameraMode === "front" && "🎥 Following (front)"}
+        </button>
+      </div>
+      <canvas ref={canvas3dRef} className="mb-3 h-56 w-full rounded border border-neutral-200" />
+
+      {/* One dedicated little camera per racer, all pointed at just their
+          own head — rendered from the exact same live 3D scene above, not
+          a separate copy, so these never drift out of sync with it. */}
+      <p className="mb-1 text-[10px] font-semibold uppercase text-neutral-400">Face Cam</p>
+      <div className="mb-3 flex flex-wrap gap-2">
+        {race.racer_names.map((name) => (
+          <div key={name} className="flex flex-col items-center gap-0.5">
+            <canvas
+              ref={(el) => {
+                if (el) faceCanvasesRef.current.set(name, el);
+                else faceCanvasesRef.current.delete(name);
+              }}
+              className={`h-24 w-24 rounded border ${myBet?.racer_name === name ? "border-amber-500" : "border-neutral-200"}`}
+            />
+            <span className="max-w-[96px] truncate text-center text-[9px] text-neutral-500">
+              {myBet?.racer_name === name ? "★ " : ""}
+              {name}
+            </span>
+          </div>
+        ))}
+      </div>
 
       {showHallOfFame && <KarirsHallOfFameModal onClose={() => setShowHallOfFame(false)} />}
 

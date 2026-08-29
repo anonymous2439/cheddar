@@ -45,6 +45,11 @@ class Racer(Base):
     losses = Column(Integer, nullable=False, default=0)
     races_run = Column(Integer, nullable=False, default=0)
     signature_move = Column(String(128), nullable=True)
+    # Static link for now (no upload flow yet) — a flat decal on the 3D
+    # racer's head, not a UV-wrap of the whole sphere (see render3d.ts on
+    # the client, same reasoning as the eye dots there: a photo wrapped
+    # around a full sphere distorts badly toward the sides/back).
+    face_image_url = Column(String(255), nullable=True)
 
 
 class Race(Base):
@@ -83,6 +88,19 @@ class Race(Base):
             rows = session.query(Racer).filter(Racer.name.in_(self.racer_names)).all()
             by_name = {r.name: r.signature_move for r in rows if r.signature_move}
         return {name: by_name.get(name, f"{name}'s Signature Move!") for name in self.racer_names}
+
+    @property
+    def face_image_urls(self) -> dict[str, str | None]:
+        """Same pattern as signature_moves above — read straight off each
+        racer's row for this race's roster. Unlike signature_moves there's
+        no generic fallback text; a racer with nothing set just gets None,
+        and the client falls back to its plain colored head."""
+        session = object_session(self)
+        by_name: dict[str, str | None] = {}
+        if session is not None:
+            rows = session.query(Racer).filter(Racer.name.in_(self.racer_names)).all()
+            by_name = {r.name: r.face_image_url for r in rows}
+        return {name: by_name.get(name) for name in self.racer_names}
 
 
 class Bet(Base):
