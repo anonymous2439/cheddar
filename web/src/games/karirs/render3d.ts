@@ -58,6 +58,12 @@ const EXHAUSTED_BREATH_AMPLITUDE = 0.05;
 // for them to do anything but trail behind, not a wide flung-out spread.
 const NINJA_LEAN = 0.16;
 const NINJA_ARM_TRAIL = 1.2;
+// A speech bubble over the head while shouting — capped well under fully
+// solid (not 1.0) so it reads as a fleeting comic-book flourish rather than
+// an opaque plate blocking the racer's own head. Multiplied by ninjaBlend
+// (not just toggled on isShouting) so it fades in/out in lockstep with the
+// pose itself instead of popping on and off in a single frame.
+const BUBBLE_MAX_OPACITY = 0.85;
 // How fast a rig eases into/out of the exhausted/ninja poses — an
 // exponential approach rate (bigger = snappier, smaller = more gradual),
 // not a duration, so it stays frame-rate independent.
@@ -134,6 +140,10 @@ export interface Karirs3DUpdateParams {
   // Static link for now (no upload flow yet) — null for a racer with
   // nothing set, which just keeps the plain colored head + eye dots.
   faceImageUrls: Record<string, string | null>;
+  // name -> catchphrase, same map render.ts's 2D canvas already shows in
+  // its own speech bubble (see Race.signature_moves on the server) — shown
+  // above a racer's head here whenever they're currently shouting it.
+  signatureMoves: Record<string, string>;
 }
 
 export interface Karirs3DScene {
@@ -325,6 +335,72 @@ function makeNameSprite(name: string, isMine: boolean): THREE.Sprite {
     bold: isMine,
   });
   sprite.scale.set(2.2, 0.55, 1);
+  return sprite;
+}
+
+function truncateToWidth(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  let t = text;
+  while (t.length > 1 && ctx.measureText(t + "…").width > maxWidth) t = t.slice(0, -1);
+  return t + "…";
+}
+
+// A comic-style speech bubble (rounded rect + a downward tail), baked into
+// a canvas texture once per racer at rig-build time (a signature move's
+// text is a static per-racer attribute — see Race.signature_moves on the
+// server — not something that changes race to race, so there's no need to
+// rebuild this every frame or even every race). The fill itself is already
+// translucent (rgba, not an opaque color) — BUBBLE_MAX_OPACITY on top of
+// that (applied via the sprite material's own opacity, per-frame) is what
+// actually fades it in/out with the pose.
+function makeChatBubbleSprite(text: string): THREE.Sprite {
+  const canvas = document.createElement("canvas");
+  canvas.width = 384;
+  canvas.height = 176;
+  const ctx = canvas.getContext("2d")!;
+
+  const bubbleX = 8;
+  const bubbleY = 8;
+  const bubbleW = canvas.width - bubbleX * 2;
+  const bubbleH = 110;
+  const fill = "rgba(254, 243, 199, 0.9)"; // amber-100
+  const stroke = "rgba(180, 83, 9, 0.9)"; // amber-700
+
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.roundRect(bubbleX, bubbleY, bubbleW, bubbleH, 20);
+  ctx.fill();
+  ctx.stroke();
+
+  // Tail pointing down toward the racer's head, its base overlapping the
+  // bubble's own bottom edge so the seam between the two shapes doesn't
+  // show a visible stroke line running across it.
+  ctx.beginPath();
+  ctx.moveTo(canvas.width / 2 - 18, bubbleY + bubbleH - 4);
+  ctx.lineTo(canvas.width / 2, bubbleY + bubbleH + 26);
+  ctx.lineTo(canvas.width / 2 + 18, bubbleY + bubbleH - 4);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = stroke;
+  ctx.stroke();
+  ctx.fillStyle = fill;
+  ctx.fillRect(canvas.width / 2 - 17, bubbleY + bubbleH - 4, 34, 5);
+
+  ctx.font = "bold 28px system-ui, sans-serif";
+  ctx.fillStyle = "#78350f";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(truncateToWidth(ctx, text, bubbleW - 28), canvas.width / 2, bubbleY + bubbleH / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+  const sprite = new THREE.Sprite(material);
+  sprite.renderOrder = 11;
+  sprite.scale.set(2.6, 1.19, 1);
   return sprite;
 }
 
@@ -775,6 +851,7 @@ export function createKarirsScene3D(canvas: HTMLCanvasElement): Karirs3DScene {
 
   const rigs = new Map<string, RacerRig>();
   const sprites = new Map<string, THREE.Sprite>();
+  const chatBubbles = new Map<string, THREE.Sprite>();
   const laneDividers = new THREE.Group();
   scene.add(laneDividers);
   let builtNames: string[] = [];
@@ -825,11 +902,13 @@ export function createKarirsScene3D(canvas: HTMLCanvasElement): Karirs3DScene {
     const savedFog = scene.fog;
     scene.background = faceCamBackground;
     scene.fog = null;
-    // The floating name labels are sized/framed for the main wide view —
-    // this close up, they just clip into cut-off text across the top of
-    // the square. The racer's name is already the caption under the
-    // canvas in the DOM, so there's nothing lost by hiding them here.
+    // The floating name labels (and any active speech bubble) are
+    // sized/framed for the main wide view — this close up, they just clip
+    // into cut-off text/shapes across the top of the square. The racer's
+    // name is already the caption under the canvas in the DOM, so there's
+    // nothing lost by hiding them here.
     for (const sprite of sprites.values()) sprite.visible = false;
+    for (const bubble of chatBubbles.values()) bubble.visible = false;
 
     for (const [name, fr] of faceRenderers) {
       const rig = rigs.get(name);
@@ -863,13 +942,25 @@ export function createKarirsScene3D(canvas: HTMLCanvasElement): Karirs3DScene {
     scene.background = savedBackground;
     scene.fog = savedFog;
     for (const sprite of sprites.values()) sprite.visible = true;
+    // Restored to true here, not to whatever it was before this function
+    // ran — harmless, since the main per-racer loop unconditionally
+    // recomputes each bubble's real visible/opacity off ninjaBlend every
+    // frame, before the *next* main-camera render ever sees this value.
+    for (const bubble of chatBubbles.values()) bubble.visible = true;
   }
 
-  function rebuildRacers(racerNames: string[], myBetRacerName: string | null, faceImageUrls: Record<string, string | null>) {
+  function rebuildRacers(
+    racerNames: string[],
+    myBetRacerName: string | null,
+    faceImageUrls: Record<string, string | null>,
+    signatureMoves: Record<string, string>,
+  ) {
     for (const rig of rigs.values()) scene.remove(rig.group);
     for (const sprite of sprites.values()) scene.remove(sprite);
+    for (const bubble of chatBubbles.values()) scene.remove(bubble);
     rigs.clear();
     sprites.clear();
+    chatBubbles.clear();
     while (laneDividers.children.length) {
       const child = laneDividers.children[0] as THREE.Mesh;
       laneDividers.remove(child);
@@ -887,6 +978,17 @@ export function createKarirsScene3D(canvas: HTMLCanvasElement): Karirs3DScene {
       sprite.position.set(0, 2.15, rig.group.position.z);
       scene.add(sprite);
       sprites.set(name, sprite);
+
+      // Above the name tag (itself above the head) so the stack reads
+      // head -> name -> bubble, bottom to top. Starts fully transparent
+      // (see update()'s per-frame opacity) — only actually visible while
+      // this racer is currently shouting their move.
+      const bubble = makeChatBubbleSprite(signatureMoves[name] ?? `${name}'s Signature Move!`);
+      bubble.position.set(0, 2.85, rig.group.position.z);
+      bubble.material.opacity = 0;
+      bubble.visible = false;
+      scene.add(bubble);
+      chatBubbles.set(name, bubble);
     });
 
     // n+1 boundary lines — one before the first lane, one between every
@@ -906,7 +1008,7 @@ export function createKarirsScene3D(canvas: HTMLCanvasElement): Karirs3DScene {
     focusedRacerName = null;
   }
 
-  function update({ racerNames, playback, winningName, isResolved, myBetRacerName, faceImageUrls }: Karirs3DUpdateParams) {
+  function update({ racerNames, playback, winningName, isResolved, myBetRacerName, faceImageUrls, signatureMoves }: Karirs3DUpdateParams) {
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
     if (width === 0 || height === 0) return;
@@ -920,7 +1022,7 @@ export function createKarirsScene3D(canvas: HTMLCanvasElement): Karirs3DScene {
 
     const sameRoster = racerNames.length === builtNames.length && racerNames.every((n, i) => n === builtNames[i]);
     if (!sameRoster || myBetRacerName !== builtMyBet) {
-      rebuildRacers(racerNames, myBetRacerName, faceImageUrls);
+      rebuildRacers(racerNames, myBetRacerName, faceImageUrls, signatureMoves);
     }
 
     // Real elapsed time since the *previous* update() call — not since the
@@ -1021,6 +1123,13 @@ export function createKarirsScene3D(canvas: HTMLCanvasElement): Karirs3DScene {
 
       const sprite = sprites.get(name);
       if (sprite) sprite.position.x = targetX;
+
+      const bubble = chatBubbles.get(name);
+      if (bubble) {
+        bubble.position.x = targetX;
+        bubble.visible = nb > 0.01;
+        (bubble.material as THREE.SpriteMaterial).opacity = nb * BUBBLE_MAX_OPACITY;
+      }
     }
 
     // Leader-follow bookkeeping — hysteresis so a photo-finish doesn't whip
@@ -1083,6 +1192,10 @@ export function createKarirsScene3D(canvas: HTMLCanvasElement): Karirs3DScene {
     for (const sprite of sprites.values()) {
       sprite.material.map?.dispose();
       sprite.material.dispose();
+    }
+    for (const bubble of chatBubbles.values()) {
+      bubble.material.map?.dispose();
+      bubble.material.dispose();
     }
     for (const child of laneDividers.children) disposeMesh(child as THREE.Mesh);
     disposeMesh(floor);

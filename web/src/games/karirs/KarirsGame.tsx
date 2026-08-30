@@ -233,6 +233,7 @@ export function KarirsGame({ lobby, onFinished }: Props) {
             isResolved,
             myBetRacerName: myBetRef.current?.racer_name ?? null,
             faceImageUrls: currentRace.face_image_urls,
+            signatureMoves: currentRace.signature_moves,
           });
         }
       }
