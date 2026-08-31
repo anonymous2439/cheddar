@@ -24,6 +24,26 @@
         k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟',
     };
 
+    // Purely a client-side cosmetic preference (see window.CheddarHost's
+    // getPreference/setPreference in chat.js) — not synced to the backend
+    // or the other player, same as the web app's own board-theme picker
+    // (web/src/games/chess/boardThemes.ts, kept in sync with these same
+    // color values/ids by hand since this module has no bundler to import
+    // that file through). "classic" (null/null) keeps this module's
+    // original outline-only look as the default, matching every other
+    // theme choice being additive, not a replacement of what shipped before.
+    const BOARD_THEMES = {
+        classic: { label: 'Classic', light: null, dark: null },
+        green: { label: 'Green', light: '#eeeed2', dark: '#769656' },
+        blue: { label: 'Blue', light: '#dee3e6', dark: '#8ca2ad' },
+        wood: { label: 'Wood', light: '#f0d9b5', dark: '#b58863' },
+        gray: { label: 'Gray', light: '#e8e8e8', dark: '#8a8a8a' },
+    };
+    // Same tint the web app uses for "last move" highlighting — a muted
+    // olive-yellow, deliberately more subdued than a vivid/neon yellow (an
+    // earlier, brighter version was too strong).
+    const LAST_MOVE_HIGHLIGHT = '#cdd26a';
+
     let ctx = null;
     let container = null;
     let state = null;
@@ -31,11 +51,13 @@
     let errorText = '';
     let showBoard = false;
     let awaitingMove = false;
+    let boardTheme = 'classic';
 
     // Built once per mount() in buildChrome(); render() only ever updates
     // these, never recreates them — see the file-level comment above.
     let statusEl = null;
     let boardToggleBtn = null;
+    let themeSelectEl = null;
     let boardWrapEl = null;
     let squareEls = {}; // squareName ('e4') -> its persistent div
     let movesListEl = null;
@@ -52,6 +74,7 @@
         errorText = '';
         showBoard = false;
         awaitingMove = false;
+        boardTheme = window.CheddarHost.getPreference('chess.boardTheme', 'classic');
         squareEls = {};
 
         buildChrome();
@@ -61,7 +84,7 @@
 
     function unmount() {
         container = null;
-        statusEl = boardToggleBtn = boardWrapEl = movesListEl = null;
+        statusEl = boardToggleBtn = themeSelectEl = boardWrapEl = movesListEl = null;
         moveInputEl = moveSendBtn = moveErrorEl = resignBtnEl = null;
         squareEls = {};
     }
@@ -229,6 +252,21 @@
         });
         container.appendChild(boardToggleBtn);
 
+        themeSelectEl = document.createElement('select');
+        themeSelectEl.style.marginLeft = '6px';
+        for (const id in BOARD_THEMES) {
+            const opt = document.createElement('option');
+            opt.value = id;
+            opt.textContent = BOARD_THEMES[id].label;
+            themeSelectEl.appendChild(opt);
+        }
+        themeSelectEl.addEventListener('change', () => {
+            boardTheme = themeSelectEl.value;
+            window.CheddarHost.setPreference('chess.boardTheme', boardTheme);
+            render();
+        });
+        container.appendChild(themeSelectEl);
+
         boardWrapEl = document.createElement('div');
         boardWrapEl.style.display = 'none';
         boardWrapEl.style.gridTemplateColumns = 'repeat(8, 32px)';
@@ -255,9 +293,11 @@
                 sq.style.fontSize = '22px';
                 sq.style.lineHeight = '1';
                 sq.style.cursor = 'pointer';
-                // No fill — just an outline grid (vscode-only look; the web
-                // board keeps its filled light/dark squares).
-                sq.style.border = '1px solid white';
+                // Border/fill are set per-render, driven by the chosen
+                // board theme — see render()'s per-square loop. "classic"
+                // keeps the original outline-only look (no fill, white
+                // border) as the default; every other theme fills the
+                // square instead, same as the web board.
                 sq.style.boxSizing = 'border-box';
                 sq.addEventListener('click', () => handleSquareClick(squareName));
                 squareEls[squareName] = sq;
@@ -351,6 +391,14 @@
         const color = myColor();
         const flipped = color === 'black';
         const grid = state ? parseFen(state.fen) : null;
+        themeSelectEl.value = boardTheme;
+        const theme = BOARD_THEMES[boardTheme] || BOARD_THEMES.classic;
+
+        // Last move highlighting: UCI strings are "<from><to>[promotion]",
+        // e.g. "e2e4" — same convention the web app's board uses.
+        const lastUci = state && state.moves && state.moves.length ? state.moves[state.moves.length - 1] : null;
+        const lastFrom = lastUci ? lastUci.slice(0, 2) : null;
+        const lastTo = lastUci ? lastUci.slice(2, 4) : null;
 
         for (const squareName in squareEls) {
             const el = squareEls[squareName];
@@ -360,7 +408,49 @@
             el.style.order = String(displayRank * 8 + displayFile);
             const piece = grid ? grid[rankIdx][fileIdx] : null;
             el.textContent = piece ? PIECE_CHARS[piece] || '' : '';
+            // The Unicode chess glyphs (♔ vs ♚) are designed as a single ink
+            // color on paper — they have no fill/outline of their own the
+            // way a real piece icon would, so without this they only
+            // contrast against whichever square color happens to differ
+            // enough from the default text color. Both colors use the same
+            // 4-direction pixel-offset text-shadow "halo" technique (not
+            // -webkit-text-stroke) — it paints solid copies of the glyph
+            // just behind the real one, which works on any glyph shape
+            // without touching the original's own antialiasing. A stroke
+            // was tried first and rejected: on the thinner solid glyphs
+            // (the pawn especially) it visibly ate into the glyph's own
+            // fill, making it look like a bare vertical line instead of a
+            // filled shape — confirmed visually, not just a theory.
+            if (piece) {
+                const isWhitePiece = piece === piece.toUpperCase();
+                el.style.setProperty('-webkit-text-stroke', '0px transparent');
+                if (isWhitePiece) {
+                    el.style.color = '#f5f5f5';
+                    el.style.textShadow = '1px 0 0 #151515, -1px 0 0 #151515, 0 1px 0 #151515, 0 -1px 0 #151515';
+                } else {
+                    el.style.color = '#151515';
+                    el.style.textShadow = '1px 0 0 #e8e8e8, -1px 0 0 #e8e8e8, 0 1px 0 #e8e8e8, 0 -1px 0 #e8e8e8';
+                }
+            } else {
+                el.style.color = '';
+                el.style.setProperty('-webkit-text-stroke', '0px transparent');
+                el.style.textShadow = 'none';
+            }
             el.style.boxShadow = selectedSquare === squareName ? 'inset 0 0 0 2px orange' : 'none';
+
+            const isLastMoveSquare = squareName === lastFrom || squareName === lastTo;
+            if (isLastMoveSquare) {
+                el.style.backgroundColor = LAST_MOVE_HIGHLIGHT;
+                el.style.border = theme.light === null ? '1px solid white' : 'none';
+            } else if (theme.light === null) {
+                // "classic" — the module's original outline-only look.
+                el.style.backgroundColor = 'transparent';
+                el.style.border = '1px solid white';
+            } else {
+                const isLightSquare = (rankIdx + fileIdx) % 2 === 0;
+                el.style.backgroundColor = isLightSquare ? theme.light : theme.dark;
+                el.style.border = 'none';
+            }
         }
 
         renderMovesList();

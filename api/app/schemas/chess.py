@@ -1,6 +1,11 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
+
+# "random" is resolved server-side (a coin flip) — never sent back to any
+# client as a real seat assignment, only ever used as an input value here.
+ChessColorChoice = Literal["white", "black", "random"]
 
 
 class ChessStateOut(BaseModel):
@@ -37,3 +42,13 @@ class ChessVsAiIn(BaseModel):
     # Stockfish's own "Skill Level" UCI option, 0 (weakest) - 20 (strongest,
     # full-strength engine play).
     skill_level: int = 10
+    # Which side the human wants to play — the bot always takes whichever
+    # side is left. Previously always "white" for the human; now a choice.
+    preferred_color: ChessColorChoice = "random"
+
+
+class ChessColorPreferenceIn(BaseModel):
+    # The lobby leader's choice for a human-vs-human game, set before the
+    # generic lobby /start call — see chess.py's _pending_color_choice for
+    # why this is a separate call rather than a param on /start itself.
+    preferred_color: ChessColorChoice = "random"

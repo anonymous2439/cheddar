@@ -6,6 +6,7 @@ import { BeatsGame } from "../games/beats/BeatsGame";
 import { MtgGame } from "../games/mtg/MtgGame";
 import { createBeatsSession } from "../api/beats";
 import { createMtgSession, getMtgDeckStatus, importMtgDeck } from "../api/mtg";
+import type { ChessColorChoice } from "../api/chess";
 import { LobbyChatDock } from "./LobbyChatDock";
 
 interface Props {
@@ -21,7 +22,8 @@ interface Props {
   onKick: (userId: number) => void;
   onTransferLeader: (userId: number) => void;
   onRename: (name: string) => Promise<unknown>;
-  onPlayVsAi: (skillLevel: number) => Promise<unknown>;
+  onPlayVsAi: (skillLevel: number, preferredColor: ChessColorChoice) => Promise<unknown>;
+  onSetChessColorChoice: (preferredColor: ChessColorChoice) => Promise<unknown>;
   onInviteFriend: (userId: number) => void;
   onGetInviteCode: () => Promise<string>;
   onGameFinished: () => void;
@@ -42,6 +44,7 @@ export function LobbyRoom({
   onTransferLeader,
   onRename,
   onPlayVsAi,
+  onSetChessColorChoice,
   onInviteFriend,
   onGetInviteCode,
   onGameFinished,
@@ -62,6 +65,7 @@ export function LobbyRoom({
   const [mtgDeckCounts, setMtgDeckCounts] = useState<Record<number, number>>({});
   const [aiSkillLevel, setAiSkillLevel] = useState(10);
   const [aiError, setAiError] = useState("");
+  const [chessColorPreference, setChessColorPreference] = useState<ChessColorChoice>("random");
 
   // Deck imports aren't part of the Lobby model (each player submits their
   // own independently, before there's any MtgGame row to broadcast from —
@@ -171,6 +175,15 @@ export function LobbyRoom({
   }
 
   async function handleStartClick() {
+    if (lobby.game_key === "chess") {
+      // Deliberately *before* the generic start, not after (unlike the
+      // beats/mtg follow-up calls below) — the human-vs-human ChessGame row
+      // can be created by whichever player's client fetches /state first
+      // once the lobby goes live, so the preference has to already be
+      // stored before that race can happen at all. See
+      // chess.py's _pending_color_choice.
+      await onSetChessColorChoice(chessColorPreference);
+    }
     await onStart();
     if (lobby.game_key === "cheddar_beats") {
       // The generic start above just flips the lobby to in_progress — the
@@ -228,7 +241,7 @@ export function LobbyRoom({
   async function handlePlayVsAi() {
     setAiError("");
     try {
-      await onPlayVsAi(aiSkillLevel);
+      await onPlayVsAi(aiSkillLevel, chessColorPreference);
     } catch (err) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setAiError(detail ?? "Could not start a game vs AI");
@@ -347,6 +360,23 @@ export function LobbyRoom({
                     {n}
                   </option>
                 ))}
+              </select>
+            </label>
+          </div>
+        )}
+
+        {isLeader && lobby.game_key === "chess" && (
+          <div className="mb-3 flex flex-wrap items-center gap-3 rounded border border-neutral-200 p-3 text-sm">
+            <label className="flex items-center gap-2">
+              Play as
+              <select
+                value={chessColorPreference}
+                onChange={(e) => setChessColorPreference(e.target.value as ChessColorChoice)}
+                className="rounded border border-neutral-300 px-2 py-1"
+              >
+                <option value="random">Random</option>
+                <option value="white">White</option>
+                <option value="black">Black</option>
               </select>
             </label>
           </div>

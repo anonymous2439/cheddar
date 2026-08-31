@@ -4,7 +4,14 @@ import { useEffect, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
 import * as chessApi from "../../api/chess";
 import { useWebSocket } from "../../context/WebSocketContext";
+import { CHESS_BOARD_THEMES, getStoredChessBoardTheme, setStoredChessBoardTheme } from "./boardThemes";
 import type { ChessState, Lobby } from "../../types";
+
+// A muted olive-yellow — solid, not a translucent overlay, since
+// react-chessboard's per-square style fully replaces that square's own
+// background rather than layering on top of it. Deliberately more subdued
+// than a vivid/neon yellow (an earlier, brighter version was too strong).
+const LAST_MOVE_HIGHLIGHT = "#cdd26a";
 
 interface Props {
   lobby: Lobby;
@@ -27,7 +34,12 @@ export function ChessGame({ lobby, currentUserId, onFinished }: Props) {
   // authoritative response — cleared as soon as either arrives, so the
   // board never lingers out of sync with what the server actually accepted.
   const [optimisticFen, setOptimisticFen] = useState<string | null>(null);
+  // Mirrors optimisticFen — set/cleared alongside it — so the just-played
+  // move highlights immediately rather than waiting for the server's
+  // authoritative response to repopulate state.moves.
+  const [optimisticLastMove, setOptimisticLastMove] = useState<{ from: string; to: string } | null>(null);
   const [error, setError] = useState("");
+  const [boardTheme, setBoardTheme] = useState(() => getStoredChessBoardTheme());
   const lastFinishedRef = useRef<string | null>(null);
   const onFinishedRef = useRef(onFinished);
 
@@ -39,6 +51,7 @@ export function ChessGame({ lobby, currentUserId, onFinished }: Props) {
     let cancelled = false;
     setState(null);
     setOptimisticFen(null);
+    setOptimisticLastMove(null);
     setError("");
     lastFinishedRef.current = null;
 
@@ -56,6 +69,7 @@ export function ChessGame({ lobby, currentUserId, onFinished }: Props) {
       if (event.type === "chess.move" && event.data.lobby_id === lobby.id) {
         setState(event.data);
         setOptimisticFen(null);
+        setOptimisticLastMove(null);
       }
     });
   }, [subscribe, lobby.id]);
@@ -97,19 +111,27 @@ export function ChessGame({ lobby, currentUserId, onFinished }: Props) {
 
     const uci = `${move.from}${move.to}${move.promotion ?? ""}`;
     setOptimisticFen(board.fen());
+    setOptimisticLastMove({ from: move.from, to: move.to });
     setError("");
     chessApi
       .makeChessMove(lobby.id, uci)
       .then((s) => {
         setState(s);
         setOptimisticFen(null);
+        setOptimisticLastMove(null);
       })
       .catch((err) => {
         setOptimisticFen(null);
+        setOptimisticLastMove(null);
         const detail = axios.isAxiosError(err) ? (err.response?.data?.detail as string | undefined) : undefined;
         setError(detail ?? "Could not make that move");
       });
     return true;
+  }
+
+  function handleThemeChange(themeId: string) {
+    setBoardTheme(themeId);
+    setStoredChessBoardTheme(themeId);
   }
 
   async function handleResign() {
@@ -139,15 +161,41 @@ export function ChessGame({ lobby, currentUserId, onFinished }: Props) {
     return STATUS_LABEL[state.status];
   })();
 
+  // The optimistic local move (immediate, before the server confirms) takes
+  // priority; otherwise derive it from the authoritative move list — UCI
+  // strings are "<from><to>[promotion]", e.g. "e2e4" or "e7e8q".
+  const lastMoveUci = state.moves.length > 0 ? state.moves[state.moves.length - 1] : null;
+  const lastMove = optimisticLastMove ?? (lastMoveUci ? { from: lastMoveUci.slice(0, 2), to: lastMoveUci.slice(2, 4) } : null);
+  const squareStyles = lastMove
+    ? { [lastMove.from]: { backgroundColor: LAST_MOVE_HIGHLIGHT }, [lastMove.to]: { backgroundColor: LAST_MOVE_HIGHLIGHT } }
+    : undefined;
+  const theme = CHESS_BOARD_THEMES.find((t) => t.id === boardTheme) ?? CHESS_BOARD_THEMES[0];
+
   return (
     <div className="flex h-full flex-col overflow-y-auto p-4">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-lg font-semibold">♟️ {lobby.name}</h2>
-        {myColor && state.status === "in_progress" && (
-          <button onClick={handleResign} className="text-xs text-neutral-500 hover:text-red-600 hover:underline">
-            Resign
-          </button>
-        )}
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1 text-xs text-neutral-500">
+            Board
+            <select
+              value={boardTheme}
+              onChange={(e) => handleThemeChange(e.target.value)}
+              className="rounded border border-neutral-300 px-1 py-0.5 text-xs"
+            >
+              {CHESS_BOARD_THEMES.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {myColor && state.status === "in_progress" && (
+            <button onClick={handleResign} className="text-xs text-neutral-500 hover:text-red-600 hover:underline">
+              Resign
+            </button>
+          )}
+        </div>
       </div>
 
       <p className="mb-3 text-sm text-neutral-600">
@@ -163,6 +211,9 @@ export function ChessGame({ lobby, currentUserId, onFinished }: Props) {
             boardOrientation: myColor ?? "white",
             allowDragging: isMyTurn,
             id: `chess-${lobby.id}`,
+            squareStyles,
+            ...(theme.lightSquareStyle ? { lightSquareStyle: theme.lightSquareStyle } : {}),
+            ...(theme.darkSquareStyle ? { darkSquareStyle: theme.darkSquareStyle } : {}),
           }}
         />
       </div>

@@ -47,6 +47,7 @@ export function ChatPage() {
     transferLeader,
     renameLobby,
     playVsAi,
+    setChessColorChoice,
     inviteToLobby,
     getInviteCode,
     joinLobbyByCode,
@@ -249,7 +250,8 @@ export function ChatPage() {
                 onKick={(userId) => kickFromLobby(currentLobby.id, userId)}
                 onTransferLeader={(userId) => transferLeader(currentLobby.id, userId)}
                 onRename={(name) => renameLobby(currentLobby.id, name)}
-                onPlayVsAi={(skillLevel) => playVsAi(currentLobby.id, skillLevel)}
+                onPlayVsAi={(skillLevel, preferredColor) => playVsAi(currentLobby.id, skillLevel, preferredColor)}
+                onSetChessColorChoice={(preferredColor) => setChessColorChoice(currentLobby.id, preferredColor)}
                 onInviteFriend={(userId) => inviteToLobby(currentLobby.id, userId)}
                 onGetInviteCode={() => getInviteCode(currentLobby.id)}
                 onGameFinished={() => finishGame(currentLobby.id)}

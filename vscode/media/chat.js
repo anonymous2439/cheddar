@@ -25,6 +25,8 @@ const beatsBpmSelect = document.getElementById('beats-bpm');
 const beatsPulseCountSelect = document.getElementById('beats-pulse-count');
 const lobbyChessAiConfigEl = document.getElementById('lobby-chess-ai-config');
 const chessAiSkillSelect = document.getElementById('chess-ai-skill');
+const lobbyChessColorConfigEl = document.getElementById('lobby-chess-color-config');
+const chessColorSelect = document.getElementById('chess-color-preference');
 const chatTitleEl = document.getElementById('chat-title');
 const gameStageEl = document.getElementById('game-stage');
 
@@ -317,6 +319,24 @@ window.CheddarHost = {
     finishGame() {
         vscode.postMessage({ type: 'game', action: 'finish' });
     },
+    // Small, per-user, purely cosmetic preferences (e.g. a chosen board
+    // theme) that should survive a webview reload but never touch any
+    // backend. vscode.getState()/setState() is the mechanism a webview
+    // should use for this (plain localStorage isn't reliably retained
+    // across the webview being hidden/disposed, depending on
+    // retainContextWhenHidden) — acquireVsCodeApi() can only be called
+    // once per webview session, which already happened above, so game
+    // modules reach it through this bridge instead of calling it
+    // themselves. Namespaced by key so multiple games' preferences don't
+    // collide in the same shared state blob.
+    getPreference(key, fallback) {
+        const state = vscode.getState() || {};
+        return key in state ? state[key] : fallback;
+    },
+    setPreference(key, value) {
+        const state = vscode.getState() || {};
+        vscode.setState({ ...state, [key]: value });
+    },
 };
 
 function mountGame(msg) {
@@ -400,6 +420,7 @@ function renderLobby(lobby, selfId, tracksCompletion) {
     lobbyBeatsConfigEl.style.display = isLeader && !gameLive && lobby.game_key === 'cheddar_beats' ? 'block' : 'none';
     lobbyChessAiConfigEl.style.display =
         isLeader && !gameLive && lobby.game_key === 'chess' && lobby.participants.length === 1 ? 'block' : 'none';
+    lobbyChessColorConfigEl.style.display = isLeader && !gameLive && lobby.game_key === 'chess' ? 'block' : 'none';
     lobbyHintEl.textContent = isOngoing
         ? '🎮 game in progress — invites disabled until it finishes'
         : gameLive
@@ -457,16 +478,23 @@ window.addEventListener('click', (e) => {
     }
     else if (e.target.id === 'lobby-start') {
         const isBeats = lastLobby && lastLobby.game_key === 'cheddar_beats';
+        const isChess = lastLobby && lastLobby.game_key === 'chess';
         vscode.postMessage({
             type: 'game',
             action: 'start',
             beatsMode: isBeats ? beatsModeSelect.value : undefined,
             beatsBpm: isBeats ? Number(beatsBpmSelect.value) : undefined,
             beatsPulseCount: isBeats ? Number(beatsPulseCountSelect.value) : undefined,
+            chessColorPreference: isChess ? chessColorSelect.value : undefined,
         });
     }
     else if (e.target.id === 'chess-play-vs-ai') {
-        vscode.postMessage({ type: 'game', action: 'play_vs_ai', skillLevel: Number(chessAiSkillSelect.value) });
+        vscode.postMessage({
+            type: 'game',
+            action: 'play_vs_ai',
+            skillLevel: Number(chessAiSkillSelect.value),
+            chessColorPreference: chessColorSelect.value,
+        });
     }
     else if (e.target.id === 'lobby-leave') {
         vscode.postMessage({ type: 'game', action: 'leave' });

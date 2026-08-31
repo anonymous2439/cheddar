@@ -1,3 +1,4 @@
+import random
 from datetime import datetime, timezone
 
 import chess
@@ -15,7 +16,7 @@ from app.models.game_lobby import GameLobby
 from app.models.game_lobby_participant import GameLobbyParticipant
 from app.models.message import Message
 from app.models.user import User
-from app.schemas.chess import ChessMoveIn, ChessStateOut, ChessVsAiIn
+from app.schemas.chess import ChessColorChoice, ChessColorPreferenceIn, ChessMoveIn, ChessStateOut, ChessVsAiIn
 from app.schemas.game import LobbyOut
 from app.websocket.handlers import _serialize_message
 from app.websocket.manager import manager
@@ -27,6 +28,19 @@ router = APIRouter()
 _AI_USERNAME = "cheddar_ai"
 _AI_SKILL_MIN = 0
 _AI_SKILL_MAX = 20
+
+# The lobby leader's chosen color for a human-vs-human game, set via
+# POST /{lobby_id}/color-preference and consumed by _get_or_create_game the
+# moment the ChessGame row is actually created. Deliberately in-process only
+# (not a DB column) — cheddar-api is a single process, this is only ever
+# alive for the few seconds between the leader picking a color and the game
+# actually starting, and losing it on a restart just falls back to the
+# join-order default that existed before this feature, not a real
+# regression. Keyed by lobby_id (not lobby_id+lobby_started_at) since it's
+# consumed (popped) at creation time — a restarted lobby with no fresh
+# preference set correctly falls back to join order rather than reusing a
+# stale choice from a previous session.
+_pending_color_choice: dict[int, tuple[int, ChessColorChoice]] = {}
 
 
 def _now() -> datetime:
@@ -76,6 +90,29 @@ def _get_or_create_ai_user(db: Session) -> User:
     return bot
 
 
+def _resolve_seat_assignment(lobby_id: int, participants: list[GameLobbyParticipant]) -> tuple[int, int]:
+    """Returns (white_user_id, black_user_id) for a 2-player game. Consults
+    (and consumes) a color choice the leader may have set via
+    POST /{lobby_id}/color-preference; falls back to the original
+    deterministic rule — whoever's been in the lobby longest plays white —
+    if no preference was set (e.g. an older client, or a leader who started
+    without the dropdown ever rendering)."""
+    preference = _pending_color_choice.pop(lobby_id, None)
+    if preference is None:
+        return participants[0].user_id, participants[1].user_id
+
+    leader_user_id, choice = preference
+    other = next((p.user_id for p in participants if p.user_id != leader_user_id), None)
+    if other is None:
+        # The leader isn't one of the two active participants (e.g. they
+        # left after choosing) — the preference no longer makes sense to
+        # apply, fall back to join order same as if none was set.
+        return participants[0].user_id, participants[1].user_id
+
+    resolved = random.choice(["white", "black"]) if choice == "random" else choice
+    return (leader_user_id, other) if resolved == "white" else (other, leader_user_id)
+
+
 def _get_or_create_game(db: Session, lobby: GameLobby, *, for_write: bool = False) -> ChessGame:
     # A lobby stays in "finished" (not reset to "waiting") once the game
     # concludes — the same status LobbyRoom uses to keep rendering the final
@@ -95,17 +132,17 @@ def _get_or_create_game(db: Session, lobby: GameLobby, *, for_write: bool = Fals
     if lobby.status != "in_progress":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No chess game found for this lobby session")
 
-    # Deterministic seat assignment: whoever's been in the lobby longest
-    # plays white — same "first mover" rule every session, no coin flip UI.
     participants = _active_participants(db, lobby.id)
     if len(participants) < 2:
         raise HTTPException(status.HTTP_409_CONFLICT, "Chess needs exactly 2 players")
 
+    white_user_id, black_user_id = _resolve_seat_assignment(lobby.id, participants)
+
     game = ChessGame(
         lobby_id=lobby.id,
         lobby_started_at=lobby.started_at,
-        white_user_id=participants[0].user_id,
-        black_user_id=participants[1].user_id,
+        white_user_id=white_user_id,
+        black_user_id=black_user_id,
         moves="",
         status="in_progress",
     )
@@ -301,11 +338,17 @@ async def play_vs_ai(
     lobby.status = "in_progress"
     lobby.started_at = _now()
 
+    # No race to worry about here (unlike the human-vs-human path — see
+    # _resolve_seat_assignment) since this whole function creates the
+    # ChessGame row synchronously in one request; resolve "random" directly.
+    resolved_color = random.choice(["white", "black"]) if payload.preferred_color == "random" else payload.preferred_color
+    white_user_id, black_user_id = (user.id, bot.id) if resolved_color == "white" else (bot.id, user.id)
+
     game = ChessGame(
         lobby_id=lobby.id,
         lobby_started_at=lobby.started_at,
-        white_user_id=user.id,
-        black_user_id=bot.id,
+        white_user_id=white_user_id,
+        black_user_id=black_user_id,
         moves="",
         status="in_progress",
         ai_skill_level=payload.skill_level,
@@ -331,6 +374,29 @@ async def play_vs_ai(
         {"type": "game.started", "data": {"lobby_id": lobby.id, "game_key": lobby.game_key, "game_name": "Chess"}},
     )
     return _serialize_lobby(db, lobby)
+
+
+@router.post("/{lobby_id}/color-preference")
+def set_color_preference(
+    lobby_id: int,
+    payload: ChessColorPreferenceIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Leader-only. Records which color they want to play for the *next*
+    human-vs-human game start — consumed by _get_or_create_game the moment
+    that game's ChessGame row is actually created (see
+    _resolve_seat_assignment). Call this before the generic lobby /start,
+    not after: unlike cheddar_beats/cheddar_mtg's "start then a follow-up
+    call" pattern, chess's game row can be created by *either* player's
+    client (whichever fetches /state first once the lobby goes live), so the
+    preference has to already be stored before that race can happen at all."""
+    lobby = _get_lobby_or_404(db, lobby_id)
+    _require_participant(db, lobby, user)
+    if lobby.leader_id != user.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the lobby leader can do this")
+    _pending_color_choice[lobby_id] = (user.id, payload.preferred_color)
+    return {"ok": True}
 
 
 @router.post("/{lobby_id}/resign", response_model=ChessStateOut)

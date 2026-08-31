@@ -225,6 +225,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                     msg.beatsBpm,
                     msg.beatsPulseCount,
                     msg.skillLevel,
+                    msg.chessColorPreference,
                 );
             }
 
@@ -1084,6 +1085,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         beatsBpm?: number,
         beatsPulseCount?: number,
         skillLevel?: number,
+        chessColorPreference?: string,
     ) {
         if (action === 'resume_lobby' && lobbyIdArg != null) {
             const res = await this.authorizedFetch(`/api/v1/games/lobbies/${lobbyIdArg}`);
@@ -1119,6 +1121,22 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         }
 
         if (action === 'start') {
+            // Deliberately *before* the generic /start call below, not
+            // after (unlike the beats follow-up call further down) — the
+            // human-vs-human ChessGame row can be created by whichever
+            // player's client fetches /state first once the lobby goes
+            // live, so the preference has to already be stored before that
+            // race can happen at all. See chess.py's _pending_color_choice.
+            if (this.currentLobby.game_key === 'chess' && chessColorPreference) {
+                const prefRes = await this.authorizedFetch(`/api/v1/chess/${lobbyId}/color-preference`, {
+                    method: 'POST',
+                    body: JSON.stringify({ preferred_color: chessColorPreference }),
+                });
+                if (!prefRes.ok) {
+                    const body = await prefRes.json().catch(() => ({}) as { detail?: string });
+                    this.log(`could not set color preference: ${body.detail ?? prefRes.status}`);
+                }
+            }
             const res = await this.authorizedFetch(`/api/v1/games/lobbies/${lobbyId}/start`, { method: 'POST' });
             if (res.ok) {
                 this.currentLobby = (await res.json()) as LobbyState;
@@ -1154,7 +1172,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             // play_vs_ai).
             const res = await this.authorizedFetch(`/api/v1/chess/${lobbyId}/vs-ai`, {
                 method: 'POST',
-                body: JSON.stringify({ skill_level: skillLevel ?? 10 }),
+                body: JSON.stringify({ skill_level: skillLevel ?? 10, preferred_color: chessColorPreference ?? 'random' }),
             });
             if (res.ok) {
                 this.currentLobby = (await res.json()) as LobbyState;

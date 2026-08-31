@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import * as gamesApi from "../api/games";
-import { playChessVsAi } from "../api/chess";
+import { playChessVsAi, setChessColorPreference } from "../api/chess";
+import type { ChessColorChoice } from "../api/chess";
 import { useWebSocket } from "../context/WebSocketContext";
 import { useAuth } from "../context/AuthContext";
 import type { GameCatalogEntry, Lobby } from "../types";
@@ -97,8 +98,17 @@ export function useGames() {
   );
 
   const playVsAi = useCallback(
-    async (lobbyId: number, skillLevel: number) => applyLobby(await playChessVsAi(lobbyId, skillLevel)),
+    async (lobbyId: number, skillLevel: number, preferredColor: ChessColorChoice) =>
+      applyLobby(await playChessVsAi(lobbyId, skillLevel, preferredColor)),
     [applyLobby],
+  );
+
+  // Must resolve before startLobby() is called for the same lobby — see
+  // setChessColorPreference's own comment on why (a race with the other
+  // player's client, unlike playVsAi above which has none).
+  const setChessColorChoice = useCallback(
+    async (lobbyId: number, preferredColor: ChessColorChoice) => setChessColorPreference(lobbyId, preferredColor),
+    [],
   );
 
   const inviteToLobby = useCallback(
@@ -143,6 +153,7 @@ export function useGames() {
     transferLeader,
     renameLobby,
     playVsAi,
+    setChessColorChoice,
     inviteToLobby,
     getInviteCode,
     joinLobbyByCode,
