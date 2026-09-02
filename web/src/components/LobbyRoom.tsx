@@ -4,8 +4,12 @@ import { KarirsGame } from "../games/karirs/KarirsGame";
 import { ChessGame } from "../games/chess/ChessGame";
 import { BeatsGame } from "../games/beats/BeatsGame";
 import { MtgGame } from "../games/mtg/MtgGame";
+import { PokemonFireRedGame } from "../games/pokefirered/PokemonFireRedGame";
+import { LubaGame } from "../games/luba/LubaGame";
+import { LubaPracticeGame } from "../games/luba/LubaPracticeGame";
 import { createBeatsSession } from "../api/beats";
 import { createMtgSession, getMtgDeckStatus, importMtgDeck } from "../api/mtg";
+import { createLubaMatch } from "../api/luba";
 import type { ChessColorChoice } from "../api/chess";
 import { LobbyChatDock } from "./LobbyChatDock";
 
@@ -66,6 +70,10 @@ export function LobbyRoom({
   const [aiSkillLevel, setAiSkillLevel] = useState(10);
   const [aiError, setAiError] = useState("");
   const [chessColorPreference, setChessColorPreference] = useState<ChessColorChoice>("random");
+  // Minutes, not seconds — the UI picks a round number of minutes,
+  // converted to seconds only for the actual API call.
+  const [lubaDurationMinutes, setLubaDurationMinutes] = useState(3);
+  const [showLubaPractice, setShowLubaPractice] = useState(false);
 
   // Deck imports aren't part of the Lobby model (each player submits their
   // own independently, before there's any MtgGame row to broadcast from —
@@ -102,6 +110,28 @@ export function LobbyRoom({
   const chatDock = (
     <LobbyChatDock currentUserId={currentUserId} participants={lobby.participants} messages={chatMessages} onSend={onSendChat} />
   );
+
+  // Practice is a fully local sandbox (no lobby state touched at all —
+  // see LubaPracticeGame) so it short-circuits everything else, live or
+  // not: no ready-up, no min_players, no leader requirement, no effect
+  // on what anyone else in this lobby sees.
+  if (showLubaPractice) {
+    return (
+      <div className="flex h-full flex-col">
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <LubaPracticeGame />
+        </div>
+        <div className="border-t border-neutral-200 p-3">
+          <button
+            onClick={() => setShowLubaPractice(false)}
+            className="rounded bg-neutral-800 px-3 py-1.5 text-sm text-white hover:bg-neutral-900"
+          >
+            Exit practice
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (isLive) {
     const backToLobbyChrome = isLeader && (
@@ -163,6 +193,28 @@ export function LobbyRoom({
         </div>
       );
     }
+    if (lobby.game_key === "pokemon_fire_red") {
+      return (
+        <div className="flex h-full flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <PokemonFireRedGame lobby={lobby} currentUserId={currentUserId} onFinished={onGameFinished} />
+          </div>
+          {backToLobbyChrome}
+          {chatDock}
+        </div>
+      );
+    }
+    if (lobby.game_key === "luba") {
+      return (
+        <div className="flex h-full flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <LubaGame lobby={lobby} currentUserId={currentUserId} onFinished={onGameFinished} />
+          </div>
+          {backToLobbyChrome}
+          {chatDock}
+        </div>
+      );
+    }
     return (
       <div className="flex h-full flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto p-6 text-sm text-neutral-500">
@@ -183,6 +235,16 @@ export function LobbyRoom({
       // stored before that race can happen at all. See
       // chess.py's _pending_color_choice.
       await onSetChessColorChoice(chessColorPreference);
+    }
+    if (lobby.game_key === "luba") {
+      // Also *before* the generic start, not after — unlike beats/mtg's
+      // session creation (only ever triggered by the leader's own start
+      // click), Luba's match room is created lazily by *whichever*
+      // participant's websocket connects first once the lobby goes live
+      // (see games/luba/api/app/main.py's _get_room), so the chosen
+      // duration has to already be stored before any of their clients
+      // can race to open that connection.
+      await createLubaMatch(lobby.id, lubaDurationMinutes * 60);
     }
     await onStart();
     if (lobby.game_key === "cheddar_beats") {
@@ -405,6 +467,31 @@ export function LobbyRoom({
           </div>
         )}
 
+        {isLeader && lobby.game_key === "luba" && (
+          <div className="mb-3 flex flex-wrap items-center gap-3 rounded border border-neutral-200 p-3 text-sm">
+            <label className="flex items-center gap-2">
+              Mode
+              <select disabled value="timed_deathmatch" className="rounded border border-neutral-300 px-2 py-1 text-neutral-500">
+                <option value="timed_deathmatch">Timed Deathmatch</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-2">
+              Match length
+              <select
+                value={lubaDurationMinutes}
+                onChange={(e) => setLubaDurationMinutes(Number(e.target.value))}
+                className="rounded border border-neutral-300 px-2 py-1"
+              >
+                {[1, 2, 3, 5, 10].map((m) => (
+                  <option key={m} value={m}>
+                    {m} min
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+
         {lobby.game_key === "cheddar_mtg" && (
           <div className="mb-3 rounded border border-neutral-200 p-3 text-sm">
             <p className="mb-2 text-xs font-semibold uppercase text-neutral-500">Import your deck</p>
@@ -463,6 +550,14 @@ export function LobbyRoom({
           >
             Invite
           </button>
+          {lobby.game_key === "luba" && (
+            <button
+              onClick={() => setShowLubaPractice(true)}
+              className="rounded border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-50"
+            >
+              🥋 Practice (solo)
+            </button>
+          )}
         </div>
 
         {!isLeader && (

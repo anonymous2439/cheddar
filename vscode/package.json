@@ -2,7 +2,7 @@
   "name": "cheddar",
   "displayName": "Cheddar",
   "description": "VS Code extension with a custom bottom panel tab",
-  "version": "0.0.64",
+  "version": "0.0.105",
   "engines": {
     "vscode": "^1.108.1"
   },
@@ -59,6 +59,11 @@
           "type": "string",
           "default": "http://109.123.234.69/api/karirs",
           "description": "Base URL of the Karirs game API."
+        },
+        "cheddar.lubaApiBaseUrl": {
+          "type": "string",
+          "default": "http://109.123.234.69/api/luba",
+          "description": "Base URL of the Luba game API (connected to directly by the webview, not proxied through the extension host)."
         }
       }
     }

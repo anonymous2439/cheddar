@@ -195,6 +195,20 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         return this.karirsApiBaseUrl.replace(/^http/, 'ws');
     }
 
+    // Luba's game.js connects directly to its own backend (bypassing the
+    // action-relay entirely — see the plan's architecture decision), so
+    // unlike karirs it needs its own base URL exposed to the webview
+    // rather than kept private to this class.
+    private get lubaApiBaseUrl(): string {
+        return vscode.workspace
+            .getConfiguration('cheddar')
+            .get<string>('lubaApiBaseUrl', 'http://109.123.234.69/api/luba');
+    }
+
+    private get lubaWsBaseUrl(): string {
+        return this.lubaApiBaseUrl.replace(/^http/, 'ws');
+    }
+
     resolveWebviewView(webviewView: vscode.WebviewView) {
         this.webviewView = webviewView;
         webviewView.webview.options = { enableScripts: true };
@@ -226,11 +240,20 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                     msg.beatsPulseCount,
                     msg.skillLevel,
                     msg.chessColorPreference,
+                    msg.lubaDurationS,
                 );
             }
 
             if (msg.type === 'game.action') {
                 void this.handleGameHostAction(msg.gameKey, msg.action, msg.data);
+            }
+
+            if (msg.type === 'game.getAccessToken') {
+                void this.webviewView?.webview.postMessage({
+                    type: 'game.accessToken',
+                    requestId: msg.requestId,
+                    token: this.accessToken ?? null,
+                });
             }
         });
 
@@ -1086,6 +1109,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         beatsPulseCount?: number,
         skillLevel?: number,
         chessColorPreference?: string,
+        lubaDurationS?: number,
     ) {
         if (action === 'resume_lobby' && lobbyIdArg != null) {
             const res = await this.authorizedFetch(`/api/v1/games/lobbies/${lobbyIdArg}`);
@@ -1135,6 +1159,23 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                 if (!prefRes.ok) {
                     const body = await prefRes.json().catch(() => ({}) as { detail?: string });
                     this.log(`could not set color preference: ${body.detail ?? prefRes.status}`);
+                }
+            }
+            // Also *before* the generic start, not after — unlike beats's
+            // session creation (only ever triggered by the leader's own
+            // start click), Luba's match room is created lazily by
+            // *whichever* participant's websocket connects first once the
+            // lobby goes live (see games/luba/api/app/main.py's
+            // _get_room), so the chosen duration has to already be stored
+            // before any of their clients can race to open that connection.
+            if (this.currentLobby.game_key === 'luba' && lubaDurationS) {
+                const configRes = await this.lubaFetch('/matches', {
+                    method: 'POST',
+                    body: JSON.stringify({ lobby_id: lobbyId, duration_s: lubaDurationS }),
+                });
+                if (!configRes.ok) {
+                    const body = await configRes.json().catch(() => ({}) as { detail?: string });
+                    this.log(`could not set match length: ${body.detail ?? configRes.status}`);
                 }
             }
             const res = await this.authorizedFetch(`/api/v1/games/lobbies/${lobbyId}/start`, { method: 'POST' });
@@ -1435,6 +1476,15 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             headers.set('Content-Type', 'application/json');
         }
         return fetch(`${this.karirsApiBaseUrl}${path}`, { ...init, headers });
+    }
+
+    private async lubaFetch(path: string, init: RequestInit = {}): Promise<Response> {
+        const headers = new Headers(init.headers);
+        if (this.accessToken) headers.set('Authorization', `Bearer ${this.accessToken}`);
+        if (init.body && !headers.has('Content-Type')) {
+            headers.set('Content-Type', 'application/json');
+        }
+        return fetch(`${this.lubaApiBaseUrl}${path}`, { ...init, headers });
     }
 
     private async handleKarirsAction(action: string, data: any) {
@@ -1780,8 +1830,11 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         const cssUri = this.webviewView!.webview.asWebviewUri(css_path);
         const scriptUri = this.webviewView!.webview.asWebviewUri(js_path);
 
+        const lubaConfigTag = `<script>window.CheddarLubaWsBaseUrl = ${JSON.stringify(this.lubaWsBaseUrl)};</script>`;
+
         return html
             .replace('{{styleUri}}', cssUri.toString())
+            .replace('{{lubaConfig}}', lubaConfigTag)
             .replace('{{gameScripts}}', this.getGameScriptTags())
             .replace('{{scriptUri}}', scriptUri.toString());
     }

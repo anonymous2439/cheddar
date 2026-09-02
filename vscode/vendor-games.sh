@@ -13,6 +13,7 @@ GAMES=(
     "karirs:../games/karirs/client/dist"
     "chess:../games/chess/client/dist"
     "cheddar_beats:../games/cheddar_beats/client/dist"
+    "luba:../games/luba/client/dist"
 )
 
 DEST_ROOT="media/games"

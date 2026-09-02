@@ -7,10 +7,9 @@ import { FriendsPanel } from "../components/FriendsPanel";
 import { ChatWindow } from "../components/ChatWindow";
 import { GamesPanel } from "../components/GamesPanel";
 import { LobbyRoom } from "../components/LobbyRoom";
-import { PokeWorldGame } from "../games/pokeworld/PokeWorldGame";
 import type { Conversation } from "../types";
 
-type Tab = "conversations" | "friends" | "games" | "world";
+type Tab = "conversations" | "friends" | "games";
 
 export function ChatPage() {
   const { user, logout } = useAuth();
@@ -103,11 +102,7 @@ export function ChatPage() {
   }
 
   const isInLobby = tab === "games" && !!currentLobby;
-  // Always-on, no lobby to select — unlike "games", entering this tab
-  // itself is the equivalent of "in the game" for mobile-sidebar purposes
-  // (see LobbyRoom's own isInLobby handling above).
-  const isInWorld = tab === "world";
-  const sidebarWouldBeHidden = !!(selected || isInLobby || isInWorld);
+  const sidebarWouldBeHidden = !!(selected || isInLobby);
 
   return (
     <div className="relative flex h-full">
@@ -153,12 +148,6 @@ export function ChatPage() {
             className={`flex-1 py-2 ${tab === "games" ? "border-b-2 border-amber-500 font-medium" : "text-neutral-500"}`}
           >
             Games
-          </button>
-          <button
-            onClick={() => setTab("world")}
-            className={`flex-1 py-2 ${tab === "world" ? "border-b-2 border-amber-500 font-medium" : "text-neutral-500"}`}
-          >
-            World
           </button>
         </div>
 
@@ -206,16 +195,11 @@ export function ChatPage() {
               onJoinByCode={joinLobbyByCode}
             />
           )}
-          {tab === "world" && (
-            <div className="p-4 text-sm text-neutral-500">
-              An always-on shared world — no lobby to host or join, just walk in.
-            </div>
-          )}
         </div>
       </aside>
 
       <main className={`min-w-0 flex-1 flex-col ${sidebarWouldBeHidden ? "flex" : "hidden md:flex"}`}>
-        {(isInLobby || isInWorld) && (
+        {isInLobby && (
           // A normal, in-flow row above the content — not a floating/fixed
           // button. Fixed positioning meant this had to avoid colliding
           // with whatever happened to be at top-left in *every* possible
@@ -233,9 +217,7 @@ export function ChatPage() {
           </div>
         )}
         <div className="min-h-0 flex-1">
-          {tab === "world" ? (
-            <PokeWorldGame />
-          ) : tab === "games" ? (
+          {tab === "games" ? (
             currentLobby ? (
               <LobbyRoom
                 lobby={currentLobby}

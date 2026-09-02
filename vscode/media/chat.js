@@ -1,4 +1,9 @@
 const vscode = acquireVsCodeApi();
+// Correlates CheddarHost.getAccessToken() calls to their async reply (see
+// the 'game.accessToken' handler below) — a plain fire-and-forget
+// send()/onEvent() pair doesn't fit a "give me a value back" request.
+let nextTokenRequestId = 1;
+const pendingTokenRequests = new Map();
 const textbox = document.getElementById('textbox');
 const msgContainer = document.getElementById('msg-users');
 const msgContent = document.getElementById('msg-content');
@@ -27,6 +32,10 @@ const lobbyChessAiConfigEl = document.getElementById('lobby-chess-ai-config');
 const chessAiSkillSelect = document.getElementById('chess-ai-skill');
 const lobbyChessColorConfigEl = document.getElementById('lobby-chess-color-config');
 const chessColorSelect = document.getElementById('chess-color-preference');
+const lobbyLubaConfigEl = document.getElementById('lobby-luba-config');
+const lubaDurationMinutesSelect = document.getElementById('luba-duration-minutes');
+const lobbyLubaPracticeBtn = document.getElementById('lobby-luba-practice');
+const lobbyLubaPracticeExitBtn = document.getElementById('lobby-luba-practice-exit');
 const chatTitleEl = document.getElementById('chat-title');
 const gameStageEl = document.getElementById('game-stage');
 
@@ -41,6 +50,12 @@ const replayAgainBtn = document.getElementById('replay-again');
 let lastLobby = null;
 let lastSelfId = null;
 let lastTracksCompletion = false;
+// Luba's practice sandbox is fully local (no lobby state touched at all —
+// see mountPractice) — while active, it owns gameStageEl entirely and
+// renderLobby() must not re-show the normal lobby view or call
+// unmountGame() out from under it just because the underlying lobby is
+// still (and stays) "waiting".
+let lubaPracticeActive = false;
 
 // The most recently clicked "Claim 250 coins" button — only one claim can
 // realistically be in flight at a time, so tracking just the last one is
@@ -153,6 +168,13 @@ window.addEventListener('message', event => {
             }
             const game = window.CheddarGames && window.CheddarGames[msg.gameKey];
             if (game && game.onEvent) game.onEvent(msg.event, msg.data);
+        }
+    }
+    else if (msg.type === 'game.accessToken') {
+        const resolve = pendingTokenRequests.get(msg.requestId);
+        if (resolve) {
+            pendingTokenRequests.delete(msg.requestId);
+            resolve(msg.token);
         }
     }
 });
@@ -337,9 +359,48 @@ window.CheddarHost = {
         const state = vscode.getState() || {};
         vscode.setState({ ...state, [key]: value });
     },
+    // For a game module that connects *directly* to its own backend
+    // (bypassing the send()/game.action relay entirely — see luba's
+    // game.js) rather than routing every call through the extension
+    // host. The host still holds the actual token; this just hands a
+    // copy to the webview on request, rather than exposing it as an
+    // ambient global always sitting in the page.
+    getAccessToken() {
+        const requestId = nextTokenRequestId++;
+        return new Promise((resolve) => {
+            pendingTokenRequests.set(requestId, resolve);
+            vscode.postMessage({ type: 'game.getAccessToken', requestId });
+        });
+    },
 };
 
+function enterLubaPractice() {
+    const game = window.CheddarGames && window.CheddarGames['luba'];
+    if (!game || !game.mountPractice) {
+        console.error('no vendored Luba practice mode — was vendor-games.sh run before packaging?');
+        return;
+    }
+    lubaPracticeActive = true;
+    lobbyViewEl.style.display = 'none';
+    gameHintEl.style.display = 'none';
+    gameStageEl.style.display = 'block';
+    gameStageEl.dataset.mountedKey = 'luba';
+    game.mountPractice(gameStageEl);
+    lobbyLubaPracticeExitBtn.style.display = 'inline-block';
+}
+
+function exitLubaPractice() {
+    const game = window.CheddarGames && window.CheddarGames['luba'];
+    if (game) game.unmount(gameStageEl);
+    gameStageEl.style.display = 'none';
+    delete gameStageEl.dataset.mountedKey;
+    lobbyLubaPracticeExitBtn.style.display = 'none';
+    lubaPracticeActive = false;
+    renderLobby(lastLobby, lastSelfId, lastTracksCompletion);
+}
+
 function mountGame(msg) {
+    if (lubaPracticeActive) return; // practice owns gameStageEl right now — see its own comment
     const game = window.CheddarGames && window.CheddarGames[msg.gameKey];
     if (!game) {
         console.error(`no vendored module for game "${msg.gameKey}" — was vendor-games.sh run before packaging?`);
@@ -379,6 +440,12 @@ function renderLobby(lobby, selfId, tracksCompletion) {
     lastLobby = lobby;
     lastSelfId = selfId;
     lastTracksCompletion = tracksCompletion;
+
+    // Practice owns gameStageEl (and the rest of this view) entirely
+    // until the player explicitly exits it — a lobby-state refresh
+    // arriving while practicing (someone else readying up, etc.) must not
+    // re-show the normal lobby view or tear the practice session down.
+    if (lubaPracticeActive) return;
 
     if (!lobby) {
         lobbyViewEl.style.display = 'none';
@@ -421,6 +488,8 @@ function renderLobby(lobby, selfId, tracksCompletion) {
     lobbyChessAiConfigEl.style.display =
         isLeader && !gameLive && lobby.game_key === 'chess' && lobby.participants.length === 1 ? 'block' : 'none';
     lobbyChessColorConfigEl.style.display = isLeader && !gameLive && lobby.game_key === 'chess' ? 'block' : 'none';
+    lobbyLubaConfigEl.style.display = isLeader && !gameLive && lobby.game_key === 'luba' ? 'block' : 'none';
+    lobbyLubaPracticeBtn.style.display = !gameLive && lobby.game_key === 'luba' ? 'inline-block' : 'none';
     lobbyHintEl.textContent = isOngoing
         ? '🎮 game in progress — invites disabled until it finishes'
         : gameLive
@@ -479,6 +548,7 @@ window.addEventListener('click', (e) => {
     else if (e.target.id === 'lobby-start') {
         const isBeats = lastLobby && lastLobby.game_key === 'cheddar_beats';
         const isChess = lastLobby && lastLobby.game_key === 'chess';
+        const isLuba = lastLobby && lastLobby.game_key === 'luba';
         vscode.postMessage({
             type: 'game',
             action: 'start',
@@ -486,6 +556,7 @@ window.addEventListener('click', (e) => {
             beatsBpm: isBeats ? Number(beatsBpmSelect.value) : undefined,
             beatsPulseCount: isBeats ? Number(beatsPulseCountSelect.value) : undefined,
             chessColorPreference: isChess ? chessColorSelect.value : undefined,
+            lubaDurationS: isLuba ? Number(lubaDurationMinutesSelect.value) * 60 : undefined,
         });
     }
     else if (e.target.id === 'chess-play-vs-ai') {
@@ -495,6 +566,12 @@ window.addEventListener('click', (e) => {
             skillLevel: Number(chessAiSkillSelect.value),
             chessColorPreference: chessColorSelect.value,
         });
+    }
+    else if (e.target.id === 'lobby-luba-practice') {
+        enterLubaPractice();
+    }
+    else if (e.target.id === 'lobby-luba-practice-exit') {
+        exitLubaPractice();
     }
     else if (e.target.id === 'lobby-leave') {
         vscode.postMessage({ type: 'game', action: 'leave' });

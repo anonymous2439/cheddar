@@ -47,6 +47,33 @@ GAMES = [
         # Web-only for now — no vscode client implementation yet.
         "platforms": ["web"],
     },
+    {
+        "key": "pokemon_fire_red",
+        "name": "Pokémon Fire Red",
+        "min_players": 1,
+        "max_players": 8,
+        # Open-ended — no win condition, so unlike every other game here
+        # the leader should be able to "Back to Lobby" any time, not just
+        # once some session-resolution call fires (see restart_lobby's
+        # tracks_completion gate below).
+        "tracks_completion": False,
+        # Web-only — an iframe-hosted mgba-wasm workaround was tried and
+        # abandoned in the vscode extension after hitting what looks like
+        # a structural conflict between vscode's own webview sandboxing
+        # and mgba-wasm's Worker/SharedArrayBuffer requirements, not
+        # something fixable from the extension side.
+        "platforms": ["web"],
+    },
+    {
+        "key": "luba",
+        "name": "Luba",
+        "min_players": 2,
+        "max_players": 8,
+        # Both match modes (respawn deathmatch, battle-royale) have a real
+        # end state.
+        "tracks_completion": True,
+        "platforms": ["web", "vscode"],
+    },
 ]
 
 GAMES_BY_KEY = {game["key"]: game for game in GAMES}

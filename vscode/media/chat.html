@@ -50,6 +50,22 @@
                                 </select>
                             </label>
                         </div>
+                        <div id="lobby-luba-config" style="display:none">
+                            <label>Mode
+                                <select disabled>
+                                    <option selected>Timed Deathmatch</option>
+                                </select>
+                            </label>
+                            <label>Match length
+                                <select id="luba-duration-minutes">
+                                    <option value="1">1 min</option>
+                                    <option value="2">2 min</option>
+                                    <option value="3" selected>3 min</option>
+                                    <option value="5">5 min</option>
+                                    <option value="10">10 min</option>
+                                </select>
+                            </label>
+                        </div>
                         <div id="lobby-chess-color-config" style="display:none">
                             <label>Play as
                                 <select id="chess-color-preference">
@@ -90,6 +106,7 @@
                         <ul id="lobby-actions">
                             <li><button type="button" id="lobby-ready">Ready</button></li>
                             <li><button type="button" id="lobby-start" style="display:none">Start</button></li>
+                            <li><button type="button" id="lobby-luba-practice" style="display:none">🥋 Practice (solo)</button></li>
                             <li><button type="button" id="lobby-invite-btn">Invite</button></li>
                             <li><button type="button" id="lobby-leave">Leave</button></li>
                         </ul>
@@ -102,6 +119,7 @@
                     <button type="button" id="lobby-rejoin" style="display:none">Rejoin Game in Progress</button>
                     <div id="game-stage" style="display:none"></div>
                     <button type="button" id="lobby-restart" style="display:none">Back to Lobby</button>
+                    <button type="button" id="lobby-luba-practice-exit" style="display:none">Exit practice</button>
 
                     <div id="replay-view" style="display:none">
                         <div style="display:flex; align-items:center; justify-content:space-between;">
@@ -127,6 +145,7 @@
         </div>
     </div>
 
+    {{lubaConfig}}
     {{gameScripts}}
     <script src="{{scriptUri}}"></script>
 </body>

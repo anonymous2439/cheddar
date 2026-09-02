@@ -6,6 +6,8 @@
 // ensureKarirsRaceSocket) — this client replays it locally, timed off the
 // race's betting_closes_at, rather than animating from live per-step
 // pushes. No "start"/"resolve" action here at all.
+import { createKarirsScene3D } from './render3d.js';
+
 (function () {
     // Must match games/karirs/api/app/main.py's STEP_DELAY_SECONDS.
     const STEP_DELAY_MS = 300;
@@ -20,6 +22,7 @@
     let errorText = '';
     let pollTimer = null;
     let tickTimer = null;
+    let scene3dRafId = null;
 
     // The 10 biggest wagers that ever actually won — fetched on demand when
     // the player opens it, not kept live/polled like everything else here.
@@ -41,16 +44,32 @@
     let raceSteps = null;
     let stepsAnchorAt = null;
 
+    // Matches web/src/games/karirs/render.ts's computePlayback() exactly —
+    // linearly interpolated between the previous step's positions and the
+    // current one, by how far elapsed time is into the current 300ms
+    // window (`frac`), not just the raw current-step value. Without this,
+    // position only actually changes 3.33 times/second (once per
+    // STEP_DELAY_MS) no matter how often the caller polls it — the 2D
+    // dots' CSS transition was masking that same staircase, three.js has
+    // no equivalent and shows it plainly as a snap every step.
     function currentStepInfo() {
         if (!raceSteps || !stepsAnchorAt) return null;
         const elapsedMs = Math.max(0, Date.now() - stepsAnchorAt);
-        const idx = Math.floor(elapsedMs / STEP_DELAY_MS);
+        const raw = elapsedMs / STEP_DELAY_MS;
+        const idx = Math.floor(raw);
         if (idx >= raceSteps.length) {
             const last = raceSteps[raceSteps.length - 1];
             return { positions: last.positions, shouting: last.shouting, step: raceSteps.length, total: raceSteps.length, done: true };
         }
+        const frac = raw - idx;
+        const prev = idx === 0 ? null : raceSteps[idx - 1].positions;
         const cur = raceSteps[idx];
-        return { positions: cur.positions, shouting: cur.shouting, step: idx + 1, total: raceSteps.length, done: false };
+        const positions = {};
+        for (const name of Object.keys(cur.positions)) {
+            const p = prev ? prev[name] : 0;
+            positions[name] = p + (cur.positions[name] - p) * frac;
+        }
+        return { positions, shouting: cur.shouting, step: idx + 1, total: raceSteps.length, done: false };
     }
 
     // The track's own DOM persists across step updates (see ensureTrackDom/
@@ -62,6 +81,17 @@
     let trackWrapperEl = null;
     let trackDots = {};
     let trackRaceId = null;
+
+    // A second, optional view of the exact same race data the 2D dots
+    // above show — see render3d.js. Created once in ensureLayout(), lazily
+    // like trackWrapperEl, since it needs the canvas actually attached to
+    // the document before creating its WebGL context.
+    let scene3dCanvasEl = null;
+    let scene3d = null;
+    // "chase" (default, matches the web app) / "front" / "overview" —
+    // cycled via a button built in ensureLayout(), see cameraToggleBtn.
+    let cameraMode = 'chase';
+    let cameraToggleBtn = null;
 
     // Which "phase" of chromeTopEl is currently built (race id + status +
     // whether a bet's been placed + whether an error is showing) — as long
@@ -92,6 +122,10 @@
         trackWrapperEl = null;
         trackDots = {};
         trackRaceId = null;
+        scene3dCanvasEl = null;
+        scene3d = null;
+        cameraMode = 'chase';
+        cameraToggleBtn = null;
         chromePhaseKey = null;
         walletLineEl = null;
         bettingCountdownEl = null;
@@ -111,16 +145,29 @@
         // server's cadence (see STEP_DELAY_MS) — cheap either way, this is a
         // handful of DOM nodes.
         tickTimer = setInterval(render, 200);
+        // The 3D scene needs a much faster, real per-frame loop — see
+        // tickScene3d's own comment for why 200ms reads as choppy for
+        // WebGL specifically.
+        function scene3dFrame() {
+            tickScene3d();
+            scene3dRafId = requestAnimationFrame(scene3dFrame);
+        }
+        scene3dRafId = requestAnimationFrame(scene3dFrame);
     }
 
     function unmount() {
         if (pollTimer) clearInterval(pollTimer);
         if (tickTimer) clearInterval(tickTimer);
+        if (scene3dRafId) cancelAnimationFrame(scene3dRafId);
         pollTimer = null;
         tickTimer = null;
+        scene3dRafId = null;
         trackWrapperEl = null;
         trackDots = {};
         trackRaceId = null;
+        if (scene3d) scene3d.dispose();
+        scene3d = null;
+        scene3dCanvasEl = null;
         if (container) container.innerHTML = '';
         container = null;
         ctx = null;
@@ -231,13 +278,43 @@
         if (trackWrapperEl && trackWrapperEl.parentNode === container) return;
         container.innerHTML = '';
         chromeTopEl = document.createElement('div');
+        scene3dCanvasEl = document.createElement('canvas');
+        scene3dCanvasEl.style.width = '100%';
+        scene3dCanvasEl.style.height = '160px';
+        scene3dCanvasEl.style.display = 'block';
+        scene3dCanvasEl.style.borderRadius = '4px';
+        scene3dCanvasEl.style.marginBottom = '6px';
+        cameraToggleBtn = document.createElement('button');
+        cameraToggleBtn.type = 'button';
+        styleButton(cameraToggleBtn);
+        cameraToggleBtn.style.marginBottom = '6px';
+        updateCameraToggleLabel();
+        cameraToggleBtn.addEventListener('click', () => {
+            cameraMode = cameraMode === 'overview' ? 'chase' : cameraMode === 'chase' ? 'front' : 'overview';
+            if (scene3d) scene3d.setCameraMode(cameraMode);
+            updateCameraToggleLabel();
+        });
         trackWrapperEl = document.createElement('div');
         chromeBottomEl = document.createElement('div');
         container.appendChild(chromeTopEl);
+        container.appendChild(scene3dCanvasEl);
+        container.appendChild(cameraToggleBtn);
         container.appendChild(trackWrapperEl);
         container.appendChild(chromeBottomEl);
+        // Created only once the canvas is actually attached to the
+        // document — WebGL context creation needs real layout dimensions,
+        // which clientWidth/clientHeight (see render3d.js's update()) only
+        // report correctly post-attachment.
+        scene3d = createKarirsScene3D(scene3dCanvasEl);
+        scene3d.setCameraMode(cameraMode);
         trackDots = {};
         trackRaceId = null;
+    }
+
+    function updateCameraToggleLabel() {
+        if (!cameraToggleBtn) return;
+        cameraToggleBtn.textContent =
+            cameraMode === 'overview' ? '🎥 Follow leader' : cameraMode === 'chase' ? '🎥 Following (behind)' : '🎥 Following (front)';
     }
 
     function clearTrack() {
@@ -355,6 +432,39 @@
             ensureTrackDom();
             updateTrackDots(stepInfo.positions, stepInfo.shouting);
         }
+        if (scene3dCanvasEl) {
+            // Just the show/hide toggle here — the actual per-frame
+            // scene3d.update() call is driven by its own requestAnimationFrame
+            // loop (see tickScene3d/mount), not this 200ms tick. Three.js has
+            // no CSS-transition-style smoothing between renders the way the
+            // 2D dots above do, so updating it only 5x/second reads as
+            // visibly choppy no matter how good the scene itself is.
+            const showScene3d = isRacing && !!stepInfo && !showHallOfFame;
+            scene3dCanvasEl.style.display = showScene3d ? 'block' : 'none';
+        }
+    }
+
+    // Driven by its own requestAnimationFrame loop (see mount/unmount),
+    // independent of render()'s 200ms tick — recomputes stepInfo fresh each
+    // frame off the module-level race/myBet/showHallOfFame state rather
+    // than trusting anything render() last computed, same reasoning the
+    // web app's own draw() loop uses (always reads off a ref, never a
+    // stale closure value).
+    function tickScene3d() {
+        if (!scene3dCanvasEl || !scene3d || !race) return;
+        const isRacing = race.status === 'racing';
+        const isResolved = race.status === 'resolved';
+        const stepInfo = isRacing || isResolved ? currentStepInfo() : null;
+        if (!isRacing || !stepInfo || showHallOfFame) return;
+        scene3d.update({
+            racerNames: race.racer_names,
+            playback: { positions: stepInfo.positions, shouting: stepInfo.shouting },
+            winningName: race.winning_name,
+            isResolved,
+            myBetRacerName: myBet ? myBet.racer_name : null,
+            faceImageUrls: race.face_image_urls ?? {},
+            signatureMoves: race.signature_moves ?? {},
+        });
     }
 
     // Builds each racer's row/lane/dot exactly once per race — never torn

@@ -1,0 +1,15 @@
+{
+  "name": "cheddar-game-luba-client",
+  "version": "0.1.0",
+  "description": "Luba (sword-fight arena) vscode client module — vendored into the Cheddar extension.",
+  "private": true,
+  "scripts": {
+    "build": "bash build.sh"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.1"
+  }
+}
