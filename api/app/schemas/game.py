@@ -18,6 +18,12 @@ class GameCatalogEntry(BaseModel):
     # can still be joined/viewed (LobbyRoom falls back to a "not available
     # here" message) — this only gates *hosting a new one*.
     platforms: list[str] = ["web", "vscode"]
+    # Excluded from the normal catalog listing on any client that respects
+    # it (currently just the vscode extension's /games command — see its
+    # own comment) without actually being removed from the catalog: it can
+    # still be hosted once surfaced. For a game still under active
+    # development that isn't ready for every user to stumble onto yet.
+    hidden: bool = False
 
 
 class LobbyParticipantOut(BaseModel):

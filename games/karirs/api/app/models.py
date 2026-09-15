@@ -103,6 +103,107 @@ class Race(Base):
         return {name: by_name.get(name) for name in self.racer_names}
 
 
+class ConversationLine(Base):
+    """One line from a real group chat export (~/downloads/chat.json, ~20k
+    lines), imported once via scripts/import_conversations.py — id order
+    matches the original chat's top-to-bottom order, which GL Sims' playback
+    depends on to read like an actual back-and-forth rather than shuffled
+    non-sequiturs.
+
+    person_id is the export's own stable per-sender id — the same real
+    person can show up under more than one "name" spelling (id 37 posts as
+    both "xiao xiao" and "Sem N"; id 18 as both "Chaimel Enjambre" and
+    "Chaimel Enjambre2"), so racer_name is resolved once per person_id
+    (matching *any* of that person's observed name spellings against the
+    roster, see import_conversations.py) and applied to every line of
+    theirs, rather than re-matching each line's own raw_name independently.
+    Real chat names often carry a middle name the roster doesn't ("Mat
+    Mitcheil Ando" for racer "Mat Ando", "Mary Grace Vellina" for racer
+    "Grace Vellina") — the match allows the racer's own name tokens to
+    appear as an in-order subsequence of the chat name's tokens, not just
+    an exact match. Null when no racer's name subsequence-matches any of a
+    person's spellings — GL Sims just skips those lines rather than
+    guessing, per explicit instruction; they're kept here anyway since the
+    ask was to save the full export, not a filtered subset.
+    message is kept byte-for-byte as exported — Messenger's own system
+    notices ("X added Y to the group.") are still in there; filtering those
+    out for actual playback is a presentation-layer concern that lives in
+    the export-to-GL-Sims script instead, so this table stays a faithful
+    copy of the source file."""
+
+    __tablename__ = "conversation_lines"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    person_id = Column(Integer, nullable=False)
+    raw_name = Column(String(64), nullable=False)
+    message = Column(String(4000), nullable=False)
+    # Matches Racer.name in spirit (a plain string, not a FK) — same
+    # convention Race.winning_name and Bet.racer_name already use.
+    racer_name = Column(String(64), nullable=True)
+
+
+class FilteredMessage(Base):
+    """User-editable exact-match exclusion list for GL Sims' live
+    conversation feed (see main.py's get_glsims_conversations) — a message
+    whose text matches one of these rows (case-insensitive, after
+    stripping) is dropped from playback, same idea as "Photos"/"unsent a
+    message." needing to disappear without actually deleting the row from
+    conversation_lines. Edited directly from names.php, which is also the
+    only place with a DB session against karirs_game outside this app.
+
+    Deliberately just plain exact strings, not regex — the *structural*
+    system-notice detection (Messenger's "X added Y to the group.", "X
+    unsent a message.", etc.) stays hardcoded in main.py's own
+    SYSTEM_NOTICE_PATTERNS; this table is for the day-to-day "also filter
+    this one" case, not for editing that parsing logic from a web form.
+    """
+
+    __tablename__ = "filtered_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    message = Column(String(500), nullable=False, unique=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
+class ChatParticipant(Base):
+    """Known chat-export name spellings, edited directly from names.php's
+    admin panel — same reasoning as FilteredMessage above (a small
+    exclusion/inclusion list that shouldn't need a code change to update).
+
+    This is *not* the racer-matching list (see import_conversations.py's
+    RACERS and names.php's own $racers array, which resolve racer_name and
+    are unaffected by this table) — it's what names.php's client-side
+    chat-to-JSON parser uses to find message boundaries in the raw pasted
+    export at all. That format is just "HH:MM Name Message" on one line
+    with no other delimiter, so a name has to be recognized up front to
+    know where it ends and the message begins — a participant missing from
+    this list has every one of their lines silently skipped during
+    parsing, before racer-matching or upload ever sees them, regardless of
+    whether they're one of the 25 racers.
+
+    person_id is the chat export's own stable per-sender id (see
+    ConversationLine's docstring) — the same real person can post under
+    more than one name spelling, hence multiple rows sharing one
+    person_id, same shape as that table.
+
+    proxy_name, when set, is what GL Sims' live feed actually displays
+    for this person instead of their real parsed name — resolved live in
+    main.py's get_glsims_conversations (a join against the name already
+    stored on each ConversationLine row, not baked in at parse/save time),
+    so editing it here takes effect immediately for every line they've
+    ever said, past or future, with no reprocessing step needed. Only
+    applies when racer_name isn't already set — a matched racer already
+    shows a clean roster name, unaffected by this.
+    """
+
+    __tablename__ = "chat_participants"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    person_id = Column(Integer, nullable=False)
+    name = Column(String(128), nullable=False, unique=True)
+    proxy_name = Column(String(128), nullable=True)
+
+
 class Bet(Base):
     __tablename__ = "bets"
 

@@ -17,6 +17,23 @@ PLAYER_HEIGHT = 1.8
 HIT_RADIUS = 0.5
 RESPAWN_DELAY_S = 3.0
 PARRY_STUN_S = 0.9
+# A parry needs both players to be "mid-swing at the same time" — but
+# requiring the target's is_active_swing to literally be true at the
+# exact instant the attacker's message is processed made that window well
+# under one network tick wide (two independent clients' messages almost
+# never interleave that precisely), so a clash was effectively
+# unreachable even once the underlying geometry/facing was correct. This
+# grace period is how long a player stays "parry-eligible" *after* their
+# last reported isActiveSwing=true, not just an instantaneous flag.
+# Mirrored client-side by player.js/player.ts's PARRY_GRACE_MS — keep
+# both in sync.
+PARRY_GRACE_S = 0.15
+# Knockback direction is computed server-side (it already knows both
+# players' positions for the hit-check anyway) but *applied* client-side —
+# movement is fully client-authoritative in this project (see the plan's
+# trust model), so this is just a push vector for each player's own client
+# to run through the same movement-override mechanism the dash already
+# uses, not a position the server dictates directly.
 # Newly (re)spawned players drop in from up here — well above every
 # obstacle's top (the tallest, the center jump block, tops out at
 # JUMP_HEIGHT*0.85 ~= 1.53) — so landing is a short, visible drop onto
@@ -81,9 +98,9 @@ _match_configs: dict[int, float] = {}
 # won't even send attack_start unless its own tryAttack() succeeds — this
 # is a sanity check behind that, not the main UX enforcement, so it
 # doesn't need to be pixel-perfect in sync with the client's animation.
-SLASH1_TOTAL_S = 0.330  # SLASH1_WINDUP_MS + SLASH1_CUT_MS
+SLASH1_TOTAL_S = 0.230  # SLASH1_WINDUP_MS + SLASH1_CUT_MS
 COMBO_WINDOW_S = 3.0
-SLASH2_DURATION_S = 0.220
+SLASH2_DURATION_S = 0.150
 ATTACK_COOLDOWN_S = 1.0
 
 
@@ -97,6 +114,9 @@ class PlayerState:
     facing: float = 0.0
     alive: bool = True
     is_active_swing: bool = False
+    # Set to now+PARRY_GRACE_S whenever is_active_swing is reported true —
+    # see PARRY_GRACE_S's own comment.
+    active_swing_until: float = 0.0
     already_hit_this_swing: bool = False
     # Combo-gate bookkeeping (see SLASH1_TOTAL_S etc. above) — None means
     # "never swung yet", always allowed.
@@ -202,7 +222,15 @@ def _may_start_swing(player: PlayerState, now: float) -> bool:
     return False
 
 
-def _check_hit(room: LubaRoom, attacker: PlayerState, blade_points: list[dict], now: float) -> PlayerState | None:
+# Mirrors player.js/player.ts's rig proportions (LEG_H=0.7 + TORSO_H=0.65
+# = 1.35, the head's own bottom edge) with a little margin below for a
+# generous headshot band — this only decides which death animation plays
+# (decapitation vs. the normal fall), it never changes whether a hit
+# lands at all, which is still governed entirely by HIT_RADIUS above.
+HEAD_Y_MIN = 1.3
+
+
+def _check_hit(room: LubaRoom, attacker: PlayerState, blade_points: list[dict], now: float) -> tuple[PlayerState, bool] | None:
     for other in room.players.values():
         if other.user_id == attacker.user_id or not other.alive or now < other.invulnerable_until:
             continue
@@ -211,7 +239,8 @@ def _check_hit(room: LubaRoom, attacker: PlayerState, blade_points: list[dict], 
             dz = p["z"] - other.z
             horiz = (dx * dx + dz * dz) ** 0.5
             if horiz <= HIT_RADIUS and other.y <= p["y"] <= other.y + PLAYER_HEIGHT + 0.2:
-                return other
+                is_headshot = p["y"] >= other.y + HEAD_Y_MIN
+                return other, is_headshot
     return None
 
 
@@ -232,21 +261,59 @@ async def _resolve_blade_points(room: LubaRoom, me: PlayerState, blade_points: l
         or now < me.invulnerable_until
     ):
         return
-    target = _check_hit(room, me, blade_points, now)
-    if target is None:
+    result = _check_hit(room, me, blade_points, now)
+    if result is None:
         return
+    target, is_headshot = result
     me.already_hit_this_swing = True
-    if target.is_active_swing and not target.already_hit_this_swing:
-        # Both swords clash — a parry, not a hit.
+    target_engaged = target.is_active_swing or now < target.active_swing_until
+    if target_engaged and not target.already_hit_this_swing:
+        # Both swords clash — a parry, not a hit. Push direction: away
+        # from each other, along the line between their two current
+        # positions (falls back to +X if they're exactly on top of each
+        # other, an edge case that never legitimately happens but would
+        # otherwise divide by zero).
         target.already_hit_this_swing = True
         me.stunned_until = now + PARRY_STUN_S
         target.stunned_until = now + PARRY_STUN_S
-        await room.broadcast({"type": "parry", "player1Id": me.user_id, "player2Id": target.user_id})
+        dx = target.x - me.x
+        dz = target.z - me.z
+        dist = (dx * dx + dz * dz) ** 0.5 or 1.0
+        push_x, push_z = dx / dist, dz / dist
+        await room.broadcast(
+            {
+                "type": "parry",
+                "player1Id": me.user_id,
+                "player2Id": target.user_id,
+                "player1PushX": -push_x,
+                "player1PushZ": -push_z,
+                "player2PushX": push_x,
+                "player2PushZ": push_z,
+            }
+        )
     else:
         target.alive = False
         me.kills += 1
+        # Launch direction for the decapitation effect (only meaningful
+        # when is_headshot — clients ignore it otherwise): away from the
+        # attacker, same reasoning as the parry knockback direction above,
+        # plus a fixed upward component so it actually pops up and off
+        # rather than just sliding sideways.
+        hdx = target.x - me.x
+        hdz = target.z - me.z
+        hdist = (hdx * hdx + hdz * hdz) ** 0.5 or 1.0
         await room.broadcast(
-            {"type": "death", "userId": target.user_id, "cause": "hit", "attackerId": me.user_id, "attackerKills": me.kills}
+            {
+                "type": "death",
+                "userId": target.user_id,
+                "cause": "hit",
+                "attackerId": me.user_id,
+                "attackerKills": me.kills,
+                "isHeadshot": is_headshot,
+                "headPushX": hdx / hdist,
+                "headPushY": 1.0,
+                "headPushZ": hdz / hdist,
+            }
         )
         asyncio.create_task(_schedule_respawn(room, target))
 
@@ -260,6 +327,8 @@ async def _schedule_respawn(room: LubaRoom, player: PlayerState) -> None:
     player.x, player.y, player.z = spawn["x"], spawn["y"], spawn["z"]
     player.invulnerable_until = time.monotonic() + RESPAWN_INVULN_S
     player.already_hit_this_swing = False
+    player.is_active_swing = False
+    player.active_swing_until = 0.0
     await room.broadcast(
         {"type": "respawn", "userId": player.user_id, "invulnerableMs": RESPAWN_INVULN_MS, **spawn}
     )
@@ -338,6 +407,8 @@ async def luba_ws(websocket: WebSocket, lobby_id: int, token: str | None = None)
             if msg_type == "position":
                 me.x, me.y, me.z, me.facing = msg["x"], msg["y"], msg["z"], msg["facing"]
                 me.is_active_swing = bool(msg.get("isActiveSwing"))
+                if me.is_active_swing:
+                    me.active_swing_until = now + PARRY_GRACE_S
                 await room.broadcast(
                     {
                         "type": "peer_position",

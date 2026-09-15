@@ -120,6 +120,84 @@
                     <div id="game-stage" style="display:none"></div>
                     <button type="button" id="lobby-restart" style="display:none">Back to Lobby</button>
                     <button type="button" id="lobby-luba-practice-exit" style="display:none">Exit practice</button>
+                    <!-- Shown only for a Luba match hosted from inside
+                         Glophimon's own world (see chat.js's own
+                         onLubaMatchReady/lubaFromGlophimon) — there's no
+                         real Cheddar lobby row backing that match, so the
+                         normal "Back to Lobby" button above never lights up
+                         for it; this is its own return path instead. -->
+                    <button type="button" id="luba-return-to-glophimon" style="display:none">Return to Glophimon</button>
+
+                    <!-- GL Sims World — a single persistent shared space, not a
+                         per-lobby game, so it lives entirely outside the normal
+                         lobby view above (reached via /glsimsworld, not
+                         /lobby create). Home view lists the 25 racers with a
+                         manual Refresh button (deliberately no live socket
+                         here — only actually joining opens one); Leave World
+                         mirrors lobby-luba-practice-exit's own "own view,
+                         guarded by its own active flag" pattern. -->
+                    <div id="glsimsworld-home" style="display:none">
+                        <div style="display:flex; align-items:center; justify-content:space-between;">
+                            <strong>🌐 GL Sims World</strong>
+                            <button type="button" id="glsimsworld-refresh">Refresh</button>
+                        </div>
+                        <ul id="glsimsworld-roster"></ul>
+                    </div>
+                    <button type="button" id="glsimsworld-leave" style="display:none">Leave World</button>
+
+                    <!-- Glophimon — same "own view outside the lobby, own
+                         active flag" shape as GL Sims World above (reached
+                         via /glophimon). Unlike GL Sims World there's no
+                         roster/claim step: character creation only ever
+                         shows once per account (see doGlophimonEnter's own
+                         GET /me check), after which /glophimon always
+                         teleports straight into the shared world. -->
+                    <div id="glophimon-create" style="display:none">
+                        <strong>🧩 Create your Glophimon character</strong>
+                        <p style="font-size:11px; color:#a3a3a3; margin:4px 0;">One-time — you can't redo this later.</p>
+                        <div id="glophimon-preview"></div>
+                        <p style="font-size:10px; color:#a3a3a3; margin:2px 0 8px 0;">Drag to rotate, scroll to zoom</p>
+                        <div style="display:flex; flex-direction:column; gap:6px; margin:8px 0;">
+                            <input type="text" id="glophimon-name" placeholder="Display name" maxlength="64" />
+                            <label style="display:flex; align-items:center; gap:6px; font-size:12px;">Head <input type="color" id="glophimon-head-color" value="#f5d0a9" /></label>
+                            <label style="display:flex; align-items:center; gap:6px; font-size:12px;">Body <input type="color" id="glophimon-body-color" value="#4a90d9" /></label>
+                            <label style="display:flex; align-items:center; gap:6px; font-size:12px;">Arms <input type="color" id="glophimon-arm-color" value="#f5d0a9" /></label>
+                            <label style="display:flex; align-items:center; gap:6px; font-size:12px;">Legs <input type="color" id="glophimon-leg-color" value="#3a3a3a" /></label>
+                            <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
+                                Gender
+                                <select id="glophimon-gender">
+                                    <option value="unspecified">Prefer not to say</option>
+                                    <option value="male">Male</option>
+                                    <option value="female">Female</option>
+                                </select>
+                            </label>
+                        </div>
+                        <button type="button" id="glophimon-create-submit">Create</button>
+                    </div>
+
+                    <!-- Shown once, right after character creation, before
+                         the very first /glophimon mount — same "can't redo
+                         this later" one-time shape as character creation
+                         above (see doGlophimonEnter's own GET /starter
+                         check). Only Common-tier Glophimon are offered as
+                         starters (the 5 Rare ones aren't in the list the
+                         extension sends here at all). -->
+                    <div id="glophimon-starter" style="display:none">
+                        <strong>🐾 Choose your first Glophimon</strong>
+                        <p style="font-size:11px; color:#a3a3a3; margin:4px 0;">One-time — you can't redo this later.</p>
+                        <div id="glophimon-starter-preview"></div>
+                        <p style="font-size:10px; color:#a3a3a3; margin:2px 0 8px 0;">Drag to rotate, scroll to zoom</p>
+                        <ul id="glophimon-starter-list" style="list-style:none; padding:0; margin:8px 0; display:flex; flex-direction:column; gap:2px; max-height:160px; overflow-y:auto;"></ul>
+                        <button type="button" id="glophimon-starter-submit" disabled>Choose</button>
+                    </div>
+                    <!-- The only Menu trigger/panel now lives in-canvas (see
+                         game.js's own glophimonMenuButton/renderGlophimonMenuPanel)
+                         — it can show a real rotating stats preview and a
+                         per-Glophimon modal a plain HTML panel never could,
+                         so the vscode-chrome duplicate (and its separate
+                         "Leave Glophimon" button, now the menu's own last
+                         list option) was removed rather than kept in sync
+                         with two implementations of the same thing. -->
 
                     <div id="replay-view" style="display:none">
                         <div style="display:flex; align-items:center; justify-content:space-between;">
@@ -146,6 +224,9 @@
     </div>
 
     {{lubaConfig}}
+    {{modelViewerConfig}}
+    {{glsimsWorldConfig}}
+    {{glophimonConfig}}
     {{gameScripts}}
     <script src="{{scriptUri}}"></script>
 </body>

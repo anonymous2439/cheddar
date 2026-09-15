@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GL Sims</title>
+<style>
+  /* Meant to fill whatever box an <iframe> gives it — the game module's
+     own canvas already scales to its container's width (see game.js's
+     canvas.style.width = "100%"), this just makes sure that container
+     itself fills the page with no default margin/scrollbars. */
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    background: #0f172a;
+    overflow: hidden;
+  }
+  /* Not flex/height:100% on purpose — game.js's own canvas already scales
+     to 100% of *this* element's width (capped at 720px) and derives its
+     height from its own intrinsic aspect ratio; centering/stretching this
+     container would just fight that instead of complementing it. Give the
+     iframe itself a size that roughly matches (e.g. a 640x280-ish aspect,
+     up to 720px wide) rather than trying to force-fit here. */
+  #glsims-root {
+    width: 100%;
+  }
+</style>
+</head>
+<body>
+<div id="glsims-root"></div>
+
+<script>
+  // Stand-in for the small bridge chat.js/extension.ts provide inside the
+  // vscode extension (see vscode/media/chat.js's window.CheddarHost and
+  // extension.ts's handleGlSimsAction) — GL Sims' own game.js only ever
+  // calls .send("get_conversations", {}) once, on mount, and expects the
+  // reply back through window.CheddarGames.glsims.onEvent(event, data).
+  // Here that's just a plain same-origin fetch instead of a relay through
+  // an extension host, since this page has no login of its own and the
+  // conversations endpoint deliberately allows anonymous access for
+  // exactly this reason (see games/karirs/api/app/main.py's
+  // get_glsims_conversations).
+  window.CheddarHost = {
+    send(action, _data) {
+      if (action !== 'get_conversations') return;
+      fetch('/api/karirs/glsims/conversations')
+        .then((res) => {
+          if (!res.ok) throw new Error(`fetch failed (${res.status})`);
+          return res.json();
+        })
+        .then((data) => {
+          window.CheddarGames?.glsims?.onEvent?.('conversations', data);
+        })
+        .catch((err) => {
+          window.CheddarGames?.glsims?.onEvent?.('error', { message: err.message });
+        });
+    },
+  };
+</script>
+<script src="game.js"></script>
+<script>
+  window.CheddarGames.glsims.mount(document.getElementById('glsims-root'));
+</script>
+</body>
+</html>

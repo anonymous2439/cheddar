@@ -54,6 +54,9 @@ interface GameCatalogEntry {
     max_players: number;
     tracks_completion: boolean;
     platforms: string[];
+    // Excluded from /games' normal listing unless explicitly requested via
+    // /games hidden — see doListGames.
+    hidden?: boolean;
 }
 
 interface LobbyParticipant {
@@ -102,7 +105,16 @@ const COMMAND_HELP: Record<string, string[]> = {
     leave: ['/leave — leave the currently open chat (and its lobby, if it has one)'],
     invite: ['/invite <username> — invite a friend into the currently open chat (group chats only)'],
     games: ['/games — browse the game catalog, numbered for /lobby create'],
+    glsimsworld: [
+        '/glsimsworld — show the live shared world\'s racer roster (who\'s taken, who\'s free) — run it again any time to refresh',
+    ],
+    glophimon: [
+        '/glophimon — enter the Glophimon overworld (first time: create your character; after that, teleports you back to where you last left)',
+    ],
     update: ['/update — check for, and install, a Cheddar extension update'],
+    'allow-remote': [
+        '/allow-remote <true|false> — connect to (or disconnect from) a companion remote-control app listening on 127.0.0.1:7777',
+    ],
     lobby: [
         "/lobby — show your current lobby's status",
         '/lobby create <n> — create a lobby for a game from /games, by its number',
@@ -161,6 +173,14 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
     private karirsRaceSocket?: WebSocket;
     private karirsRaceSocketId?: number;
 
+    // Remote control — a companion app on the same machine (127.0.0.1 only,
+    // never exposed beyond loopback) that can signal this extension over a
+    // plain WebSocket. /allow-remote toggles whether we look for it at all.
+    private remoteAllowed = false;
+    private remoteSocket?: WebSocket;
+    private remoteConnected = false;
+    private remoteReconnectTimer?: NodeJS.Timeout;
+
     private unread_count = 0;
 
     constructor(private readonly context: vscode.ExtensionContext) {}
@@ -209,6 +229,45 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         return this.lubaApiBaseUrl.replace(/^http/, 'ws');
     }
 
+    // Model Viewer's game.js fetches its FBX/textures directly from this
+    // static host rather than bundling the ~71MB asset set into the vsix —
+    // same "expose it to the webview, don't route it through the relay"
+    // shape as lubaApiBaseUrl above, just for a plain asset fetch instead
+    // of a socket.
+    private get modelViewerAssetBaseUrl(): string {
+        return vscode.workspace
+            .getConfiguration('cheddar')
+            .get<string>('modelViewerAssetBaseUrl', 'http://109.123.234.69/cheddar/models');
+    }
+
+    // GL Sims World's game.js also connects directly (continuous position +
+    // chat traffic, same reasoning as Luba above) — this is a genuinely
+    // separate backend from GL Sims itself (no conversation-feed relation
+    // at all), see games/glsimsworld/api.
+    private get glsimsWorldApiBaseUrl(): string {
+        return vscode.workspace
+            .getConfiguration('cheddar')
+            .get<string>('glsimsWorldApiBaseUrl', 'http://109.123.234.69/api/glsimsworld');
+    }
+
+    private get glsimsWorldWsBaseUrl(): string {
+        return this.glsimsWorldApiBaseUrl.replace(/^http/, 'ws');
+    }
+
+    // Glophimon's own backend (see games/glophimon/api) — same direct-
+    // connect reasoning as glsimsWorldApiBaseUrl above, plus real
+    // persistence (a saved character + last position) glsimsworld never
+    // needed.
+    private get glophimonApiBaseUrl(): string {
+        return vscode.workspace
+            .getConfiguration('cheddar')
+            .get<string>('glophimonApiBaseUrl', 'http://109.123.234.69/api/glophimon');
+    }
+
+    private get glophimonWsBaseUrl(): string {
+        return this.glophimonApiBaseUrl.replace(/^http/, 'ws');
+    }
+
     resolveWebviewView(webviewView: vscode.WebviewView) {
         this.webviewView = webviewView;
         webviewView.webview.options = { enableScripts: true };
@@ -254,6 +313,303 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                     requestId: msg.requestId,
                     token: this.accessToken ?? null,
                 });
+            }
+
+            // GL Sims World isn't lobby-scoped, so it gets its own tiny
+            // message type instead of going through handleGameAction/
+            // handleGameHostAction (both keyed around a currentLobby that
+            // doesn't apply here). 'join' does no network call at all —
+            // the actual claim happens when the mounted module opens its
+            // own websocket (see games/glsimsworld/client) — this just
+            // tells the webview which racer to mount for.
+            if (msg.type === 'glsimsworld') {
+                if (msg.action === 'refresh') {
+                    void this.doGlSimsWorldStatus();
+                } else if (msg.action === 'join' && msg.racer) {
+                    void this.webviewView?.webview.postMessage({
+                        type: 'glsimsworld.mount',
+                        racer: msg.racer,
+                        displayName: this.displayName ?? this.username ?? 'Someone',
+                    });
+                }
+            }
+
+            // Glophimon's character-creation form posts here once, then this
+            // does the actual POST /me — on success it's exactly the "200"
+            // path doGlophimonEnter() itself would take, so this just reuses
+            // that same re-entry rather than duplicating the mount message.
+            if (msg.type === 'glophimon' && msg.action === 'create') {
+                void (async () => {
+                    const res = await this.glophimonFetch('/me', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            display_name: msg.displayName,
+                            head_color: msg.headColor,
+                            body_color: msg.bodyColor,
+                            arm_color: msg.armColor,
+                            leg_color: msg.legColor,
+                            gender: msg.gender,
+                        }),
+                    });
+                    if (!res.ok) {
+                        this.log('could not create your Glophimon character — try again?');
+                        return;
+                    }
+                    await this.doGlophimonEnter();
+                })();
+            }
+
+            // Same reuse-doGlophimonEnter shape as 'create' above, just for
+            // the starter picker's own one-time POST /starter.
+            if (msg.type === 'glophimon' && msg.action === 'choose_starter') {
+                void (async () => {
+                    const res = await this.glophimonFetch('/starter', {
+                        method: 'POST',
+                        body: JSON.stringify({ species_key: msg.speciesKey }),
+                    });
+                    if (!res.ok) {
+                        this.log('could not choose your Glophimon starter — try again?');
+                        return;
+                    }
+                    await this.doGlophimonEnter();
+                })();
+            }
+
+            // "Return to Glophimon" after a Glophimon-hosted Luba match
+            // ends (see chat.js's own luba-return-to-glophimon handler) —
+            // the exact same re-entry the /glophimon command and the two
+            // reuses above already trigger, just from a third place.
+            if (msg.type === 'glophimon' && msg.action === 'enter') {
+                void this.doGlophimonEnter();
+            }
+
+            // Player menu — active lineup / PC / bag. A plain overlay panel
+            // (see chat.html/chat.js), opened on demand rather than as part
+            // of doGlophimonEnter's own one-time gating flow, so it can be
+            // reopened any time while mounted.
+            if (msg.type === 'glophimon' && msg.action === 'open_menu') {
+                void this.doGlophimonOpenMenu();
+            }
+            if (msg.type === 'glophimon' && msg.action === 'activate_glophimon') {
+                void (async () => {
+                    const res = await this.glophimonFetch(`/me/glophimon/${msg.ownedId}/activate`, {
+                        method: 'POST',
+                        body: JSON.stringify({ slot: msg.slot }),
+                    });
+                    if (!res.ok) {
+                        this.log('could not move that Glophimon into the lineup — try again?');
+                        return;
+                    }
+                    const glophimon = await res.json();
+                    const inventoryRes = await this.glophimonFetch('/me/inventory');
+                    const inventory = inventoryRes.ok ? await inventoryRes.json() : { glophiballs: 0, potions: 0, g_coins: 1000 };
+                    this.webviewView?.webview.postMessage({ type: 'glophimon.menu', glophimon, inventory });
+                })();
+            }
+            if (msg.type === 'glophimon' && msg.action === 'deactivate_glophimon') {
+                void (async () => {
+                    const res = await this.glophimonFetch(`/me/glophimon/${msg.ownedId}/deactivate`, { method: 'POST' });
+                    if (!res.ok) {
+                        this.log("could not send that Glophimon to the PC — you must keep at least one active.");
+                        return;
+                    }
+                    const glophimon = await res.json();
+                    const inventoryRes = await this.glophimonFetch('/me/inventory');
+                    const inventory = inventoryRes.ok ? await inventoryRes.json() : { glophiballs: 0, potions: 0, g_coins: 1000 };
+                    this.webviewView?.webview.postMessage({ type: 'glophimon.menu', glophimon, inventory });
+                })();
+            }
+
+            // A successful catch in the wild-battle simulation (see
+            // game.js's own ctx.onCatchGlophimon) lands here — real
+            // persistence, not just a log line: POST /me/glophimon assigns
+            // it to the first free active slot or the PC, same rule the
+            // model's own docstring describes.
+            if (msg.type === 'glophimon' && msg.action === 'catch_glophimon') {
+                void (async () => {
+                    const info = msg.catchInfo ?? {};
+                    const res = await this.glophimonFetch('/me/glophimon', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            species_key: info.speciesKey,
+                            level: info.level,
+                            iv_speed: info.ivSpeed,
+                            iv_attack: info.ivAttack,
+                            iv_defense: info.ivDefense,
+                        }),
+                    });
+                    if (!res.ok) {
+                        this.log('could not save your newly-caught Glophimon — try again?');
+                        return;
+                    }
+                    const glophimon = await res.json();
+                    const inventoryRes = await this.glophimonFetch('/me/inventory');
+                    const inventory = inventoryRes.ok ? await inventoryRes.json() : { glophiballs: 0, potions: 0, g_coins: 1000 };
+                    this.webviewView?.webview.postMessage({ type: 'glophimon.menu', glophimon, inventory });
+                })();
+            }
+            if (msg.type === 'glophimon' && msg.action === 'release_glophimon') {
+                void (async () => {
+                    const res = await this.glophimonFetch(`/me/glophimon/${msg.ownedId}/release`, { method: 'POST' });
+                    if (!res.ok) {
+                        this.log("could not release that Glophimon — you must keep at least one.");
+                        return;
+                    }
+                    const glophimon = await res.json();
+                    const inventoryRes = await this.glophimonFetch('/me/inventory');
+                    const inventory = inventoryRes.ok ? await inventoryRes.json() : { glophiballs: 0, potions: 0, g_coins: 1000 };
+                    this.webviewView?.webview.postMessage({ type: 'glophimon.menu', glophimon, inventory });
+                })();
+            }
+            // A ball thrown in a real wild battle (see game.js's own
+            // ctx.onUseGlophiball) — the client already decremented its own
+            // local count optimistically, this just persists the spend.
+            // Fire-and-forget: nothing needs to round-trip back for this one.
+            if (msg.type === 'glophimon' && msg.action === 'use_glophiball') {
+                void (async () => {
+                    const res = await this.glophimonFetch('/me/inventory/use-glophiball', { method: 'POST' });
+                    if (!res.ok) {
+                        this.log('could not record that thrown Glophiball — try again?');
+                    }
+                })();
+            }
+            // Rodz's free daily Glophiballs (see game.js's own
+            // ctx.onClaimDaily) — the client already bumped its own local
+            // count optimistically on "Yes"; this persists it for real and
+            // refreshes menuData so the shout loop/claim state stay honest.
+            if (msg.type === 'glophimon' && msg.action === 'claim_daily') {
+                void (async () => {
+                    const res = await this.glophimonFetch('/me/inventory/claim-daily', { method: 'POST' });
+                    if (!res.ok) {
+                        this.log("could not claim Rodz's daily Glophiballs — try again?");
+                        return;
+                    }
+                    const { inventory } = await res.json();
+                    const glophimonRes = await this.glophimonFetch('/me/glophimon');
+                    const glophimon = glophimonRes.ok ? await glophimonRes.json() : [];
+                    this.webviewView?.webview.postMessage({ type: 'glophimon.menu', glophimon, inventory });
+                })();
+            }
+            // The player's own trainer HP (see game.js's own playerHp) —
+            // persists damage taken, Rodz's heal, and the free heal that
+            // comes with blacking out. Fire-and-forget, same as the
+            // inventory actions above.
+            if (msg.type === 'glophimon' && msg.action === 'set_hp') {
+                void (async () => {
+                    const res = await this.glophimonFetch('/me/hp', {
+                        method: 'POST',
+                        body: JSON.stringify({ current_hp: msg.currentHp }),
+                    });
+                    if (!res.ok) {
+                        this.log('could not save your Glophimon trainer HP — try again?');
+                    }
+                })();
+            }
+            // Per-Glophimon HP (see game.js's own syncOwnedGlophimonHp) —
+            // same fire-and-forget shape as set_hp above, just batched
+            // across however many of the player's own team actually fought.
+            if (msg.type === 'glophimon' && msg.action === 'set_glophimon_hp') {
+                void (async () => {
+                    const res = await this.glophimonFetch('/me/glophimon/hp', {
+                        method: 'POST',
+                        body: JSON.stringify({ updates: msg.updates }),
+                    });
+                    if (!res.ok) {
+                        this.log('could not save your Glophimon HP — try again?');
+                    }
+                })();
+            }
+            // Shared wild Glophimon (see games/glophimon/api's own
+            // /wild/{id}/* endpoints) — game.js's own checkWildContact
+            // awaits this exact response before starting a battle, so
+            // whether the engage actually succeeded matters here, unlike
+            // the fire-and-forget actions above.
+            if (msg.type === 'glophimon' && msg.action === 'engage_wild') {
+                void (async () => {
+                    const res = await this.glophimonFetch(`/wild/${msg.wildId}/engage`, { method: 'POST' });
+                    this.webviewView?.webview.postMessage({ type: 'glophimon.engageWildResult', requestId: msg.requestId, ok: res.ok });
+                })();
+            }
+            if (msg.type === 'glophimon' && msg.action === 'release_wild') {
+                void (async () => {
+                    const res = await this.glophimonFetch(`/wild/${msg.wildId}/release`, { method: 'POST' });
+                    if (!res.ok) {
+                        this.log('could not release that Glophimon back to the world — try again?');
+                    }
+                })();
+            }
+            if (msg.type === 'glophimon' && msg.action === 'wild_caught') {
+                void (async () => {
+                    const res = await this.glophimonFetch(`/wild/${msg.wildId}/caught`, { method: 'POST' });
+                    if (!res.ok) {
+                        this.log('could not clear that Glophimon from the shared world — try again?');
+                    }
+                })();
+            }
+            // The Karirs field — game.js's own onKarirsFetchState/
+            // onKarirsPlaceBet/onKarirsClaim all await a real result (the
+            // current state, whether the bet was accepted, the claimed
+            // amount), unlike the fire-and-forget actions above.
+            if (msg.type === 'glophimon' && msg.action === 'karirs_fetch_state') {
+                void (async () => {
+                    const res = await this.glophimonFetch('/karirs/state');
+                    const result = res.ok ? await res.json() : null;
+                    this.webviewView?.webview.postMessage({ type: 'glophimon.karirsResult', requestId: msg.requestId, result });
+                })();
+            }
+            if (msg.type === 'glophimon' && msg.action === 'karirs_place_bet') {
+                void (async () => {
+                    const res = await this.glophimonFetch('/karirs/bet', {
+                        method: 'POST',
+                        body: JSON.stringify({ racer_name: msg.racerName, wager: msg.wager }),
+                    });
+                    const result = res.ok ? { ok: true, bet: await res.json() } : { ok: false };
+                    this.webviewView?.webview.postMessage({ type: 'glophimon.karirsResult', requestId: msg.requestId, result });
+                })();
+            }
+            if (msg.type === 'glophimon' && msg.action === 'karirs_claim') {
+                void (async () => {
+                    const res = await this.glophimonFetch('/karirs/claim', { method: 'POST' });
+                    let result: { ok: boolean; g_coins?: number } = { ok: false };
+                    if (res.ok) {
+                        const body = await res.json();
+                        result = { ok: true, g_coins: body.inventory.g_coins };
+                    }
+                    this.webviewView?.webview.postMessage({ type: 'glophimon.karirsResult', requestId: msg.requestId, result });
+                })();
+            }
+            // Jared's shop (see game.js's own ctx.onShopBuy) — awaited the
+            // same way the Karirs actions above are, since the player
+            // needs to know whether the purchase actually went through.
+            if (msg.type === 'glophimon' && msg.action === 'shop_buy') {
+                void (async () => {
+                    const res = await this.glophimonFetch('/shop/buy', {
+                        method: 'POST',
+                        body: JSON.stringify({ item_key: msg.itemKey, quantity: msg.quantity }),
+                    });
+                    const result = res.ok ? { ok: true, inventory: await res.json() } : { ok: false };
+                    this.webviewView?.webview.postMessage({ type: 'glophimon.shopResult', requestId: msg.requestId, result });
+                })();
+            }
+            // EXP/leveling — see game.js's own ctx.onBattleResult, fired on
+            // a real wild win or catch. Awaited: the battle log needs the
+            // real per-participant EXP/level-up numbers back.
+            if (msg.type === 'glophimon' && msg.action === 'battle_result') {
+                void (async () => {
+                    const p = msg.payload ?? {};
+                    const res = await this.glophimonFetch('/me/glophimon/battle-result', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            defeated_species_key: p.defeatedSpeciesKey,
+                            defeated_level: p.defeatedLevel,
+                            outcome: p.outcome,
+                            participant_ids: p.participantIds,
+                            wild_id: p.wildId ?? null,
+                        }),
+                    });
+                    const result = res.ok ? { ok: true, ...(await res.json()) } : { ok: false };
+                    this.webviewView?.webview.postMessage({ type: 'glophimon.battleResult', requestId: msg.requestId, result });
+                })();
             }
         });
 
@@ -478,14 +834,29 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                 await this.doInviteToChat(arg);
                 return;
             case 'games':
-                await this.doListGames();
+                await this.doListGames(arg);
                 return;
             case 'lobby':
                 await this.handleLobbyCommand(rest);
                 return;
+            case 'glsimsworld':
+                await this.doGlSimsWorldStatus();
+                return;
+            case 'glophimon':
+                await this.doGlophimonEnter();
+                return;
             case 'update':
                 await this.checkForUpdates(true);
                 return;
+            case 'allow-remote': {
+                const val = (rest[0] || '').toLowerCase();
+                if (val !== 'true' && val !== 'false') {
+                    this.log('usage: /allow-remote <true|false>');
+                    return;
+                }
+                this.setRemoteAllowed(val === 'true');
+                return;
+            }
             case 'help':
                 if (arg) {
                     const lines = COMMAND_HELP[arg.toLowerCase()];
@@ -497,7 +868,7 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
                     return;
                 }
                 this.log(
-                    'commands: /login /logout /whoami /friends /requests /add /accept /decline /chats /open /who /leave /invite /games /lobby /update — /help <command> for details'
+                    'commands: /login /logout /whoami /friends /requests /add /accept /decline /chats /open /who /leave /invite /games /lobby /glsimsworld /glophimon /update /allow-remote — /help <command> for details'
                 );
                 return;
             default:
@@ -887,7 +1258,99 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
     // REST; realtime fan-out (ready/kick/leader/start) arrives back over the
     // same cheddarSocket used for chat, so there's no second connection.
     // -----------------------------
-    private async doListGames() {
+    // -----------------------------
+    // 🔹 GL Sims World — a single persistent shared space, not a per-lobby
+    // game (see games/glsimsworld/api and its own plan) — so unlike every
+    // other game here this never touches games_catalog.py or the lobby
+    // system at all. This is the "home view": a plain authenticated REST
+    // read of who currently holds which of the 25 racers, re-run any time
+    // with /glsimsworld (there's a Refresh button in the panel too, which
+    // just re-sends this same command) — deliberately not a live socket;
+    // only actually joining opens one (see the 'glsimsworld' message
+    // handler below).
+    // -----------------------------
+    private async doGlSimsWorldStatus() {
+        const res = await this.glsimsWorldFetch('/status');
+        if (!res.ok) {
+            this.log('could not reach GL Sims World — not logged in?');
+            return;
+        }
+        const roster = (await res.json()) as { name: string; taken: boolean; taken_by: string | null }[];
+        const takenCount = roster.filter((r) => r.taken).length;
+        this.log(`GL Sims World — ${takenCount}/${roster.length} racers taken`);
+        this.webviewView?.webview.postMessage({ type: 'glsimsworld.render', data: roster });
+    }
+
+    // -----------------------------
+    // 🔹 Glophimon — a single persistent shared overworld with real
+    // per-account persistence (see games/glophimon/api and its own plan),
+    // same "own view outside the lobby system" shape as GL Sims World
+    // above. Three states, checked in order, each a one-time gate the
+    // account can never revisit once passed: no character yet (GET /me
+    // 404) means character creation; a character but no starter yet (GET
+    // /starter 404) means the starter picker; both existing means teleport
+    // straight into the world at its saved position.
+    // -----------------------------
+    private async doGlophimonEnter() {
+        const meRes = await this.glophimonFetch('/me');
+        if (meRes.status === 404) {
+            this.webviewView?.webview.postMessage({ type: 'glophimon.create' });
+            return;
+        }
+        if (!meRes.ok) {
+            this.log('could not reach Glophimon — not logged in?');
+            return;
+        }
+        const character = await meRes.json();
+
+        const starterRes = await this.glophimonFetch('/starter');
+        if (starterRes.status === 404) {
+            const speciesRes = await this.glophimonFetch('/species');
+            const species = speciesRes.ok ? ((await speciesRes.json()) as { tier: string }[]) : [];
+            const common = species.filter((s) => s.tier === 'common');
+            this.webviewView?.webview.postMessage({ type: 'glophimon.chooseStarter', species: common });
+            return;
+        }
+        if (!starterRes.ok) {
+            this.log('could not reach Glophimon — not logged in?');
+            return;
+        }
+        const starter = await starterRes.json();
+
+        // Fetched here too (not just on-demand when the Menu opens) so the
+        // game module's own active-lineup logic — how many Glophimon a
+        // wild battle actually fields, see game.js's own getActiveLineup —
+        // has real data the instant the world mounts, not just after the
+        // player has opened the Menu at least once this session.
+        const [glophimonRes, inventoryRes] = await Promise.all([
+            this.glophimonFetch('/me/glophimon'),
+            this.glophimonFetch('/me/inventory'),
+        ]);
+        const glophimon = glophimonRes.ok ? await glophimonRes.json() : [];
+        const inventory = inventoryRes.ok ? await inventoryRes.json() : { glophiballs: 0, potions: 0, g_coins: 1000 };
+
+        this.webviewView?.webview.postMessage({ type: 'glophimon.mount', character, starter, glophimon, inventory });
+    }
+
+    // Player menu — active lineup / PC / bag (see games/glophimon/api's own
+    // GET /me/glophimon and GET /me/inventory). Fetched fresh every time the
+    // menu opens (and again after any activate/deactivate) rather than
+    // cached, since the PC contents can only ever change server-side.
+    private async doGlophimonOpenMenu() {
+        const [glophimonRes, inventoryRes] = await Promise.all([
+            this.glophimonFetch('/me/glophimon'),
+            this.glophimonFetch('/me/inventory'),
+        ]);
+        if (!glophimonRes.ok || !inventoryRes.ok) {
+            this.log('could not reach Glophimon — not logged in?');
+            return;
+        }
+        const glophimon = await glophimonRes.json();
+        const inventory = await inventoryRes.json();
+        this.webviewView?.webview.postMessage({ type: 'glophimon.menu', glophimon, inventory });
+    }
+
+    private async doListGames(arg?: string) {
         const res = await this.authorizedFetch('/api/v1/games/catalog');
         if (!res.ok) {
             this.log('not logged in');
@@ -895,9 +1358,13 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         }
         // Only games with a vscode client — the catalog is shared with the
         // web app, which also has entries (e.g. Cheddar MTG) with no vscode
-        // UI to render yet.
+        // UI to render yet. Hidden games (still under active development —
+        // see games_catalog.py's own comment) are left out unless the user
+        // explicitly asks with "/games hidden" — the only way to surface
+        // one right now.
+        const showHidden = (arg ?? '').trim().toLowerCase() === 'hidden';
         const allGames = (await res.json()) as GameCatalogEntry[];
-        this.gameCatalogCache = allGames.filter((g) => g.platforms.includes('vscode'));
+        this.gameCatalogCache = allGames.filter((g) => g.platforms.includes('vscode') && (showHidden || !g.hidden));
         if (!this.gameCatalogCache.length) {
             this.log('no games available yet');
             return;
@@ -1342,6 +1809,33 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             await this.handleChessAction(action, data);
         } else if (gameKey === 'cheddar_beats') {
             await this.handleBeatsAction(action, data);
+        } else if (gameKey === 'glsims') {
+            await this.handleGlSimsAction(action, data);
+        }
+    }
+
+    // GL Sims lives in karirs-api (see games/karirs/api/app/main.py's
+    // get_glsims_conversations) purely because that's where ConversationLine
+    // already lives, not because it's otherwise related to karirs. A single
+    // one-shot "give me the conversation feed" request on mount is exactly
+    // the low-frequency case this action-relay was built for (unlike
+    // Luba, which bypasses it entirely for continuous position/attack
+    // traffic) — so this reuses karirsFetch instead of exposing a base URL
+    // to the webview and fetching directly from inside it.
+    private async handleGlSimsAction(action: string, _data: any) {
+        try {
+            switch (action) {
+                case 'get_conversations': {
+                    const res = await this.karirsFetch('/glsims/conversations');
+                    if (!res.ok) throw new Error(`conversations fetch failed (${res.status})`);
+                    await this.sendGameEvent('glsims', 'conversations', await res.json());
+                    return;
+                }
+                default:
+                    throw new Error(`unknown glsims action: ${action}`);
+            }
+        } catch (err) {
+            await this.sendGameEvent('glsims', 'error', { message: (err as Error).message });
         }
     }
 
@@ -1485,6 +1979,21 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
             headers.set('Content-Type', 'application/json');
         }
         return fetch(`${this.lubaApiBaseUrl}${path}`, { ...init, headers });
+    }
+
+    private async glsimsWorldFetch(path: string, init: RequestInit = {}): Promise<Response> {
+        const headers = new Headers(init.headers);
+        if (this.accessToken) headers.set('Authorization', `Bearer ${this.accessToken}`);
+        return fetch(`${this.glsimsWorldApiBaseUrl}${path}`, { ...init, headers });
+    }
+
+    private async glophimonFetch(path: string, init: RequestInit = {}): Promise<Response> {
+        const headers = new Headers(init.headers);
+        if (this.accessToken) headers.set('Authorization', `Bearer ${this.accessToken}`);
+        if (init.body && !headers.has('Content-Type')) {
+            headers.set('Content-Type', 'application/json');
+        }
+        return fetch(`${this.glophimonApiBaseUrl}${path}`, { ...init, headers });
     }
 
     private async handleKarirsAction(action: string, data: any) {
@@ -1727,6 +2236,72 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
     }
 
     // -----------------------------
+    // 🔹 REMOTE CONTROL — a companion app on the same machine, connected to
+    // over loopback only. This just maintains the connection and logs its
+    // state; nothing reacts to remote messages yet.
+    // -----------------------------
+    private static readonly REMOTE_URL = 'ws://127.0.0.1:7777';
+    private static readonly REMOTE_RETRY_MS = 3000;
+
+    private setRemoteAllowed(allowed: boolean) {
+        if (this.remoteAllowed === allowed) return;
+        this.remoteAllowed = allowed;
+
+        if (allowed) {
+            this.log(`— looking for remote app at ${MyPanelViewProvider.REMOTE_URL} —`);
+            this.connectRemoteSocket();
+        } else {
+            this.log('— remote control disabled —');
+            this.disconnectRemoteSocket();
+        }
+    }
+
+    private connectRemoteSocket() {
+        if (!this.remoteAllowed) return;
+
+        clearTimeout(this.remoteReconnectTimer);
+        this.remoteSocket?.removeAllListeners();
+        this.remoteSocket?.close();
+
+        const socket = new WebSocket(MyPanelViewProvider.REMOTE_URL);
+        this.remoteSocket = socket;
+
+        socket.on('open', () => {
+            if (this.remoteSocket !== socket) return;
+            this.remoteConnected = true;
+            this.log('— connected to remote app —');
+        });
+
+        socket.on('message', (data) => {
+            if (this.remoteSocket !== socket) return;
+            this.log(`— remote: ${data.toString()} —`);
+        });
+
+        socket.on('error', () => {
+            // 'close' fires right after and handles retry/logging.
+        });
+
+        socket.on('close', () => {
+            if (this.remoteSocket !== socket) return;
+            const wasConnected = this.remoteConnected;
+            this.remoteConnected = false;
+            if (!this.remoteAllowed) return;
+
+            if (wasConnected) this.log('— lost connection to remote app, still looking —');
+            this.remoteReconnectTimer = setTimeout(() => this.connectRemoteSocket(), MyPanelViewProvider.REMOTE_RETRY_MS);
+        });
+    }
+
+    private disconnectRemoteSocket() {
+        clearTimeout(this.remoteReconnectTimer);
+        this.remoteReconnectTimer = undefined;
+        this.remoteSocket?.removeAllListeners();
+        this.remoteSocket?.close();
+        this.remoteSocket = undefined;
+        this.remoteConnected = false;
+    }
+
+    // -----------------------------
     // 🔹 SELF-UPDATE — this is a private/sideloaded extension so it can't rely
     // on the Marketplace's update mechanism. `interactive: false` (checked
     // once when the panel first launches) only notifies; it never installs
@@ -1831,10 +2406,16 @@ class MyPanelViewProvider implements vscode.WebviewViewProvider {
         const scriptUri = this.webviewView!.webview.asWebviewUri(js_path);
 
         const lubaConfigTag = `<script>window.CheddarLubaWsBaseUrl = ${JSON.stringify(this.lubaWsBaseUrl)};</script>`;
+        const modelViewerConfigTag = `<script>window.CheddarModelViewerAssetBaseUrl = ${JSON.stringify(this.modelViewerAssetBaseUrl)};</script>`;
+        const glsimsWorldConfigTag = `<script>window.CheddarGlSimsWorldWsBaseUrl = ${JSON.stringify(this.glsimsWorldWsBaseUrl)};</script>`;
+        const glophimonConfigTag = `<script>window.CheddarGlophimonWsBaseUrl = ${JSON.stringify(this.glophimonWsBaseUrl)};</script>`;
 
         return html
             .replace('{{styleUri}}', cssUri.toString())
             .replace('{{lubaConfig}}', lubaConfigTag)
+            .replace('{{modelViewerConfig}}', modelViewerConfigTag)
+            .replace('{{glsimsWorldConfig}}', glsimsWorldConfigTag)
+            .replace('{{glophimonConfig}}', glophimonConfigTag)
             .replace('{{gameScripts}}', this.getGameScriptTags())
             .replace('{{scriptUri}}', scriptUri.toString());
     }

@@ -27,10 +27,12 @@ import {
   resetAfterRespawn,
   updateShieldVisual,
   ATTACK_COOLDOWN_MS,
+  getHeadWorldPosition,
+  hideHead,
   type PlayerRig,
 } from "./player";
 import { connectLubaSocket, NETWORK_TICK_MS, type LubaServerMessage } from "./lubaSocket";
-import { spawnBloodSpray, spawnDashEffect, spawnSmokeCloud, type BloodSprayHandle } from "./effects";
+import { spawnBloodSpray, spawnDashEffect, spawnSmokeCloud, spawnFlyingHead, spawnGoreFountain, type BloodSprayHandle } from "./effects";
 import { createMobileControls } from "./touchControls";
 
 export interface LubaParticipant {
@@ -66,6 +68,13 @@ const PITCH_MIN = -1.2;
 const PITCH_MAX = 1.2;
 const SPAWN = { x: 0, y: 6, z: 8 }; // dropped in from above so landing on the floor is visible/obvious
 const PARRY_STUN_MS = 900; // must match games/luba/api/app/main.py's PARRY_STUN_S
+// Knockback on a parry — a short, fixed-speed movement override in the
+// pushed direction, the exact same mechanism the dash already uses, just
+// triggered by an incoming parry event instead of a keypress. Applied
+// even though the player is also stunned during this window — the stun
+// blocks *acting* (attacking/dashing), not being physically thrown back.
+const PARRY_KNOCKBACK_SPEED = 9;
+const PARRY_KNOCKBACK_DURATION_MS = 220;
 // Dash: direction depends on current movement input at the moment it's
 // pressed — whichever way you're currently moving (already
 // facing-relative, same as normal strafing), or straight backward
@@ -95,6 +104,11 @@ const PEER_EASE_RATE = 12;
 // walk at MOVE_SPEED (5 units/sec) covers ~0.3 units per NETWORK_TICK_MS
 // (66ms), well above this; idle floating-point/network jitter is not.
 const PEER_MOVE_THRESHOLD = 0.05;
+// Kill feed — how long each "who killed who" entry stays up before it's
+// removed, and how many entries stack at once (oldest drops off the
+// bottom once a new one would push past this).
+const KILL_FEED_ENTRY_MS = 10000;
+const KILL_FEED_MAX_ENTRIES = 5;
 
 function buildArenaMeshes(scene: THREE.Scene, arena: Arena): void {
   const floorMat = new THREE.MeshStandardMaterial({ color: "#3f3f46" });
@@ -203,10 +217,14 @@ function createInputState(canvas: HTMLCanvasElement, rotateButtonState: { left: 
   function keyup(e: KeyboardEvent) {
     pressed.delete(e.code);
   }
-  function mousedown(e: MouseEvent) {
-    // Scoped to clicks actually on the canvas (or already pointer-locked
-    // to it) — a click on some other part of the page shouldn't queue a
-    // sword swing.
+  function pointerdownForAttack(e: PointerEvent) {
+    // Mouse only — a touch tap synthesizes this event too, but touch
+    // taps on the canvas are swipe-to-look gestures (see
+    // touchControls.ts's own canvas pointer listeners), not attacks;
+    // mobile has its own dedicated attack button for that. Scoped to
+    // clicks actually on the canvas (or already pointer-locked to it) —
+    // a click on some other part of the page shouldn't queue a swing.
+    if (e.pointerType !== "mouse") return;
     if (e.button === 0 && (e.target === canvas || document.pointerLockElement === canvas)) attackQueued = true;
   }
   function mousemove(e: MouseEvent) {
@@ -222,7 +240,7 @@ function createInputState(canvas: HTMLCanvasElement, rotateButtonState: { left: 
   canvas.addEventListener("blur", onBlur);
   window.addEventListener("keydown", keydown);
   window.addEventListener("keyup", keyup);
-  window.addEventListener("mousedown", mousedown);
+  window.addEventListener("pointerdown", pointerdownForAttack);
   window.addEventListener("mousemove", mousemove);
   document.addEventListener("pointerlockchange", pointerlockchange);
 
@@ -266,7 +284,7 @@ function createInputState(canvas: HTMLCanvasElement, rotateButtonState: { left: 
       canvas.removeEventListener("blur", onBlur);
       window.removeEventListener("keydown", keydown);
       window.removeEventListener("keyup", keyup);
-      window.removeEventListener("mousedown", mousedown);
+      window.removeEventListener("pointerdown", pointerdownForAttack);
       window.removeEventListener("mousemove", mousemove);
       document.removeEventListener("pointerlockchange", pointerlockchange);
       if (document.pointerLockElement === canvas) document.exitPointerLock();
@@ -314,7 +332,7 @@ function buildTurnButtons(): { el: HTMLDivElement; state: { left: boolean; right
 
 interface CooldownHud {
   el: HTMLDivElement;
-  update(swordFrac: number, smokeFrac: number): void;
+  update(swordFrac: number, smokeFrac: number, dashFrac: number): void;
 }
 
 // Cooldown indicators for the sword and the smoke skill, shown just below
@@ -356,8 +374,10 @@ function buildCooldownHud(): CooldownHud {
 
   const sword = makeBar("⚔", "Sword: Ready");
   const smoke = makeBar("💨", "Smoke: Ready");
+  const dash = makeBar("💫", "Dash: Ready");
   wrap.appendChild(sword.box);
   wrap.appendChild(smoke.box);
+  wrap.appendChild(dash.box);
 
   // frac: 0 = ready, 1 = just used — bars fill on use and drain to empty.
   function updateBar(bar: ReturnType<typeof makeBar>, name: string, frac: number, totalMs: number) {
@@ -367,9 +387,143 @@ function buildCooldownHud(): CooldownHud {
 
   return {
     el: wrap,
-    update(swordFrac: number, smokeFrac: number) {
+    update(swordFrac: number, smokeFrac: number, dashFrac: number) {
       updateBar(sword, "⚔ Sword", swordFrac, ATTACK_COOLDOWN_MS);
       updateBar(smoke, "💨 Smoke", smokeFrac, SMOKE_COOLDOWN_MS);
+      updateBar(dash, "💫 Dash", dashFrac, DASH_COOLDOWN_MS);
+    },
+  };
+}
+
+interface SkillCanvasIcon {
+  el: HTMLDivElement;
+  update(frac: number, totalMs: number): void;
+}
+
+// A small circular badge overlaid directly on the canvas showing a
+// skill's cooldown as a clock-style radial wipe — a dark wedge that
+// starts full the instant the skill is used and shrinks away as the
+// cooldown drains, on top of the existing below-canvas bars (those stay
+// too; this is an *additional*, more glanceable in-view indicator since
+// the bars sit outside the player's actual view of the action).
+// rightOffsetPx positions multiple icons side by side in the same corner
+// (see the dash + smoke instances below — dash sits just to smoke's left).
+function buildSkillCanvasIcon(emoji: string, rightOffsetPx: number): SkillCanvasIcon {
+  const el = document.createElement("div");
+  el.style.position = "absolute";
+  el.style.top = "8px";
+  el.style.right = `${rightOffsetPx}px`;
+  el.style.width = "34px";
+  el.style.height = "34px";
+  el.style.borderRadius = "50%";
+  el.style.background = "rgba(24,24,27,0.8)";
+  el.style.border = "2px solid #52525b";
+  el.style.pointerEvents = "none";
+  el.style.userSelect = "none";
+  el.style.overflow = "hidden";
+
+  const emojiEl = document.createElement("div");
+  emojiEl.style.position = "absolute";
+  emojiEl.style.inset = "0";
+  emojiEl.style.display = "flex";
+  emojiEl.style.alignItems = "center";
+  emojiEl.style.justifyContent = "center";
+  emojiEl.style.fontSize = "15px";
+  emojiEl.textContent = emoji;
+  el.appendChild(emojiEl);
+
+  const wipe = document.createElement("div");
+  wipe.style.position = "absolute";
+  wipe.style.inset = "0";
+  wipe.style.borderRadius = "50%";
+  wipe.style.background = "conic-gradient(rgba(0,0,0,0.78) 0deg, transparent 0deg)";
+  el.appendChild(wipe);
+
+  const countEl = document.createElement("div");
+  countEl.style.position = "absolute";
+  countEl.style.inset = "0";
+  countEl.style.display = "flex";
+  countEl.style.alignItems = "center";
+  countEl.style.justifyContent = "center";
+  countEl.style.fontSize = "11px";
+  countEl.style.fontWeight = "700";
+  countEl.style.color = "#ffffff";
+  countEl.style.textShadow = "0 1px 2px rgba(0,0,0,0.85)";
+  el.appendChild(countEl);
+
+  return {
+    el,
+    // frac: 0 = ready, 1 = just used — same convention as buildCooldownHud.
+    update(frac: number, totalMs: number) {
+      const deg = Math.max(0, Math.min(1, frac)) * 360;
+      wipe.style.background = `conic-gradient(rgba(0,0,0,0.78) ${deg}deg, transparent ${deg}deg)`;
+      const remainingS = (frac * totalMs) / 1000;
+      countEl.textContent = frac > 0 ? Math.ceil(remainingS).toString() : "";
+    },
+  };
+}
+
+interface FullscreenButton {
+  el: HTMLDivElement;
+  dispose(): void;
+}
+
+// A small tappable badge (top-left corner, opposite the smoke/dash icons)
+// that toggles `target` (canvasWrap) in and out of the Fullscreen API.
+// Unlike the skill icons this one is interactive — it deliberately does
+// NOT set pointerEvents:none — so it needs to sit in front of (later in
+// the DOM than) the canvas to actually receive the tap instead of it
+// falling through to the swipe-look listener underneath.
+//
+// Best-effort landscape lock on entry: most mobile game controls (and
+// this feature's own request) assume landscape, but the Screen
+// Orientation API's lock() isn't available everywhere (notably iOS
+// Safari) — the layout itself doesn't depend on the lock succeeding
+// (game.ts's fullscreen-mode switch reacts to fullscreen state alone,
+// not orientation), so a silent failure here is harmless.
+function buildFullscreenButton(target: HTMLElement): FullscreenButton {
+  const el = document.createElement("div");
+  el.style.position = "absolute";
+  el.style.top = "8px";
+  el.style.left = "8px";
+  el.style.width = "34px";
+  el.style.height = "34px";
+  el.style.borderRadius = "50%";
+  el.style.background = "rgba(24,24,27,0.8)";
+  el.style.border = "2px solid #52525b";
+  el.style.display = "flex";
+  el.style.alignItems = "center";
+  el.style.justifyContent = "center";
+  el.style.fontSize = "16px";
+  el.style.color = "#ffffff";
+  el.style.cursor = "pointer";
+  el.style.userSelect = "none";
+  el.textContent = "⛶";
+  el.title = "Toggle fullscreen";
+
+  async function onClick() {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen().catch(() => {});
+      return;
+    }
+    try {
+      await target.requestFullscreen();
+    } catch {
+      return;
+    }
+    try {
+      const orientation = screen.orientation as ScreenOrientation & { lock?(o: string): Promise<void> };
+      await orientation.lock?.("landscape");
+    } catch {
+      // Not supported/denied — fine, see the function comment above.
+    }
+  }
+  el.addEventListener("click", onClick);
+
+  return {
+    el,
+    dispose() {
+      el.removeEventListener("click", onClick);
     },
   };
 }
@@ -450,19 +604,88 @@ export function mount(el: HTMLElement, ctx: LubaMountCtx): void {
   standingsEl.style.pointerEvents = "none"; // never intercepts clicks meant for the canvas
   canvasWrap.appendChild(standingsEl);
 
+  // Swipe-to-look listens directly on the canvas (see touchControls.ts),
+  // and fullscreen relies on explicit sizing below — both need the
+  // browser's default touch gestures (scroll/pinch-zoom) out of the way.
+  canvas.style.touchAction = "none";
+
   // Joystick + action buttons, shown only on touch-primary/narrow
-  // viewports (desktop mouse+keyboard users never see this) — see the
-  // matchMedia listener set up below.
-  const mobileControls = createMobileControls();
-  canvasWrap.appendChild(mobileControls.el);
+  // viewports (desktop mouse+keyboard users never see this). Docked below
+  // the canvas normally, so touching them never covers the game view —
+  // but switched to an overlay on top of the canvas whenever fullscreen
+  // is active, since canvasWrap's siblings (including the docked strip)
+  // aren't rendered at all while it's the fullscreen element; there's no
+  // "below the canvas" space to dock into anymore.
+  const mobileControls = createMobileControls(canvas);
+  canvasWrap.appendChild(mobileControls.overlayEl);
+
   const touchMediaQuery = window.matchMedia("(pointer: coarse), (max-width: 820px)");
-  function updateMobileControlsVisibility() {
-    mobileControls.setVisible(touchMediaQuery.matches);
+  // Landscape is its own signal for switching to the overlay layout, not
+  // just a side effect of fullscreen succeeding — the Fullscreen API can
+  // silently fail to actually engage in some embedding contexts (e.g.
+  // devtools' device-emulation viewport), which would otherwise leave the
+  // controls stuck in "docked" (and, worse, docked is position:fixed to
+  // the viewport bottom while canvasWrap's own fullscreen-only sizing
+  // never kicked in, so nothing meaningful renders where the user expects
+  // fullscreen controls at all). Landscape is also just a more useful
+  // trigger on its own merits: a landscape phone is short, so reclaiming
+  // the docked strip's vertical space for an overlay is worth doing even
+  // if the player never taps the fullscreen button.
+  const landscapeQuery = window.matchMedia("(orientation: landscape)");
+  function updateMobileControlsMode() {
+    if (!touchMediaQuery.matches) {
+      mobileControls.setMode("hidden");
+      return;
+    }
+    const overlay = document.fullscreenElement === canvasWrap || landscapeQuery.matches;
+    mobileControls.setMode(overlay ? "overlay" : "docked");
   }
-  updateMobileControlsVisibility();
-  touchMediaQuery.addEventListener("change", updateMobileControlsVisibility);
+
+  const smokeIcon = buildSkillCanvasIcon("💨", 8);
+  canvasWrap.appendChild(smokeIcon.el);
+  const dashIcon = buildSkillCanvasIcon("💫", 48);
+  canvasWrap.appendChild(dashIcon.el);
+  const fullscreenButton = buildFullscreenButton(canvasWrap);
+  canvasWrap.appendChild(fullscreenButton.el);
+
+  // Kill feed — "who killed who", stacked top-center of the canvas (clear
+  // of the fullscreen badge in the top-left corner and the smoke/dash
+  // cooldown icons in the top-right). Never intercepts clicks meant for
+  // the canvas underneath, same as the standings overlay.
+  const killFeedEl = document.createElement("div");
+  killFeedEl.style.position = "absolute";
+  killFeedEl.style.top = "8px";
+  killFeedEl.style.left = "50%";
+  killFeedEl.style.transform = "translateX(-50%)";
+  killFeedEl.style.display = "flex";
+  killFeedEl.style.flexDirection = "column";
+  killFeedEl.style.alignItems = "center";
+  killFeedEl.style.gap = "4px";
+  killFeedEl.style.maxWidth = "70%";
+  killFeedEl.style.pointerEvents = "none";
+  canvasWrap.appendChild(killFeedEl);
+
+  // Fullscreen elements otherwise inherit whatever CSS box they already
+  // had (canvasWrap's own max-width:720px would just cap it mid-screen),
+  // so this explicitly overrides that while fullscreen and restores it
+  // on exit — the existing per-frame canvas.clientWidth/Height resize
+  // logic further down already reacts to the resulting size change, no
+  // extra renderer/camera wiring needed here.
+  function onFullscreenChange() {
+    const isFs = document.fullscreenElement === canvasWrap;
+    canvasWrap.style.maxWidth = isFs ? "none" : "720px";
+    canvasWrap.style.height = isFs ? "100vh" : "";
+    canvas.style.height = isFs ? "100%" : "";
+    updateMobileControlsMode();
+  }
+
+  updateMobileControlsMode();
+  touchMediaQuery.addEventListener("change", updateMobileControlsMode);
+  landscapeQuery.addEventListener("change", updateMobileControlsMode);
+  document.addEventListener("fullscreenchange", onFullscreenChange);
 
   wrap.appendChild(canvasWrap);
+  wrap.appendChild(mobileControls.dockedEl);
 
   const cooldownHud = buildCooldownHud();
   wrap.appendChild(cooldownHud.el);
@@ -551,6 +774,9 @@ export function mount(el: HTMLElement, ctx: LubaMountCtx): void {
   let dashCooldownUntil = 0;
   let dashDirX = 0;
   let dashDirZ = 0;
+  let knockbackUntil = 0;
+  let knockbackDirX = 0;
+  let knockbackDirZ = 0;
   let isDead = false;
   let hasReportedFall = false;
   let matchEndsAt = 0; // performance.now()-space — set from roster's matchEndsInMs
@@ -562,6 +788,61 @@ export function mount(el: HTMLElement, ctx: LubaMountCtx): void {
   // point (that's never sent back, just the death event itself), but
   // close enough that the spray reads as coming from the body.
   const BLOOD_SPRAY_HEIGHT = 1.0;
+  // Roughly where the head's bottom edge sits (matches player.ts's
+  // LEG_H+TORSO_H proportions, and main.py's HEAD_Y_MIN) — used as the
+  // neck stump position for the gore fountain, not the exact geometry
+  // (getHeadWorldPosition already gives the real head position for the
+  // flying head itself).
+  const NECK_Y = 1.3;
+
+  // Headshot kill — hides the real head mesh and spawns a detached,
+  // physics-lite flying head (launched in the direction the server
+  // computed from attacker/target positions) plus a much bigger blood
+  // fountain at the neck, instead of the normal blood spray.
+  function triggerDecapitation(targetRig: PlayerRig, msg: Extract<LubaServerMessage, { type: "death" }>, color: string): void {
+    const headPos = getHeadWorldPosition(targetRig);
+    hideHead(targetRig);
+    bloodEffects.push(spawnFlyingHead(scene, headPos.x, headPos.y, headPos.z, msg.headPushX ?? 0, msg.headPushY ?? 1, msg.headPushZ ?? 0, color));
+    bloodEffects.push(
+      spawnGoreFountain(scene, targetRig.group.position.x, targetRig.group.position.y + NECK_Y, targetRig.group.position.z),
+    );
+  }
+
+  // "You" for the local player, otherwise the lobby's display_name/
+  // username (same fallback chain the standings overlay above already
+  // uses), never raw HTML — the kill feed sets textContent below, so a
+  // player-chosen name can't be interpreted as markup either way.
+  function nameFor(userId: number): string {
+    if (userId === ctx.selfId) return "You";
+    const info = ctx.participants.find((p) => p.id === userId);
+    return info ? info.display_name || info.username : `user#${userId}`;
+  }
+
+  function pushKillFeedEntry(text: string): void {
+    const entry = document.createElement("div");
+    entry.style.background = "rgba(15, 23, 42, 0.78)";
+    entry.style.color = "#e5e7eb";
+    entry.style.fontSize = "12px";
+    entry.style.lineHeight = "1.4";
+    entry.style.padding = "3px 10px";
+    entry.style.borderRadius = "4px";
+    entry.style.whiteSpace = "nowrap";
+    entry.style.overflow = "hidden";
+    entry.style.textOverflow = "ellipsis";
+    entry.style.maxWidth = "100%";
+    entry.style.transition = "opacity 0.3s ease";
+    entry.textContent = text;
+    // Newest on top — new entries are inserted at the front, so older
+    // ones get pushed down and, once past the cap, trimmed off the end.
+    killFeedEl.insertBefore(entry, killFeedEl.firstChild);
+    while (killFeedEl.children.length > KILL_FEED_MAX_ENTRIES) {
+      killFeedEl.lastElementChild?.remove();
+    }
+    setTimeout(() => {
+      entry.style.opacity = "0";
+      setTimeout(() => entry.remove(), 300);
+    }, KILL_FEED_ENTRY_MS);
+  }
 
   function onDeathMessage(msg: Extract<LubaServerMessage, { type: "death" }>): void {
     const now = performance.now();
@@ -570,14 +851,18 @@ export function mount(el: HTMLElement, ctx: LubaMountCtx): void {
       startDeathFall(rig, now);
       status.textContent = msg.cause === "fall" ? "You fell! Respawning…" : "You were struck down! Respawning…";
       if (msg.cause === "hit") {
-        bloodEffects.push(spawnBloodSpray(scene, physics.x, physics.y + BLOOD_SPRAY_HEIGHT, physics.z));
+        if (msg.isHeadshot) triggerDecapitation(rig, msg, "#f59e0b");
+        else bloodEffects.push(spawnBloodSpray(scene, physics.x, physics.y + BLOOD_SPRAY_HEIGHT, physics.z));
       }
     } else {
       const peer = peers.get(msg.userId);
       if (peer) startDeathFall(peer.rig, now);
       if (msg.cause === "hit" && peer) {
-        const pos = peer.rig.group.position;
-        bloodEffects.push(spawnBloodSpray(scene, pos.x, pos.y + BLOOD_SPRAY_HEIGHT, pos.z));
+        if (msg.isHeadshot) triggerDecapitation(peer.rig, msg, "#38bdf8");
+        else {
+          const pos = peer.rig.group.position;
+          bloodEffects.push(spawnBloodSpray(scene, pos.x, pos.y + BLOOD_SPRAY_HEIGHT, pos.z));
+        }
       }
       if (msg.attackerId === ctx.selfId) {
         selfKills = msg.attackerKills ?? selfKills;
@@ -586,6 +871,15 @@ export function mount(el: HTMLElement, ctx: LubaMountCtx): void {
         const attackerPeer = peers.get(msg.attackerId);
         if (attackerPeer) attackerPeer.kills = msg.attackerKills ?? attackerPeer.kills;
       }
+    }
+
+    if (msg.cause === "fall") {
+      pushKillFeedEntry(`💀 ${nameFor(msg.userId)} fell to their death`);
+    } else if (msg.attackerId != null) {
+      const skull = msg.isHeadshot ? "🎯" : "⚔️";
+      pushKillFeedEntry(`${skull} ${nameFor(msg.attackerId)} killed ${nameFor(msg.userId)}${msg.isHeadshot ? " (headshot)" : ""}`);
+    } else {
+      pushKillFeedEntry(`💀 ${nameFor(msg.userId)} died`);
     }
   }
 
@@ -618,10 +912,14 @@ export function mount(el: HTMLElement, ctx: LubaMountCtx): void {
   }
 
   function onParryMessage(msg: Extract<LubaServerMessage, { type: "parry" }>): void {
-    if (msg.player1Id === ctx.selfId || msg.player2Id === ctx.selfId) {
+    const isPlayer1 = msg.player1Id === ctx.selfId;
+    if (isPlayer1 || msg.player2Id === ctx.selfId) {
       const now = performance.now();
       playerStunnedUntil = now + PARRY_STUN_MS;
       interruptToCooldown(rig, now);
+      knockbackUntil = now + PARRY_KNOCKBACK_DURATION_MS;
+      knockbackDirX = isPlayer1 ? msg.player1PushX : msg.player2PushX;
+      knockbackDirZ = isPlayer1 ? msg.player1PushZ : msg.player2PushZ;
       status.textContent = "Parry! Both swords clashed — stunned for a moment.";
     }
   }
@@ -722,8 +1020,10 @@ export function mount(el: HTMLElement, ctx: LubaMountCtx): void {
     const inputStrafe = kb.inputStrafe + touch.inputStrafe;
     const turn = kb.turn;
     const pitchTurn = kb.pitchTurn;
-    const mouseTurnDelta = kb.mouseTurnDelta;
-    const mousePitchDelta = kb.mousePitchDelta;
+    // Additive with the swipe-to-look deltas below, same reasoning as
+    // inputForward/inputStrafe above.
+    const mouseTurnDelta = kb.mouseTurnDelta + touch.turnDelta;
+    const mousePitchDelta = kb.mousePitchDelta + touch.pitchDelta;
     const jump = kb.jump || touch.jump;
     const attack = kb.attack || touch.attack;
     const dash = kb.dash || touch.dash;
@@ -809,8 +1109,29 @@ export function mount(el: HTMLElement, ctx: LubaMountCtx): void {
       isMoving = true; // so the run lean/arm-trail animation applies during a backward dash too
     }
 
+    // Parry knockback overrides movement even though the player is also
+    // stunned right now — the stun blocks *acting* (attacking/dashing
+    // can't be triggered while now < playerStunnedUntil), not being
+    // physically thrown back, which is exactly what this is.
+    const isKnockedBack = now < knockbackUntil;
+    if (isKnockedBack) {
+      moveX = knockbackDirX;
+      moveZ = knockbackDirZ;
+      isMoving = true;
+    }
+
     if (!isDead) {
-      stepPhysics(physics, { moveX, moveZ, jump: playerStunned ? false : jump, speed: isDashing ? DASH_SPEED : undefined }, blocks, dt);
+      stepPhysics(
+        physics,
+        {
+          moveX,
+          moveZ,
+          jump: playerStunned ? false : jump,
+          speed: isDashing ? DASH_SPEED : isKnockedBack ? PARRY_KNOCKBACK_SPEED : undefined,
+        },
+        blocks,
+        dt,
+      );
     }
 
     if (!isDead && !hasReportedFall && physics.y < FALL_DEATH_Y) {
@@ -856,10 +1177,15 @@ export function mount(el: HTMLElement, ctx: LubaMountCtx): void {
     } else if (smoke) {
       status.textContent = "Smoke skill still on cooldown…";
     }
+    const smokeFrac = Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS);
+    const dashFrac = Math.max(0, (dashCooldownUntil - now) / DASH_COOLDOWN_MS);
     cooldownHud.update(
       rig.comboState === "cooldown" ? Math.max(0, 1 - (now - rig.stateEnteredAt) / ATTACK_COOLDOWN_MS) : 0,
-      Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS),
+      smokeFrac,
+      dashFrac,
     );
+    smokeIcon.update(smokeFrac, SMOKE_COOLDOWN_MS);
+    dashIcon.update(dashFrac, DASH_COOLDOWN_MS);
 
     // Denser than the tick-gated position broadcast below — sent every
     // render frame the swing is actually active, so a fast continuous
@@ -950,7 +1276,11 @@ export function mount(el: HTMLElement, ctx: LubaMountCtx): void {
     cancelAnimationFrame(rafId);
     input.dispose();
     mobileControls.dispose();
-    touchMediaQuery.removeEventListener("change", updateMobileControlsVisibility);
+    fullscreenButton.dispose();
+    touchMediaQuery.removeEventListener("change", updateMobileControlsMode);
+    landscapeQuery.removeEventListener("change", updateMobileControlsMode);
+    document.removeEventListener("fullscreenchange", onFullscreenChange);
+    if (document.fullscreenElement === canvasWrap) document.exitFullscreen().catch(() => {});
     socket.dispose();
     for (const userId of Array.from(peers.keys())) removePeer(userId);
     disposeRig(rig);
@@ -967,6 +1297,8 @@ const DUMMY_ATTACK_MIN_MS = 2200;
 const DUMMY_ATTACK_MAX_MS = 3400;
 const PRACTICE_HIT_RADIUS = 0.5; // matches games/luba/api's HIT_RADIUS
 const PRACTICE_RESPAWN_MS = 1800;
+const HEAD_Y_MIN = 1.3; // matches games/luba/api's HEAD_Y_MIN
+const NECK_Y = 1.3; // neck stump position for the gore fountain — see mount()'s own comment
 
 // A fully local, non-networked sandbox — no lobby, no WebSocket, just the
 // arena/physics/rig/camera/dash/combat code shared with the real match,
@@ -1015,16 +1347,71 @@ export function mountPractice(el: HTMLElement): void {
   canvas.style.borderRadius = "4px";
   canvasWrap.appendChild(canvas);
 
-  const mobileControls = createMobileControls();
-  canvasWrap.appendChild(mobileControls.el);
+  // Swipe-to-look listens directly on the canvas (see touchControls.ts),
+  // and fullscreen relies on explicit sizing below — both need the
+  // browser's default touch gestures (scroll/pinch-zoom) out of the way.
+  canvas.style.touchAction = "none";
+
+  // Joystick + action buttons, shown only on touch-primary/narrow
+  // viewports (desktop mouse+keyboard users never see this). Docked below
+  // the canvas normally, so touching them never covers the game view —
+  // but switched to an overlay on top of the canvas whenever fullscreen
+  // is active, since canvasWrap's siblings (including the docked strip)
+  // aren't rendered at all while it's the fullscreen element; there's no
+  // "below the canvas" space to dock into anymore.
+  const mobileControls = createMobileControls(canvas);
+  canvasWrap.appendChild(mobileControls.overlayEl);
+
   const touchMediaQuery = window.matchMedia("(pointer: coarse), (max-width: 820px)");
-  function updateMobileControlsVisibility() {
-    mobileControls.setVisible(touchMediaQuery.matches);
+  // Landscape is its own signal for switching to the overlay layout, not
+  // just a side effect of fullscreen succeeding — the Fullscreen API can
+  // silently fail to actually engage in some embedding contexts (e.g.
+  // devtools' device-emulation viewport), which would otherwise leave the
+  // controls stuck in "docked" (and, worse, docked is position:fixed to
+  // the viewport bottom while canvasWrap's own fullscreen-only sizing
+  // never kicked in, so nothing meaningful renders where the user expects
+  // fullscreen controls at all). Landscape is also just a more useful
+  // trigger on its own merits: a landscape phone is short, so reclaiming
+  // the docked strip's vertical space for an overlay is worth doing even
+  // if the player never taps the fullscreen button.
+  const landscapeQuery = window.matchMedia("(orientation: landscape)");
+  function updateMobileControlsMode() {
+    if (!touchMediaQuery.matches) {
+      mobileControls.setMode("hidden");
+      return;
+    }
+    const overlay = document.fullscreenElement === canvasWrap || landscapeQuery.matches;
+    mobileControls.setMode(overlay ? "overlay" : "docked");
   }
-  updateMobileControlsVisibility();
-  touchMediaQuery.addEventListener("change", updateMobileControlsVisibility);
+
+  const smokeIcon = buildSkillCanvasIcon("💨", 8);
+  canvasWrap.appendChild(smokeIcon.el);
+  const dashIcon = buildSkillCanvasIcon("💫", 48);
+  canvasWrap.appendChild(dashIcon.el);
+  const fullscreenButton = buildFullscreenButton(canvasWrap);
+  canvasWrap.appendChild(fullscreenButton.el);
+
+  // Fullscreen elements otherwise inherit whatever CSS box they already
+  // had (canvasWrap's own max-width:720px would just cap it mid-screen),
+  // so this explicitly overrides that while fullscreen and restores it
+  // on exit — the existing per-frame canvas.clientWidth/Height resize
+  // logic further down already reacts to the resulting size change, no
+  // extra renderer/camera wiring needed here.
+  function onFullscreenChange() {
+    const isFs = document.fullscreenElement === canvasWrap;
+    canvasWrap.style.maxWidth = isFs ? "none" : "720px";
+    canvasWrap.style.height = isFs ? "100vh" : "";
+    canvas.style.height = isFs ? "100%" : "";
+    updateMobileControlsMode();
+  }
+
+  updateMobileControlsMode();
+  touchMediaQuery.addEventListener("change", updateMobileControlsMode);
+  landscapeQuery.addEventListener("change", updateMobileControlsMode);
+  document.addEventListener("fullscreenchange", onFullscreenChange);
 
   wrap.appendChild(canvasWrap);
+  wrap.appendChild(mobileControls.dockedEl);
 
   const cooldownHud = buildCooldownHud();
   wrap.appendChild(cooldownHud.el);
@@ -1061,6 +1448,12 @@ export function mountPractice(el: HTMLElement): void {
   scene.add(dummy.group);
   let dummyNextAttackAt = performance.now() + DUMMY_ATTACK_MIN_MS;
   let dummyDeadUntil = 0;
+  // Dummy has no physics object of its own (it never moves except for
+  // the death-fall animation), so its parry knockback is just a direct
+  // position nudge each frame rather than going through stepPhysics.
+  let dummyKnockbackUntil = 0;
+  let dummyKnockbackDirX = 0;
+  let dummyKnockbackDirZ = 0;
 
   let facingAngle = 0;
   let pitchAngle = 0;
@@ -1083,6 +1476,9 @@ export function mountPractice(el: HTMLElement): void {
   let dashCooldownUntil = 0;
   let dashDirX = 0;
   let dashDirZ = 0;
+  let knockbackUntil = 0;
+  let knockbackDirX = 0;
+  let knockbackDirZ = 0;
   let isDead = false;
   let hasReportedFall = false;
   let hitsLanded = 0;
@@ -1107,18 +1503,58 @@ export function mountPractice(el: HTMLElement): void {
   // Checks `attacker`'s currently-active swing against `target`'s known
   // position — the same geometry the real match's server-side
   // _check_hit uses, just resolved locally since there's no server here.
-  function resolveHit(attacker: typeof rig, target: typeof rig): boolean {
-    if (!attacker.isActiveSwing || attacker.hasHitThisSwing) return false;
+  // Mirrors games/luba/api/app/main.py's server-side hit resolution: only
+  // the ATTACKER's blade needs to have geometrically reached the target
+  // this frame — the parry-vs-hit decision then turns on whether the
+  // TARGET was *also* engaged (isActiveSwing, or still within its own
+  // PARRY_GRACE_MS grace window), not on the target's own blade having
+  // independently reached the attacker on this exact same frame. That
+  // symmetric requirement was the original bug: it shrank the parry
+  // window to well under one frame, since it demanded two independent
+  // sweeps land in the same 16ms tick rather than just "both mid-swing
+  // around the same time."
+  //
+  // Headshot kill — no server here, so the push direction (attacker to
+  // target, plus upward bias) is computed locally instead of arriving on
+  // the death broadcast, but otherwise identical to the real match's
+  // triggerDecapitation.
+  function triggerDecapitation(targetRig: typeof rig, attackerX: number, attackerZ: number, color: string): void {
+    const headPos = getHeadWorldPosition(targetRig);
+    hideHead(targetRig);
+    const dx = targetRig.group.position.x - attackerX;
+    const dz = targetRig.group.position.z - attackerZ;
+    const dist = Math.hypot(dx, dz) || 1;
+    bloodEffects.push(spawnFlyingHead(scene, headPos.x, headPos.y, headPos.z, dx / dist, 1.0, dz / dist, color));
+    bloodEffects.push(
+      spawnGoreFountain(scene, targetRig.group.position.x, targetRig.group.position.y + NECK_Y, targetRig.group.position.z),
+    );
+  }
+
+  interface AttackResult {
+    outcome: "hit" | "parry";
+    headshot: boolean;
+  }
+
+  function resolveAttack(attacker: typeof rig, target: typeof rig, now: number): AttackResult | null {
+    if (!attacker.isActiveSwing || attacker.hasHitThisSwing) return null;
     const points = getSwordWorldSamplePoints(attacker);
     const targetPos = target.group.position;
-    const landed = points.some((p) => {
+    const landedPoint = points.find((p) => {
       const dx = p.x - targetPos.x;
       const dz = p.z - targetPos.z;
       return Math.hypot(dx, dz) <= PRACTICE_HIT_RADIUS && p.y >= targetPos.y && p.y <= targetPos.y + PLAYER_HEIGHT + 0.2;
     });
-    if (!landed) return false;
+    if (!landedPoint) return null;
     attacker.hasHitThisSwing = true;
-    return true;
+    // Same HEAD_Y_MIN band as main.py's own — only decides which death
+    // animation plays, not whether the hit landed at all.
+    const headshot = landedPoint.y >= targetPos.y + HEAD_Y_MIN;
+    const targetEngaged = target.isActiveSwing || now < target.activeSwingUntil;
+    if (targetEngaged && !target.hasHitThisSwing) {
+      target.hasHitThisSwing = true;
+      return { outcome: "parry", headshot: false };
+    }
+    return { outcome: "hit", headshot };
   }
 
   function frame(now: number): void {
@@ -1129,7 +1565,11 @@ export function mountPractice(el: HTMLElement): void {
     const touch = mobileControls.read();
     const inputForward = kb.inputForward + touch.inputForward;
     const inputStrafe = kb.inputStrafe + touch.inputStrafe;
-    const { turn, pitchTurn, mouseTurnDelta, mousePitchDelta } = kb;
+    const { turn, pitchTurn } = kb;
+    // Additive with the swipe-to-look deltas, same reasoning as
+    // inputForward/inputStrafe above.
+    const mouseTurnDelta = kb.mouseTurnDelta + touch.turnDelta;
+    const mousePitchDelta = kb.mousePitchDelta + touch.pitchDelta;
     const jump = kb.jump || touch.jump;
     const attack = kb.attack || touch.attack;
     const dash = kb.dash || touch.dash;
@@ -1177,8 +1617,36 @@ export function mountPractice(el: HTMLElement): void {
       isMoving = true;
     }
 
+    // Parry knockback overrides movement even though the player is also
+    // stunned right now — the stun blocks *acting*, not being physically
+    // thrown back.
+    const isKnockedBack = now < knockbackUntil;
+    if (isKnockedBack) {
+      moveX = knockbackDirX;
+      moveZ = knockbackDirZ;
+      isMoving = true;
+    }
+
     if (!isDead) {
-      stepPhysics(physics, { moveX, moveZ, jump: playerStunned ? false : jump, speed: isDashing ? DASH_SPEED : undefined }, blocks, dt);
+      stepPhysics(
+        physics,
+        {
+          moveX,
+          moveZ,
+          jump: playerStunned ? false : jump,
+          speed: isDashing ? DASH_SPEED : isKnockedBack ? PARRY_KNOCKBACK_SPEED : undefined,
+        },
+        blocks,
+        dt,
+      );
+    }
+
+    // Dummy has no physics object — its own knockback is a direct
+    // position nudge, skipped once it's mid-death-fall (shouldn't slide
+    // around while collapsing).
+    if (now < dummyKnockbackUntil && !dummy.isDead) {
+      dummy.group.position.x += dummyKnockbackDirX * PARRY_KNOCKBACK_SPEED * dt;
+      dummy.group.position.z += dummyKnockbackDirZ * PARRY_KNOCKBACK_SPEED * dt;
     }
 
     if (!isDead && !hasReportedFall && physics.y < FALL_DEATH_Y) {
@@ -1204,10 +1672,15 @@ export function mountPractice(el: HTMLElement): void {
     } else if (smoke && now < smokeCooldownUntil) {
       status.textContent = "Smoke skill still on cooldown…";
     }
+    const smokeFrac = Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS);
+    const dashFrac = Math.max(0, (dashCooldownUntil - now) / DASH_COOLDOWN_MS);
     cooldownHud.update(
       rig.comboState === "cooldown" ? Math.max(0, 1 - (now - rig.stateEnteredAt) / ATTACK_COOLDOWN_MS) : 0,
-      Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS),
+      smokeFrac,
+      dashFrac,
     );
+    smokeIcon.update(smokeFrac, SMOKE_COOLDOWN_MS);
+    dashIcon.update(dashFrac, DASH_COOLDOWN_MS);
 
     if (isDead) updateDeathFall(rig, now);
     else updatePlayerVisual(rig, now, isMoving, dt);
@@ -1215,8 +1688,17 @@ export function mountPractice(el: HTMLElement): void {
     // Dummy: always swings on its own timer (not conditional on the
     // player's range/facing) so parry timing can be drilled reliably,
     // per earlier playtesting feedback ("make the dummy always slashing
-    // so I can test the parry").
+    // so I can test the parry"). Faces the player while idle — without
+    // this it never turned at all (stuck at its spawn orientation), so
+    // its swing arc almost never actually reached wherever the player
+    // was standing, making a genuine simultaneous "both landed" parry
+    // effectively impossible regardless of timing, not just hard. Facing
+    // is only updated while idle, then held fixed for the whole swing —
+    // it commits to a direction once it starts, like a real attack.
     const dummyDead = now < dummyDeadUntil;
+    if (dummy.comboState === "idle") {
+      dummy.group.rotation.y = Math.atan2(physics.x - dummy.group.position.x, physics.z - dummy.group.position.z);
+    }
     if (!dummyDead && now >= dummyNextAttackAt && dummy.comboState === "idle") {
       tryAttack(dummy, now);
       dummyNextAttackAt = now + DUMMY_ATTACK_MIN_MS + Math.random() * (DUMMY_ATTACK_MAX_MS - DUMMY_ATTACK_MIN_MS);
@@ -1225,30 +1707,53 @@ export function mountPractice(el: HTMLElement): void {
     else updatePlayerVisual(dummy, now, false, dt);
 
     if (!isDead && !dummyDead) {
-      const playerLanded = resolveHit(rig, dummy);
-      const dummyLanded = resolveHit(dummy, rig);
-      if (playerLanded && dummyLanded) {
-        // Both swords land on the same frame — a clash, not a double hit.
+      // Both calls run regardless of which one resolves first — the
+      // second call's own hasHitThisSwing guard (set by either a hit or
+      // a parry) naturally prevents a double resolution if the first one
+      // already decided it was a parry.
+      const playerResult = resolveAttack(rig, dummy, now);
+      const dummyResult = resolveAttack(dummy, rig, now);
+      if (playerResult?.outcome === "parry" || dummyResult?.outcome === "parry") {
         interruptToCooldown(rig, now);
         interruptToCooldown(dummy, now);
+        playerStunnedUntil = now + PARRY_STUN_MS;
+        // Push direction: away from each other, along the line between
+        // their two current positions.
+        const dx = dummy.group.position.x - physics.x;
+        const dz = dummy.group.position.z - physics.z;
+        const dist = Math.hypot(dx, dz) || 1;
+        knockbackUntil = now + PARRY_KNOCKBACK_DURATION_MS;
+        knockbackDirX = -dx / dist;
+        knockbackDirZ = -dz / dist;
+        dummyKnockbackUntil = now + PARRY_KNOCKBACK_DURATION_MS;
+        dummyKnockbackDirX = dx / dist;
+        dummyKnockbackDirZ = dz / dist;
         status.textContent = "Parry! Both swords clashed.";
-      } else if (playerLanded) {
+      } else if (playerResult?.outcome === "hit") {
         hitsLanded++;
         startDeathFall(dummy, now);
-        bloodEffects.push(spawnBloodSpray(scene, dummy.group.position.x, dummy.group.position.y + BLOOD_SPRAY_HEIGHT, dummy.group.position.z));
+        if (playerResult.headshot) {
+          triggerDecapitation(dummy, physics.x, physics.z, "#ef4444");
+        } else {
+          bloodEffects.push(spawnBloodSpray(scene, dummy.group.position.x, dummy.group.position.y + BLOOD_SPRAY_HEIGHT, dummy.group.position.z));
+        }
         dummyDeadUntil = now + PRACTICE_RESPAWN_MS;
-        status.textContent = "Hit!";
+        status.textContent = playerResult.headshot ? "Headshot!" : "Hit!";
         setTimeout(() => {
           resetAfterRespawn(dummy, performance.now());
           dummy.group.position.set(DUMMY_POS.x, DUMMY_POS.y, DUMMY_POS.z);
           dummyNextAttackAt = performance.now() + DUMMY_ATTACK_MIN_MS;
         }, PRACTICE_RESPAWN_MS);
-      } else if (dummyLanded) {
+      } else if (dummyResult?.outcome === "hit") {
         timesHit++;
         isDead = true;
         startDeathFall(rig, now);
-        bloodEffects.push(spawnBloodSpray(scene, physics.x, physics.y + BLOOD_SPRAY_HEIGHT, physics.z));
-        status.textContent = "You got hit! Respawning…";
+        if (dummyResult.headshot) {
+          triggerDecapitation(rig, dummy.group.position.x, dummy.group.position.z, "#f59e0b");
+        } else {
+          bloodEffects.push(spawnBloodSpray(scene, physics.x, physics.y + BLOOD_SPRAY_HEIGHT, physics.z));
+        }
+        status.textContent = dummyResult.headshot ? "You got headshot! Respawning…" : "You got hit! Respawning…";
         setTimeout(() => respawnPlayer(performance.now()), PRACTICE_RESPAWN_MS);
       }
     }
@@ -1301,7 +1806,11 @@ export function mountPractice(el: HTMLElement): void {
     cancelAnimationFrame(rafId);
     input.dispose();
     mobileControls.dispose();
-    touchMediaQuery.removeEventListener("change", updateMobileControlsVisibility);
+    fullscreenButton.dispose();
+    touchMediaQuery.removeEventListener("change", updateMobileControlsMode);
+    landscapeQuery.removeEventListener("change", updateMobileControlsMode);
+    document.removeEventListener("fullscreenchange", onFullscreenChange);
+    if (document.fullscreenElement === canvasWrap) document.exitFullscreen().catch(() => {});
     disposeRig(rig);
     disposeRig(dummy);
     for (const effect of bloodEffects) effect.update(1000);

@@ -19,12 +19,25 @@ import * as THREE from "three";
 // slash 2 fires, or the window times out unused — does the real cooldown
 // start: the first two swings have no delay between them at all, the
 // cost is paid once, after the combo, not per swing.
-const SLASH1_WINDUP_MS = 130;
-const SLASH1_CUT_MS = 200;
-const SLASH2_DURATION_MS = 220;
+// Speeds mirrored server-side by games/luba/api/app/main.py's
+// SLASH1_TOTAL_S/SLASH2_DURATION_S (a combo-gating backstop, not the
+// visual animation) — keep both in sync.
+const SLASH1_WINDUP_MS = 90;
+const SLASH1_CUT_MS = 140;
+const SLASH2_DURATION_MS = 150;
 const COMBO_WINDOW_MS = 3000;
 export const ATTACK_COOLDOWN_MS = 1000;
 const COOLDOWN_EASE_MS = 200; // arm relaxing back to neutral at the start of cooldown
+// A parry needs two swings to clash "at the same time" — but requiring
+// literally the same simulation frame (or, server-side, the same
+// message) made that window well under 20ms wide, far tighter than human
+// timing precision, so a clash was effectively never reachable on
+// purpose even once the underlying geometry was correct. This grace
+// period is how long a swing stays "parry-eligible" *after* its actual
+// cutting motion ends — the caller checks isActiveSwing OR
+// (now < activeSwingUntil), not isActiveSwing alone. Mirrored server-side
+// by games/luba/api/app/main.py's PARRY_GRACE_S — keep both in sync.
+export const PARRY_GRACE_MS = 150;
 
 // Diagonal poses (rotation.x = forward/back lift, rotation.z = side-to-
 // side twist) — combining both is what makes the arc read as a diagonal
@@ -103,6 +116,15 @@ const BOB_EASE_RATE = 10; // how fast walking/idle blend, not a duration
 const RUN_ARM_TRAIL = 1.1;
 const RUN_ARM_OSC = 0.15; // small residual life on top of the trail, not a real swing
 const RUN_BODY_LEAN = 0.28;
+
+// Sword-hand cooldown tint — the right arm reddens while comboState is
+// 'cooldown' (including a parry's forced cooldown via interruptToCooldown)
+// and eases back to the player's normal color once it ends. "A bit red",
+// not fully red — COOLDOWN_TINT_STRENGTH caps how far the blend goes even
+// at full tint alpha.
+const COOLDOWN_TINT_COLOR = new THREE.Color("#ff3b30");
+const COOLDOWN_TINT_STRENGTH = 0.45;
+const COOLDOWN_TINT_EASE_RATE = 6;
 
 function limb(w, h, d, x, y, color) {
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color }));
@@ -219,6 +241,10 @@ export function buildPlayerRig(color) {
     // most one resolved hit, reset each time a new swing actually starts
     // (see tryAttack).
     isActiveSwing: false,
+    // Stays true a little *after* isActiveSwing itself goes false too —
+    // see PARRY_GRACE_MS below for why a parry needs this, not just the
+    // instantaneous flag.
+    activeSwingUntil: -Infinity,
     hasHitThisSwing: false,
     // State machine: 'idle' -> 'slash1' -> 'holdBottom' -> (free
     // second swing) 'slash2' -> 'cooldown' -> back to 'idle'. A
@@ -232,6 +258,12 @@ export function buildPlayerRig(color) {
     walkBlend: 0,
     isDead: false,
     deathFallStartAt: -Infinity,
+    // Base color to blend from/back to for the cooldown tint below — a
+    // clone (not the same Color instance material.color already uses),
+    // since material.color itself gets overwritten every frame once
+    // tinting starts.
+    rightArmBaseColor: rightArm.material.color.clone(),
+    cooldownTintAlpha: 0,
   };
 }
 
@@ -310,6 +342,7 @@ export function updatePlayerVisual(rig, nowMs, isMoving, dt) {
   // or any other state. Consumed by getSwordWorldSamplePoints' caller to
   // gate when a swept-hit check is even meaningful.
   rig.isActiveSwing = (rig.comboState === "slash1" && elapsed >= SLASH1_WINDUP_MS) || rig.comboState === "slash2";
+  if (rig.isActiveSwing) rig.activeSwingUntil = nowMs + PARRY_GRACE_MS;
   if (rig.comboState === "slash1") {
     if (elapsed < SLASH1_WINDUP_MS) {
       // Wind-up: rises from neutral up to the high ready pose — no body
@@ -380,6 +413,10 @@ export function updatePlayerVisual(rig, nowMs, isMoving, dt) {
       rig.stateEnteredAt = nowMs;
     }
   }
+
+  const tintTarget = rig.comboState === "cooldown" ? 1 : 0;
+  rig.cooldownTintAlpha += (tintTarget - rig.cooldownTintAlpha) * Math.min(1, dt * COOLDOWN_TINT_EASE_RATE);
+  rig.rightArm.material.color.copy(rig.rightArmBaseColor).lerp(COOLDOWN_TINT_COLOR, rig.cooldownTintAlpha * COOLDOWN_TINT_STRENGTH);
 }
 
 // Tips the whole rig over onto its back and lets it lie flat on the
@@ -431,6 +468,10 @@ export function resetAfterRespawn(rig, nowMs) {
   rig.stateEnteredAt = nowMs;
   rig.walkPhase = 0;
   rig.walkBlend = 0;
+  rig.activeSwingUntil = -Infinity;
+  rig.head.visible = true; // undoes hideHead(), in case the last death was a headshot
+  rig.cooldownTintAlpha = 0;
+  rig.rightArm.material.color.copy(rig.rightArmBaseColor);
 }
 
 // Real swept-blade positions in world space — sampled at the blade's
@@ -451,6 +492,22 @@ export function getSwordWorldSamplePoints(rig) {
   // Negative Y — the blade's geometry now extends toward local -Y (see
   // where bladeGeometry is built above), not +Y.
   return [0.5, 1.0].map((frac) => rig.blade.localToWorld(new THREE.Vector3(0, -BLADE_LENGTH * frac, 0)));
+}
+
+// Real world-space position of the head, for the decapitation effect —
+// read *before* hiding the head (see hideHead), so the detached flying
+// head spawns exactly where the real one currently is, not some
+// approximation.
+export function getHeadWorldPosition(rig) {
+  rig.group.updateMatrixWorld(true);
+  return rig.head.getWorldPosition(new THREE.Vector3());
+}
+
+// Hides the rig's own head mesh (the game.js/game.ts caller spawns a
+// separate detached flying head in its place via effects.js's
+// spawnFlyingHead) — resetAfterRespawn is what makes it visible again.
+export function hideHead(rig) {
+  rig.head.visible = false;
 }
 
 export function disposeRig(rig) {

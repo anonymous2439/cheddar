@@ -22,9 +22,11 @@ import {
   resetAfterRespawn,
   updateShieldVisual,
   ATTACK_COOLDOWN_MS,
+  getHeadWorldPosition,
+  hideHead,
 } from "./player.js";
 import { connectLubaSocket, NETWORK_TICK_MS } from "./net/lubaSocket.js";
-import { spawnBloodSpray, spawnDashEffect, spawnSmokeCloud } from "./effects.js";
+import { spawnBloodSpray, spawnDashEffect, spawnSmokeCloud, spawnFlyingHead, spawnGoreFountain } from "./effects.js";
 
 const CAMERA_DISTANCE = 2.7; // zoomed in further still (was 3.4, 4.3, originally 5.5) — closer, more readable combat framing
 const CAMERA_DAMPING = 0.18;
@@ -45,6 +47,14 @@ const PITCH_MIN = -1.2;
 const PITCH_MAX = 1.2;
 const SPAWN = { x: 0, y: 6, z: 8 }; // dropped in from above so landing on the floor is visible/obvious
 const PARRY_STUN_MS = 900; // must match games/luba/api/app/main.py's PARRY_STUN_S
+// Knockback on a parry — a short, fixed-speed movement override in the
+// pushed direction, the exact same mechanism the dash already uses (see
+// its own comment below), just triggered by an incoming parry event
+// instead of a keypress. Applied even though the player is also stunned
+// during this window (see the frame loop) — the stun blocks *acting*
+// (attacking/dashing), not being physically thrown back.
+const PARRY_KNOCKBACK_SPEED = 9;
+const PARRY_KNOCKBACK_DURATION_MS = 220;
 // Dash: direction depends on current movement input at the moment it's
 // pressed — whichever way you're currently moving (already
 // facing-relative, same as normal strafing), or straight backward
@@ -337,8 +347,10 @@ function buildCooldownHud() {
 
   const sword = makeBar("⚔", "Sword: Ready");
   const smoke = makeBar("💨", "Smoke: Ready");
+  const dash = makeBar("💫", "Dash: Ready");
   wrap.appendChild(sword.box);
   wrap.appendChild(smoke.box);
+  wrap.appendChild(dash.box);
 
   // frac: 0 = ready, 1 = just used — bars fill on use and drain to empty.
   function updateBar(bar, name, frac, totalMs) {
@@ -349,9 +361,73 @@ function buildCooldownHud() {
 
   return {
     el: wrap,
-    update(swordFrac, smokeFrac) {
+    update(swordFrac, smokeFrac, dashFrac) {
       updateBar(sword, "⚔ Sword", swordFrac, ATTACK_COOLDOWN_MS);
       updateBar(smoke, "💨 Smoke", smokeFrac, SMOKE_COOLDOWN_MS);
+      updateBar(dash, "💫 Dash", dashFrac, DASH_COOLDOWN_MS);
+    },
+  };
+}
+
+// A small circular badge overlaid directly on the canvas showing a
+// skill's cooldown as a clock-style radial wipe — a dark wedge that
+// starts full the instant the skill is used and shrinks away as the
+// cooldown drains, on top of the existing below-canvas bars (those stay
+// too; this is an *additional*, more glanceable in-view indicator since
+// the bars sit outside the player's actual view of the action).
+// rightOffsetPx positions multiple icons side by side in the same corner
+// (see the dash + smoke instances below — dash sits just to smoke's left).
+function buildSkillCanvasIcon(emoji, rightOffsetPx) {
+  const el = document.createElement("div");
+  el.style.position = "absolute";
+  el.style.top = "8px";
+  el.style.right = `${rightOffsetPx}px`;
+  el.style.width = "34px";
+  el.style.height = "34px";
+  el.style.borderRadius = "50%";
+  el.style.background = "rgba(24,24,27,0.8)";
+  el.style.border = "2px solid #52525b";
+  el.style.pointerEvents = "none";
+  el.style.userSelect = "none";
+  el.style.overflow = "hidden";
+
+  const emojiEl = document.createElement("div");
+  emojiEl.style.position = "absolute";
+  emojiEl.style.inset = "0";
+  emojiEl.style.display = "flex";
+  emojiEl.style.alignItems = "center";
+  emojiEl.style.justifyContent = "center";
+  emojiEl.style.fontSize = "15px";
+  emojiEl.textContent = emoji;
+  el.appendChild(emojiEl);
+
+  const wipe = document.createElement("div");
+  wipe.style.position = "absolute";
+  wipe.style.inset = "0";
+  wipe.style.borderRadius = "50%";
+  wipe.style.background = "conic-gradient(rgba(0,0,0,0.78) 0deg, transparent 0deg)";
+  el.appendChild(wipe);
+
+  const countEl = document.createElement("div");
+  countEl.style.position = "absolute";
+  countEl.style.inset = "0";
+  countEl.style.display = "flex";
+  countEl.style.alignItems = "center";
+  countEl.style.justifyContent = "center";
+  countEl.style.fontSize = "11px";
+  countEl.style.fontWeight = "700";
+  countEl.style.color = "#ffffff";
+  countEl.style.textShadow = "0 1px 2px rgba(0,0,0,0.85)";
+  el.appendChild(countEl);
+
+  return {
+    el,
+    // frac: 0 = ready, 1 = just used — same convention as buildCooldownHud.
+    update(frac, totalMs) {
+      const deg = Math.max(0, Math.min(1, frac)) * 360;
+      wipe.style.background = `conic-gradient(rgba(0,0,0,0.78) ${deg}deg, transparent ${deg}deg)`;
+      const remainingS = (frac * totalMs) / 1000;
+      countEl.textContent = frac > 0 ? Math.ceil(remainingS).toString() : "";
     },
   };
 }
@@ -419,6 +495,11 @@ function mount(el, ctx) {
   standingsEl.style.borderRadius = "4px";
   standingsEl.style.pointerEvents = "none"; // never intercepts clicks meant for the canvas
   canvasWrap.appendChild(standingsEl);
+
+  const smokeIcon = buildSkillCanvasIcon("💨", 8);
+  canvasWrap.appendChild(smokeIcon.el);
+  const dashIcon = buildSkillCanvasIcon("💫", 48);
+  canvasWrap.appendChild(dashIcon.el);
 
   wrap.appendChild(canvasWrap);
 
@@ -511,6 +592,9 @@ function mount(el, ctx) {
   let dashCooldownUntil = 0;
   let dashDirX = 0;
   let dashDirZ = 0;
+  let knockbackUntil = 0;
+  let knockbackDirX = 0;
+  let knockbackDirZ = 0;
   let isDead = false;
   let hasReportedFall = false;
   let matchEndsAt = 0; // performance.now()-space — set from roster's matchEndsInMs
@@ -523,6 +607,25 @@ function mount(el, ctx) {
   // close enough that the spray reads as coming from the body, not the
   // feet or floor.
   const BLOOD_SPRAY_HEIGHT = 1.0;
+  // Roughly where the head's bottom edge sits (matches player.js's
+  // LEG_H+TORSO_H proportions, and main.py's HEAD_Y_MIN) — used as the
+  // neck stump position for the gore fountain, not the exact geometry
+  // (getHeadWorldPosition already gives the real head position for the
+  // flying head itself).
+  const NECK_Y = 1.3;
+
+  // Headshot kill — hides the real head mesh and spawns a detached,
+  // physics-lite flying head (launched in the direction the server
+  // computed from attacker/target positions) plus a much bigger blood
+  // fountain at the neck, instead of the normal blood spray.
+  function triggerDecapitation(targetRig, msg, color) {
+    const headPos = getHeadWorldPosition(targetRig);
+    hideHead(targetRig);
+    bloodEffects.push(spawnFlyingHead(scene, headPos.x, headPos.y, headPos.z, msg.headPushX, msg.headPushY, msg.headPushZ, color));
+    bloodEffects.push(
+      spawnGoreFountain(scene, targetRig.group.position.x, targetRig.group.position.y + NECK_Y, targetRig.group.position.z),
+    );
+  }
 
   function onDeathMessage(msg) {
     const now = performance.now();
@@ -531,14 +634,18 @@ function mount(el, ctx) {
       startDeathFall(rig, now);
       status.textContent = msg.cause === "fall" ? "You fell! Respawning…" : "You were struck down! Respawning…";
       if (msg.cause === "hit") {
-        bloodEffects.push(spawnBloodSpray(scene, physics.x, physics.y + BLOOD_SPRAY_HEIGHT, physics.z));
+        if (msg.isHeadshot) triggerDecapitation(rig, msg, "#f59e0b");
+        else bloodEffects.push(spawnBloodSpray(scene, physics.x, physics.y + BLOOD_SPRAY_HEIGHT, physics.z));
       }
     } else {
       const peer = peers.get(msg.userId);
       if (peer) startDeathFall(peer.rig, now);
       if (msg.cause === "hit" && peer) {
-        const pos = peer.rig.group.position;
-        bloodEffects.push(spawnBloodSpray(scene, pos.x, pos.y + BLOOD_SPRAY_HEIGHT, pos.z));
+        if (msg.isHeadshot) triggerDecapitation(peer.rig, msg, "#38bdf8");
+        else {
+          const pos = peer.rig.group.position;
+          bloodEffects.push(spawnBloodSpray(scene, pos.x, pos.y + BLOOD_SPRAY_HEIGHT, pos.z));
+        }
       }
       if (msg.attackerId === ctx.selfId) {
         selfKills = msg.attackerKills;
@@ -579,10 +686,14 @@ function mount(el, ctx) {
   }
 
   function onParryMessage(msg) {
-    if (msg.player1Id === ctx.selfId || msg.player2Id === ctx.selfId) {
+    const isPlayer1 = msg.player1Id === ctx.selfId;
+    if (isPlayer1 || msg.player2Id === ctx.selfId) {
       const now = performance.now();
       playerStunnedUntil = now + PARRY_STUN_MS;
       interruptToCooldown(rig, now);
+      knockbackUntil = now + PARRY_KNOCKBACK_DURATION_MS;
+      knockbackDirX = isPlayer1 ? msg.player1PushX : msg.player2PushX;
+      knockbackDirZ = isPlayer1 ? msg.player1PushZ : msg.player2PushZ;
       status.textContent = "Parry! Both swords clashed — stunned for a moment.";
     }
   }
@@ -658,11 +769,24 @@ function mount(el, ctx) {
           ? `Time's up! Tied at ${msg.winnerKills} kills.`
           : `Time's up! ${winnerName} wins with ${msg.winnerKills} kill${msg.winnerKills === 1 ? "" : "s"}!`;
         matchTimeEl.textContent = "Match over";
-        // Reports the match as finished to Cheddar's generic lobby
-        // state — the same bridge method used for every other game — so
-        // the leader's "Back to Lobby" button appears. Idempotent
-        // server-side, so every connected client calling this is fine.
-        if (window.CheddarHost && window.CheddarHost.finishGame) window.CheddarHost.finishGame();
+        // ctx.onMatchOver — optional, for a match that was never backed by
+        // a real Cheddar lobby row (see glophimon's own Luba-lobby feature,
+        // which mints its own synthetic lobby_id and calls mount() this
+        // way). When provided, it replaces the usual finish call entirely
+        // rather than running alongside it — there's no real lobby for
+        // /lobbies/{id}/finish to act on, so calling it too would just be a
+        // guaranteed-to-fail request. Every other caller (the normal
+        // Cheddar-lobby flow) doesn't pass this, so its own behavior below
+        // is completely unchanged.
+        if (ctx.onMatchOver) {
+          ctx.onMatchOver();
+        } else if (window.CheddarHost && window.CheddarHost.finishGame) {
+          // Reports the match as finished to Cheddar's generic lobby
+          // state — the same bridge method used for every other game — so
+          // the leader's "Back to Lobby" button appears. Idempotent
+          // server-side, so every connected client calling this is fine.
+          window.CheddarHost.finishGame();
+        }
         break;
       }
       case "smoke":
@@ -769,10 +893,26 @@ function mount(el, ctx) {
       isMoving = true; // so the run lean/arm-trail animation applies during a backward dash too
     }
 
+    // Parry knockback overrides movement even though the player is also
+    // stunned right now — the stun blocks *acting* (attacking/dashing
+    // can't be triggered while now < playerStunnedUntil), not being
+    // physically thrown back, which is exactly what this is.
+    const isKnockedBack = now < knockbackUntil;
+    if (isKnockedBack) {
+      moveX = knockbackDirX;
+      moveZ = knockbackDirZ;
+      isMoving = true;
+    }
+
     if (!isDead) {
       stepPhysics(
         physics,
-        { moveX, moveZ, jump: playerStunned ? false : jump, speed: isDashing ? DASH_SPEED : undefined },
+        {
+          moveX,
+          moveZ,
+          jump: playerStunned ? false : jump,
+          speed: isDashing ? DASH_SPEED : isKnockedBack ? PARRY_KNOCKBACK_SPEED : undefined,
+        },
         blocks,
         dt,
       );
@@ -822,10 +962,15 @@ function mount(el, ctx) {
     } else if (smoke) {
       status.textContent = "Smoke skill still on cooldown…";
     }
+    const smokeFrac = Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS);
+    const dashFrac = Math.max(0, (dashCooldownUntil - now) / DASH_COOLDOWN_MS);
     cooldownHud.update(
       rig.comboState === "cooldown" ? Math.max(0, 1 - (now - rig.stateEnteredAt) / ATTACK_COOLDOWN_MS) : 0,
-      Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS),
+      smokeFrac,
+      dashFrac,
     );
+    smokeIcon.update(smokeFrac, SMOKE_COOLDOWN_MS);
+    dashIcon.update(dashFrac, DASH_COOLDOWN_MS);
 
     // Denser than the tick-gated position broadcast below — sent every
     // render frame the swing is actually active, so a fast continuous
@@ -953,6 +1098,8 @@ const DUMMY_ATTACK_MIN_MS = 2200;
 const DUMMY_ATTACK_MAX_MS = 3400;
 const PRACTICE_HIT_RADIUS = 0.5; // matches games/luba/api's HIT_RADIUS
 const PRACTICE_RESPAWN_MS = 1800;
+const HEAD_Y_MIN = 1.3; // matches games/luba/api's HEAD_Y_MIN
+const NECK_Y = 1.3; // neck stump position for the gore fountain — see main mount()'s own comment
 
 // A fully local, non-networked sandbox — no lobby, no WebSocket, just the
 // arena/physics/rig/camera/dash/combat code shared with the real match,
@@ -1001,6 +1148,11 @@ function mountPractice(el) {
   canvas.style.borderRadius = "4px";
   canvasWrap.appendChild(canvas);
 
+  const smokeIcon = buildSkillCanvasIcon("💨", 8);
+  canvasWrap.appendChild(smokeIcon.el);
+  const dashIcon = buildSkillCanvasIcon("💫", 48);
+  canvasWrap.appendChild(dashIcon.el);
+
   wrap.appendChild(canvasWrap);
 
   const cooldownHud = buildCooldownHud();
@@ -1033,6 +1185,12 @@ function mountPractice(el) {
   scene.add(dummy.group);
   let dummyNextAttackAt = performance.now() + DUMMY_ATTACK_MIN_MS;
   let dummyDeadUntil = 0;
+  // Dummy has no physics object of its own (it never moves except for
+  // the death-fall animation), so its parry knockback is just a direct
+  // position nudge each frame rather than going through stepPhysics.
+  let dummyKnockbackUntil = 0;
+  let dummyKnockbackDirX = 0;
+  let dummyKnockbackDirZ = 0;
 
   let facingAngle = 0;
   let pitchAngle = 0;
@@ -1055,6 +1213,9 @@ function mountPractice(el) {
   let dashCooldownUntil = 0;
   let dashDirX = 0;
   let dashDirZ = 0;
+  let knockbackUntil = 0;
+  let knockbackDirX = 0;
+  let knockbackDirZ = 0;
   let isDead = false;
   let hasReportedFall = false;
   let hitsLanded = 0;
@@ -1079,18 +1240,53 @@ function mountPractice(el) {
   // Checks `attacker`'s currently-active swing against `target`'s known
   // position — the same geometry the real match's server-side
   // _check_hit uses, just resolved locally since there's no server here.
-  function resolveHit(attacker, target) {
-    if (!attacker.isActiveSwing || attacker.hasHitThisSwing) return false;
+  // Mirrors games/luba/api/app/main.py's server-side hit resolution: only
+  // the ATTACKER's blade needs to have geometrically reached the target
+  // this frame — the parry-vs-hit decision then turns on whether the
+  // TARGET was *also* engaged (isActiveSwing, or still within its own
+  // PARRY_GRACE_MS grace window), not on the target's own blade having
+  // independently reached the attacker on this exact same frame. That
+  // symmetric requirement was the original bug: it shrank the parry
+  // window to well under one frame, since it demanded two independent
+  // sweeps land in the same 16ms tick rather than just "both mid-swing
+  // around the same time."
+  //
+  // Headshot kill — no server here, so the push direction (attacker to
+  // target, plus upward bias) is computed locally instead of arriving on
+  // the death broadcast, but otherwise identical to the real match's
+  // triggerDecapitation.
+  function triggerDecapitation(targetRig, attackerX, attackerZ, color) {
+    const headPos = getHeadWorldPosition(targetRig);
+    hideHead(targetRig);
+    const dx = targetRig.group.position.x - attackerX;
+    const dz = targetRig.group.position.z - attackerZ;
+    const dist = Math.hypot(dx, dz) || 1;
+    bloodEffects.push(spawnFlyingHead(scene, headPos.x, headPos.y, headPos.z, dx / dist, 1.0, dz / dist, color));
+    bloodEffects.push(
+      spawnGoreFountain(scene, targetRig.group.position.x, targetRig.group.position.y + NECK_Y, targetRig.group.position.z),
+    );
+  }
+
+  function resolveAttack(attacker, target, now) {
+    if (!attacker.isActiveSwing || attacker.hasHitThisSwing) return null;
     const points = getSwordWorldSamplePoints(attacker);
     const targetPos = target.group.position;
-    const landed = points.some((p) => {
+    const landedPoint = points.find((p) => {
       const dx = p.x - targetPos.x;
       const dz = p.z - targetPos.z;
       return Math.hypot(dx, dz) <= PRACTICE_HIT_RADIUS && p.y >= targetPos.y && p.y <= targetPos.y + PLAYER_HEIGHT + 0.2;
     });
-    if (!landed) return false;
+    if (!landedPoint) return null;
     attacker.hasHitThisSwing = true;
-    return true;
+    // Same HEAD_Y_MIN band as main.py's own — only decides which death
+    // animation plays, not whether the hit landed at all.
+    const headshot = landedPoint.y >= targetPos.y + HEAD_Y_MIN;
+    const targetEngaged = target.isActiveSwing || now < target.activeSwingUntil;
+    if (targetEngaged && !target.hasHitThisSwing) {
+      target.hasHitThisSwing = true;
+      return { outcome: "parry", headshot: false };
+    }
+    return { outcome: "hit", headshot };
   }
 
   function frame(now) {
@@ -1141,8 +1337,36 @@ function mountPractice(el) {
       isMoving = true;
     }
 
+    // Parry knockback overrides movement even though the player is also
+    // stunned right now — the stun blocks *acting*, not being physically
+    // thrown back.
+    const isKnockedBack = now < knockbackUntil;
+    if (isKnockedBack) {
+      moveX = knockbackDirX;
+      moveZ = knockbackDirZ;
+      isMoving = true;
+    }
+
     if (!isDead) {
-      stepPhysics(physics, { moveX, moveZ, jump: playerStunned ? false : jump, speed: isDashing ? DASH_SPEED : undefined }, blocks, dt);
+      stepPhysics(
+        physics,
+        {
+          moveX,
+          moveZ,
+          jump: playerStunned ? false : jump,
+          speed: isDashing ? DASH_SPEED : isKnockedBack ? PARRY_KNOCKBACK_SPEED : undefined,
+        },
+        blocks,
+        dt,
+      );
+    }
+
+    // Dummy has no physics object — its own knockback is a direct
+    // position nudge, skipped once it's mid-death-fall (shouldn't slide
+    // around while collapsing).
+    if (now < dummyKnockbackUntil && !dummy.isDead) {
+      dummy.group.position.x += dummyKnockbackDirX * PARRY_KNOCKBACK_SPEED * dt;
+      dummy.group.position.z += dummyKnockbackDirZ * PARRY_KNOCKBACK_SPEED * dt;
     }
 
     if (!isDead && !hasReportedFall && physics.y < FALL_DEATH_Y) {
@@ -1168,10 +1392,15 @@ function mountPractice(el) {
     } else if (smoke && now < smokeCooldownUntil) {
       status.textContent = "Smoke skill still on cooldown…";
     }
+    const smokeFrac = Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS);
+    const dashFrac = Math.max(0, (dashCooldownUntil - now) / DASH_COOLDOWN_MS);
     cooldownHud.update(
       rig.comboState === "cooldown" ? Math.max(0, 1 - (now - rig.stateEnteredAt) / ATTACK_COOLDOWN_MS) : 0,
-      Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS),
+      smokeFrac,
+      dashFrac,
     );
+    smokeIcon.update(smokeFrac, SMOKE_COOLDOWN_MS);
+    dashIcon.update(dashFrac, DASH_COOLDOWN_MS);
 
     if (isDead) updateDeathFall(rig, now);
     else updatePlayerVisual(rig, now, isMoving, dt);
@@ -1179,8 +1408,17 @@ function mountPractice(el) {
     // Dummy: always swings on its own timer (not conditional on the
     // player's range/facing) so parry timing can be drilled reliably,
     // per earlier playtesting feedback ("make the dummy always slashing
-    // so I can test the parry").
+    // so I can test the parry"). Faces the player while idle — without
+    // this it never turned at all (stuck at its spawn orientation), so
+    // its swing arc almost never actually reached wherever the player
+    // was standing, making a genuine simultaneous "both landed" parry
+    // effectively impossible regardless of timing, not just hard. Facing
+    // is only updated while idle, then held fixed for the whole swing —
+    // it commits to a direction once it starts, like a real attack.
     const dummyDead = now < dummyDeadUntil;
+    if (dummy.comboState === "idle") {
+      dummy.group.rotation.y = Math.atan2(physics.x - dummy.group.position.x, physics.z - dummy.group.position.z);
+    }
     if (!dummyDead && now >= dummyNextAttackAt && dummy.comboState === "idle") {
       tryAttack(dummy, now);
       dummyNextAttackAt = now + DUMMY_ATTACK_MIN_MS + Math.random() * (DUMMY_ATTACK_MAX_MS - DUMMY_ATTACK_MIN_MS);
@@ -1189,29 +1427,53 @@ function mountPractice(el) {
     else updatePlayerVisual(dummy, now, false, dt);
 
     if (!isDead && !dummyDead) {
-      const playerLanded = resolveHit(rig, dummy);
-      const dummyLanded = resolveHit(dummy, rig);
-      if (playerLanded && dummyLanded) {
+      // Both calls run regardless of which one resolves first — the
+      // second call's own hasHitThisSwing guard (set by either a hit or
+      // a parry) naturally prevents a double resolution if the first one
+      // already decided it was a parry.
+      const playerResult = resolveAttack(rig, dummy, now);
+      const dummyResult = resolveAttack(dummy, rig, now);
+      if (playerResult?.outcome === "parry" || dummyResult?.outcome === "parry") {
         interruptToCooldown(rig, now);
         interruptToCooldown(dummy, now);
+        playerStunnedUntil = now + PARRY_STUN_MS;
+        // Push direction: away from each other, along the line between
+        // their two current positions.
+        const dx = dummy.group.position.x - physics.x;
+        const dz = dummy.group.position.z - physics.z;
+        const dist = Math.hypot(dx, dz) || 1;
+        knockbackUntil = now + PARRY_KNOCKBACK_DURATION_MS;
+        knockbackDirX = -dx / dist;
+        knockbackDirZ = -dz / dist;
+        dummyKnockbackUntil = now + PARRY_KNOCKBACK_DURATION_MS;
+        dummyKnockbackDirX = dx / dist;
+        dummyKnockbackDirZ = dz / dist;
         status.textContent = "Parry! Both swords clashed.";
-      } else if (playerLanded) {
+      } else if (playerResult?.outcome === "hit") {
         hitsLanded++;
         startDeathFall(dummy, now);
-        bloodEffects.push(spawnBloodSpray(scene, dummy.group.position.x, dummy.group.position.y + BLOOD_SPRAY_HEIGHT, dummy.group.position.z));
+        if (playerResult.headshot) {
+          triggerDecapitation(dummy, physics.x, physics.z, "#ef4444");
+        } else {
+          bloodEffects.push(spawnBloodSpray(scene, dummy.group.position.x, dummy.group.position.y + BLOOD_SPRAY_HEIGHT, dummy.group.position.z));
+        }
         dummyDeadUntil = now + PRACTICE_RESPAWN_MS;
-        status.textContent = "Hit!";
+        status.textContent = playerResult.headshot ? "Headshot!" : "Hit!";
         setTimeout(() => {
           resetAfterRespawn(dummy, performance.now());
           dummy.group.position.set(DUMMY_POS.x, DUMMY_POS.y, DUMMY_POS.z);
           dummyNextAttackAt = performance.now() + DUMMY_ATTACK_MIN_MS;
         }, PRACTICE_RESPAWN_MS);
-      } else if (dummyLanded) {
+      } else if (dummyResult?.outcome === "hit") {
         timesHit++;
         isDead = true;
         startDeathFall(rig, now);
-        bloodEffects.push(spawnBloodSpray(scene, physics.x, physics.y + BLOOD_SPRAY_HEIGHT, physics.z));
-        status.textContent = "You got hit! Respawning…";
+        if (dummyResult.headshot) {
+          triggerDecapitation(rig, dummy.group.position.x, dummy.group.position.z, "#f59e0b");
+        } else {
+          bloodEffects.push(spawnBloodSpray(scene, physics.x, physics.y + BLOOD_SPRAY_HEIGHT, physics.z));
+        }
+        status.textContent = dummyResult.headshot ? "You got headshot! Respawning…" : "You got hit! Respawning…";
         setTimeout(() => respawnPlayer(performance.now()), PRACTICE_RESPAWN_MS);
       }
     }

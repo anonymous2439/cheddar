@@ -83,3 +83,12 @@ class HallOfFameEntryOut(BaseModel):
     wager: int
     payout: int
     created_at: datetime
+
+
+class GlSimsLineOut(BaseModel):
+    # The roster racer_name if this person matched one, otherwise their raw
+    # chat name as-is — GL Sims' client decides for itself whether this
+    # name is one of its own characters or needs a ghost-angel stand-in, so
+    # no separate "is this a racer" flag is needed here.
+    name: str
+    text: str

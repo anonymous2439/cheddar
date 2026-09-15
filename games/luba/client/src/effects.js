@@ -223,3 +223,121 @@ export function spawnSmokeCloud(scene, x, y, z, radius, durationMs) {
     },
   };
 }
+
+// A headshot kill's detached head — a simple box (matching player.js's
+// own HEAD_SIZE) launched with a velocity + gravity + tumble, same
+// hand-rolled-dynamics style as everything else here. The *direction*
+// comes from the caller (server-computed for real matches, computed
+// locally the same way for practice mode — see each call site), not
+// randomized, so "how it was hit" genuinely drives where it flies; only
+// the tumble axis/rate is randomized, so two decapitations don't spin
+// identically.
+const HEAD_FLY_SIZE = 0.45; // must match player.js/player.ts's HEAD_SIZE
+const HEAD_FLY_GRAVITY = 22;
+const HEAD_FLY_LIFETIME_MS = 1800;
+const HEAD_FLY_SPEED = 6;
+const HEAD_FLY_SPIN_SPEED = 10; // rad/sec
+
+export function spawnFlyingHead(scene, x, y, z, dirX, dirY, dirZ, color) {
+  const geometry = new THREE.BoxGeometry(HEAD_FLY_SIZE, HEAD_FLY_SIZE, HEAD_FLY_SIZE);
+  const material = new THREE.MeshStandardMaterial({ color });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.set(x, y, z);
+  mesh.castShadow = true;
+  scene.add(mesh);
+
+  const len = Math.hypot(dirX, dirY, dirZ) || 1;
+  let vx = (dirX / len) * HEAD_FLY_SPEED;
+  let vy = (dirY / len) * HEAD_FLY_SPEED;
+  let vz = (dirZ / len) * HEAD_FLY_SPEED;
+  const spinX = (Math.random() - 0.5) * HEAD_FLY_SPIN_SPEED;
+  const spinY = (Math.random() - 0.5) * HEAD_FLY_SPIN_SPEED;
+  const spinZ = (Math.random() - 0.5) * HEAD_FLY_SPIN_SPEED;
+
+  let elapsedMs = 0;
+  return {
+    update(dt) {
+      elapsedMs += dt * 1000;
+      vy -= HEAD_FLY_GRAVITY * dt;
+      mesh.position.x += vx * dt;
+      mesh.position.y += vy * dt;
+      mesh.position.z += vz * dt;
+      mesh.rotation.x += spinX * dt;
+      mesh.rotation.y += spinY * dt;
+      mesh.rotation.z += spinZ * dt;
+      if (elapsedMs >= HEAD_FLY_LIFETIME_MS || mesh.position.y < -20) {
+        scene.remove(mesh);
+        geometry.dispose();
+        material.dispose();
+        return false;
+      }
+      return true;
+    },
+  };
+}
+
+// "Lots of blood" from the neck on a headshot — the same shape as
+// spawnBloodSpray but bigger, faster, and more of a vertical fountain
+// than an outward puff, since it's meant to read as distinctly more
+// dramatic than an ordinary hit's blood spray.
+const GORE_PARTICLE_COUNT = 70;
+const GORE_LIFETIME_MS = 900;
+const GORE_SPEED_MIN = 3;
+const GORE_SPEED_MAX = 8;
+const GORE_GRAVITY = 16;
+
+export function spawnGoreFountain(scene, x, y, z) {
+  const positions = new Float32Array(GORE_PARTICLE_COUNT * 3);
+  const velocities = new Array(GORE_PARTICLE_COUNT);
+  for (let i = 0; i < GORE_PARTICLE_COUNT; i++) {
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+    const angle = Math.random() * Math.PI * 2;
+    const speed = GORE_SPEED_MIN + Math.random() * (GORE_SPEED_MAX - GORE_SPEED_MIN);
+    velocities[i] = {
+      x: Math.cos(angle) * speed * 0.6,
+      y: 3 + Math.random() * 4,
+      z: Math.sin(angle) * speed * 0.6,
+    };
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  const material = new THREE.PointsMaterial({
+    color: "#a3122b",
+    size: 0.11,
+    transparent: true,
+    opacity: 0.95,
+    depthWrite: false,
+    sizeAttenuation: true,
+  });
+  const points = new THREE.Points(geometry, material);
+  scene.add(points);
+
+  let elapsedMs = 0;
+  return {
+    update(dt) {
+      elapsedMs += dt * 1000;
+      const posAttr = geometry.getAttribute("position");
+      for (let i = 0; i < GORE_PARTICLE_COUNT; i++) {
+        const v = velocities[i];
+        v.y -= GORE_GRAVITY * dt;
+        posAttr.array[i * 3] += v.x * dt;
+        posAttr.array[i * 3 + 1] += v.y * dt;
+        posAttr.array[i * 3 + 2] += v.z * dt;
+      }
+      posAttr.needsUpdate = true;
+
+      const t = Math.min(1, elapsedMs / GORE_LIFETIME_MS);
+      material.opacity = 0.95 * (1 - t);
+      if (t >= 1) {
+        scene.remove(points);
+        geometry.dispose();
+        material.dispose();
+        return false;
+      }
+      return true;
+    },
+  };
+}

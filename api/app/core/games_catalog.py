@@ -74,6 +74,38 @@ GAMES = [
         "tracks_completion": True,
         "platforms": ["web", "vscode"],
     },
+    {
+        "key": "glsims",
+        "name": "GL Sims",
+        "min_players": 1,
+        "max_players": 1,
+        # A pure local screensaver — no networking, no server-side session
+        # of any kind, every client just runs its own independent
+        # simulation. No win condition, so (like Pokémon Fire Red) the
+        # leader can "Back to Lobby" any time rather than waiting on a
+        # completion signal that will never come.
+        "tracks_completion": False,
+        # vscode-only per the user's explicit instruction.
+        "platforms": ["vscode"],
+    },
+    {
+        "key": "model_viewer",
+        "name": "Model Viewer",
+        "min_players": 1,
+        "max_players": 1,
+        # Same reasoning as GL Sims/Pokémon Fire Red — a single local
+        # viewer with no server-side session or win condition at all.
+        "tracks_completion": False,
+        # Now also on vscode — its client fetches the FBX/textures at
+        # runtime straight from this server (see games/modelviewer/client)
+        # rather than bundling the ~71MB asset set into the extension.
+        "platforms": ["web", "vscode"],
+        # Still a work in progress — hidden from the normal catalog on any
+        # client that respects the flag; the vscode extension's /games
+        # command only shows it via the explicit /games hidden form. Drop
+        # this once it's ready for everyone to find normally.
+        "hidden": True,
+    },
 ]
 
 GAMES_BY_KEY = {game["key"]: game for game in GAMES}

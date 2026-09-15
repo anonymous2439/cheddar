@@ -7,6 +7,7 @@ import { MtgGame } from "../games/mtg/MtgGame";
 import { PokemonFireRedGame } from "../games/pokefirered/PokemonFireRedGame";
 import { LubaGame } from "../games/luba/LubaGame";
 import { LubaPracticeGame } from "../games/luba/LubaPracticeGame";
+import { ModelViewerGame } from "../games/modelviewer/ModelViewerGame";
 import { createBeatsSession } from "../api/beats";
 import { createMtgSession, getMtgDeckStatus, importMtgDeck } from "../api/mtg";
 import { createLubaMatch } from "../api/luba";
@@ -209,6 +210,17 @@ export function LobbyRoom({
         <div className="flex h-full flex-col">
           <div className="min-h-0 flex-1 overflow-y-auto">
             <LubaGame lobby={lobby} currentUserId={currentUserId} onFinished={onGameFinished} />
+          </div>
+          {backToLobbyChrome}
+          {chatDock}
+        </div>
+      );
+    }
+    if (lobby.game_key === "model_viewer") {
+      return (
+        <div className="flex h-full flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <ModelViewerGame lobby={lobby} currentUserId={currentUserId} onFinished={onGameFinished} />
           </div>
           {backToLobbyChrome}
           {chatDock}

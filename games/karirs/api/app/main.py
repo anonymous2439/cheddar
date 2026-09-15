@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import Base, SessionLocal, engine, get_db
-from app.models import Bet, Race, Wallet
+from app.glsims import is_filtered_message
+from app.models import Bet, ChatParticipant, ConversationLine, FilteredMessage, Race, Wallet
 from app.race import compute_race
 from app.roster import (
     compute_payout_multipliers,
@@ -21,7 +22,7 @@ from app.roster import (
     seed_roster_if_empty,
     speed_factor_for_multiplier,
 )
-from app.schemas import BetCreate, BetOut, HallOfFameEntryOut, RaceCreate, RaceOut, RaceResultOut, WalletOut
+from app.schemas import BetCreate, BetOut, GlSimsLineOut, HallOfFameEntryOut, RaceCreate, RaceOut, RaceResultOut, WalletOut
 from app.security import decode_user_id, get_current_user_id
 
 Base.metadata.create_all(bind=engine)
@@ -618,6 +619,49 @@ async def get_hall_of_fame(db: Session = Depends(get_db), _user_id: int = Depend
         )
 
     return list(await asyncio.gather(*(_entry_for(bet) for bet in bets)))
+
+
+@app.get("/glsims/conversations", response_model=list[GlSimsLineOut])
+def get_glsims_conversations(db: Session = Depends(get_db)):
+    """Everything GL Sims needs to play back its chat-bubble flavor, fetched
+    live on mount instead of baked into the vscode extension at build time
+    (see the now-removed scripts/export_glsims_conversations.py) — an edit
+    to conversation_lines or filtered_messages here shows up next time GL
+    Sims opens, no client rebuild/redeploy required.
+
+    Every line is included regardless of racer_name, unlike the old static
+    export (which dropped anyone who didn't match a roster racer): GL
+    Sims' own client now gives an unmatched person's raw chat name to a
+    temporary "ghost angel" stand-in instead of skipping them outright, so
+    filtering here is purely about noise (system notices, ad-hoc content
+    filters), not about who's a racer.
+
+    Deliberately no auth (unlike every other route in this file) — the
+    vscode client already reaches this fine with a token via the
+    action-relay, but the standalone iframe embed (see
+    games/glsims/embed/) is a plain anonymous static page with no login of
+    its own, and this is just flavor chat text, not sensitive data, so
+    there's nothing worth gating here."""
+    filtered_exact = {row.message.strip().lower() for row in db.query(FilteredMessage.message).all()}
+    # A ghost angel's display name — proxy_name if the person's been given
+    # one (see ChatParticipant's own docstring for why this is resolved
+    # live here rather than baked into raw_name at save time), otherwise
+    # their real raw_name. Only ever consulted when racer_name is unset —
+    # a matched racer already shows a clean roster name.
+    proxy_by_name = {
+        row.name: row.proxy_name
+        for row in db.query(ChatParticipant.name, ChatParticipant.proxy_name).all()
+        if row.proxy_name
+    }
+    rows = db.query(ConversationLine).order_by(ConversationLine.id).all()
+    lines = []
+    for row in rows:
+        text = row.message.strip()
+        if not text or is_filtered_message(text, filtered_exact):
+            continue
+        name = row.racer_name or proxy_by_name.get(row.raw_name) or row.raw_name
+        lines.append(GlSimsLineOut(name=name, text=text))
+    return lines
 
 
 @app.post("/races/{race_id}/resolve", response_model=RaceResultOut)

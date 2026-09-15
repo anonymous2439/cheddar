@@ -27266,12 +27266,13 @@ void main() {
   }
 
   // src/player.js
-  var SLASH1_WINDUP_MS = 130;
-  var SLASH1_CUT_MS = 200;
-  var SLASH2_DURATION_MS = 220;
+  var SLASH1_WINDUP_MS = 90;
+  var SLASH1_CUT_MS = 140;
+  var SLASH2_DURATION_MS = 150;
   var COMBO_WINDOW_MS = 3e3;
   var ATTACK_COOLDOWN_MS = 1e3;
   var COOLDOWN_EASE_MS = 200;
+  var PARRY_GRACE_MS = 150;
   var BLADE_LENGTH = 0.8;
   var POSE_NEUTRAL = { x: 0, z: 0 };
   var POSE_READY = { x: -1.2, z: -1.3 };
@@ -27293,6 +27294,9 @@ void main() {
   var RUN_ARM_TRAIL = 1.1;
   var RUN_ARM_OSC = 0.15;
   var RUN_BODY_LEAN = 0.28;
+  var COOLDOWN_TINT_COLOR = new Color("#ff3b30");
+  var COOLDOWN_TINT_STRENGTH = 0.45;
+  var COOLDOWN_TINT_EASE_RATE = 6;
   function limb(w, h, d, x, y, color) {
     const mesh = new Mesh(new BoxGeometry(w, h, d), new MeshStandardMaterial({ color }));
     mesh.position.set(x, y, 0);
@@ -27363,6 +27367,10 @@ void main() {
       // most one resolved hit, reset each time a new swing actually starts
       // (see tryAttack).
       isActiveSwing: false,
+      // Stays true a little *after* isActiveSwing itself goes false too —
+      // see PARRY_GRACE_MS below for why a parry needs this, not just the
+      // instantaneous flag.
+      activeSwingUntil: -Infinity,
       hasHitThisSwing: false,
       // State machine: 'idle' -> 'slash1' -> 'holdBottom' -> (free
       // second swing) 'slash2' -> 'cooldown' -> back to 'idle'. A
@@ -27375,7 +27383,13 @@ void main() {
       walkPhase: 0,
       walkBlend: 0,
       isDead: false,
-      deathFallStartAt: -Infinity
+      deathFallStartAt: -Infinity,
+      // Base color to blend from/back to for the cooldown tint below — a
+      // clone (not the same Color instance material.color already uses),
+      // since material.color itself gets overwritten every frame once
+      // tinting starts.
+      rightArmBaseColor: rightArm.material.color.clone(),
+      cooldownTintAlpha: 0
     };
   }
   function tryAttack(rig, nowMs) {
@@ -27418,6 +27432,7 @@ void main() {
     rig.head.position.y = rig.headBaseY + footfall * HEAD_BOB;
     const elapsed = nowMs - rig.stateEnteredAt;
     rig.isActiveSwing = rig.comboState === "slash1" && elapsed >= SLASH1_WINDUP_MS || rig.comboState === "slash2";
+    if (rig.isActiveSwing) rig.activeSwingUntil = nowMs + PARRY_GRACE_MS;
     if (rig.comboState === "slash1") {
       if (elapsed < SLASH1_WINDUP_MS) {
         const t = elapsed / SLASH1_WINDUP_MS;
@@ -27469,6 +27484,9 @@ void main() {
         rig.stateEnteredAt = nowMs;
       }
     }
+    const tintTarget = rig.comboState === "cooldown" ? 1 : 0;
+    rig.cooldownTintAlpha += (tintTarget - rig.cooldownTintAlpha) * Math.min(1, dt * COOLDOWN_TINT_EASE_RATE);
+    rig.rightArm.material.color.copy(rig.rightArmBaseColor).lerp(COOLDOWN_TINT_COLOR, rig.cooldownTintAlpha * COOLDOWN_TINT_STRENGTH);
   }
   var DEATH_FALL_MS = 450;
   function startDeathFall(rig, nowMs) {
@@ -27495,10 +27513,21 @@ void main() {
     rig.stateEnteredAt = nowMs;
     rig.walkPhase = 0;
     rig.walkBlend = 0;
+    rig.activeSwingUntil = -Infinity;
+    rig.head.visible = true;
+    rig.cooldownTintAlpha = 0;
+    rig.rightArm.material.color.copy(rig.rightArmBaseColor);
   }
   function getSwordWorldSamplePoints(rig) {
     rig.group.updateMatrixWorld(true);
     return [0.5, 1].map((frac) => rig.blade.localToWorld(new Vector3(0, -BLADE_LENGTH * frac, 0)));
+  }
+  function getHeadWorldPosition(rig) {
+    rig.group.updateMatrixWorld(true);
+    return rig.head.getWorldPosition(new Vector3());
+  }
+  function hideHead(rig) {
+    rig.head.visible = false;
   }
   function disposeRig(rig) {
     rig.group.traverse((obj) => {
@@ -27742,6 +27771,103 @@ void main() {
       }
     };
   }
+  var HEAD_FLY_SIZE = 0.45;
+  var HEAD_FLY_GRAVITY = 22;
+  var HEAD_FLY_LIFETIME_MS = 1800;
+  var HEAD_FLY_SPEED = 6;
+  var HEAD_FLY_SPIN_SPEED = 10;
+  function spawnFlyingHead(scene, x, y, z, dirX, dirY, dirZ, color) {
+    const geometry = new BoxGeometry(HEAD_FLY_SIZE, HEAD_FLY_SIZE, HEAD_FLY_SIZE);
+    const material = new MeshStandardMaterial({ color });
+    const mesh = new Mesh(geometry, material);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    scene.add(mesh);
+    const len = Math.hypot(dirX, dirY, dirZ) || 1;
+    let vx = dirX / len * HEAD_FLY_SPEED;
+    let vy = dirY / len * HEAD_FLY_SPEED;
+    let vz = dirZ / len * HEAD_FLY_SPEED;
+    const spinX = (Math.random() - 0.5) * HEAD_FLY_SPIN_SPEED;
+    const spinY = (Math.random() - 0.5) * HEAD_FLY_SPIN_SPEED;
+    const spinZ = (Math.random() - 0.5) * HEAD_FLY_SPIN_SPEED;
+    let elapsedMs = 0;
+    return {
+      update(dt) {
+        elapsedMs += dt * 1e3;
+        vy -= HEAD_FLY_GRAVITY * dt;
+        mesh.position.x += vx * dt;
+        mesh.position.y += vy * dt;
+        mesh.position.z += vz * dt;
+        mesh.rotation.x += spinX * dt;
+        mesh.rotation.y += spinY * dt;
+        mesh.rotation.z += spinZ * dt;
+        if (elapsedMs >= HEAD_FLY_LIFETIME_MS || mesh.position.y < -20) {
+          scene.remove(mesh);
+          geometry.dispose();
+          material.dispose();
+          return false;
+        }
+        return true;
+      }
+    };
+  }
+  var GORE_PARTICLE_COUNT = 70;
+  var GORE_LIFETIME_MS = 900;
+  var GORE_SPEED_MIN = 3;
+  var GORE_SPEED_MAX = 8;
+  var GORE_GRAVITY = 16;
+  function spawnGoreFountain(scene, x, y, z) {
+    const positions = new Float32Array(GORE_PARTICLE_COUNT * 3);
+    const velocities = new Array(GORE_PARTICLE_COUNT);
+    for (let i = 0; i < GORE_PARTICLE_COUNT; i++) {
+      positions[i * 3] = x;
+      positions[i * 3 + 1] = y;
+      positions[i * 3 + 2] = z;
+      const angle = Math.random() * Math.PI * 2;
+      const speed = GORE_SPEED_MIN + Math.random() * (GORE_SPEED_MAX - GORE_SPEED_MIN);
+      velocities[i] = {
+        x: Math.cos(angle) * speed * 0.6,
+        y: 3 + Math.random() * 4,
+        z: Math.sin(angle) * speed * 0.6
+      };
+    }
+    const geometry = new BufferGeometry();
+    geometry.setAttribute("position", new BufferAttribute(positions, 3));
+    const material = new PointsMaterial({
+      color: "#a3122b",
+      size: 0.11,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+      sizeAttenuation: true
+    });
+    const points = new Points(geometry, material);
+    scene.add(points);
+    let elapsedMs = 0;
+    return {
+      update(dt) {
+        elapsedMs += dt * 1e3;
+        const posAttr = geometry.getAttribute("position");
+        for (let i = 0; i < GORE_PARTICLE_COUNT; i++) {
+          const v = velocities[i];
+          v.y -= GORE_GRAVITY * dt;
+          posAttr.array[i * 3] += v.x * dt;
+          posAttr.array[i * 3 + 1] += v.y * dt;
+          posAttr.array[i * 3 + 2] += v.z * dt;
+        }
+        posAttr.needsUpdate = true;
+        const t = Math.min(1, elapsedMs / GORE_LIFETIME_MS);
+        material.opacity = 0.95 * (1 - t);
+        if (t >= 1) {
+          scene.remove(points);
+          geometry.dispose();
+          material.dispose();
+          return false;
+        }
+        return true;
+      }
+    };
+  }
 
   // src/game.js
   var CAMERA_DISTANCE = 2.7;
@@ -27753,6 +27879,8 @@ void main() {
   var PITCH_MAX = 1.2;
   var SPAWN = { x: 0, y: 6, z: 8 };
   var PARRY_STUN_MS = 900;
+  var PARRY_KNOCKBACK_SPEED = 9;
+  var PARRY_KNOCKBACK_DURATION_MS = 220;
   var DASH_SPEED = 14;
   var DASH_DURATION_MS = 180;
   var DASH_COOLDOWN_MS = 1500;
@@ -27955,17 +28083,70 @@ void main() {
     }
     const sword = makeBar("\u2694", "Sword: Ready");
     const smoke = makeBar("\u{1F4A8}", "Smoke: Ready");
+    const dash = makeBar("\u{1F4AB}", "Dash: Ready");
     wrap.appendChild(sword.box);
     wrap.appendChild(smoke.box);
+    wrap.appendChild(dash.box);
     function updateBar(bar, name, frac, totalMs) {
       bar.barFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
       bar.labelEl.textContent = frac > 0 ? `${name}: ${(frac * totalMs / 1e3).toFixed(1)}s` : `${name}: Ready`;
     }
     return {
       el: wrap,
-      update(swordFrac, smokeFrac) {
+      update(swordFrac, smokeFrac, dashFrac) {
         updateBar(sword, "\u2694 Sword", swordFrac, ATTACK_COOLDOWN_MS);
         updateBar(smoke, "\u{1F4A8} Smoke", smokeFrac, SMOKE_COOLDOWN_MS);
+        updateBar(dash, "\u{1F4AB} Dash", dashFrac, DASH_COOLDOWN_MS);
+      }
+    };
+  }
+  function buildSkillCanvasIcon(emoji, rightOffsetPx) {
+    const el = document.createElement("div");
+    el.style.position = "absolute";
+    el.style.top = "8px";
+    el.style.right = `${rightOffsetPx}px`;
+    el.style.width = "34px";
+    el.style.height = "34px";
+    el.style.borderRadius = "50%";
+    el.style.background = "rgba(24,24,27,0.8)";
+    el.style.border = "2px solid #52525b";
+    el.style.pointerEvents = "none";
+    el.style.userSelect = "none";
+    el.style.overflow = "hidden";
+    const emojiEl = document.createElement("div");
+    emojiEl.style.position = "absolute";
+    emojiEl.style.inset = "0";
+    emojiEl.style.display = "flex";
+    emojiEl.style.alignItems = "center";
+    emojiEl.style.justifyContent = "center";
+    emojiEl.style.fontSize = "15px";
+    emojiEl.textContent = emoji;
+    el.appendChild(emojiEl);
+    const wipe = document.createElement("div");
+    wipe.style.position = "absolute";
+    wipe.style.inset = "0";
+    wipe.style.borderRadius = "50%";
+    wipe.style.background = "conic-gradient(rgba(0,0,0,0.78) 0deg, transparent 0deg)";
+    el.appendChild(wipe);
+    const countEl = document.createElement("div");
+    countEl.style.position = "absolute";
+    countEl.style.inset = "0";
+    countEl.style.display = "flex";
+    countEl.style.alignItems = "center";
+    countEl.style.justifyContent = "center";
+    countEl.style.fontSize = "11px";
+    countEl.style.fontWeight = "700";
+    countEl.style.color = "#ffffff";
+    countEl.style.textShadow = "0 1px 2px rgba(0,0,0,0.85)";
+    el.appendChild(countEl);
+    return {
+      el,
+      // frac: 0 = ready, 1 = just used — same convention as buildCooldownHud.
+      update(frac, totalMs) {
+        const deg = Math.max(0, Math.min(1, frac)) * 360;
+        wipe.style.background = `conic-gradient(rgba(0,0,0,0.78) ${deg}deg, transparent ${deg}deg)`;
+        const remainingS = frac * totalMs / 1e3;
+        countEl.textContent = frac > 0 ? Math.ceil(remainingS).toString() : "";
       }
     };
   }
@@ -28014,6 +28195,10 @@ void main() {
     standingsEl.style.borderRadius = "4px";
     standingsEl.style.pointerEvents = "none";
     canvasWrap.appendChild(standingsEl);
+    const smokeIcon = buildSkillCanvasIcon("\u{1F4A8}", 8);
+    canvasWrap.appendChild(smokeIcon.el);
+    const dashIcon = buildSkillCanvasIcon("\u{1F4AB}", 48);
+    canvasWrap.appendChild(dashIcon.el);
     wrap.appendChild(canvasWrap);
     const cooldownHud = buildCooldownHud();
     wrap.appendChild(cooldownHud.el);
@@ -28088,6 +28273,9 @@ void main() {
     let dashCooldownUntil = 0;
     let dashDirX = 0;
     let dashDirZ = 0;
+    let knockbackUntil = 0;
+    let knockbackDirX = 0;
+    let knockbackDirZ = 0;
     let isDead = false;
     let hasReportedFall = false;
     let matchEndsAt = 0;
@@ -28095,6 +28283,15 @@ void main() {
     let smokeCooldownUntil = 0;
     const bloodEffects = [];
     const BLOOD_SPRAY_HEIGHT = 1;
+    const NECK_Y2 = 1.3;
+    function triggerDecapitation(targetRig, msg, color) {
+      const headPos = getHeadWorldPosition(targetRig);
+      hideHead(targetRig);
+      bloodEffects.push(spawnFlyingHead(scene, headPos.x, headPos.y, headPos.z, msg.headPushX, msg.headPushY, msg.headPushZ, color));
+      bloodEffects.push(
+        spawnGoreFountain(scene, targetRig.group.position.x, targetRig.group.position.y + NECK_Y2, targetRig.group.position.z)
+      );
+    }
     function onDeathMessage(msg) {
       const now = performance.now();
       if (msg.userId === ctx.selfId) {
@@ -28102,14 +28299,18 @@ void main() {
         startDeathFall(rig, now);
         status.textContent = msg.cause === "fall" ? "You fell! Respawning\u2026" : "You were struck down! Respawning\u2026";
         if (msg.cause === "hit") {
-          bloodEffects.push(spawnBloodSpray(scene, physics.x, physics.y + BLOOD_SPRAY_HEIGHT, physics.z));
+          if (msg.isHeadshot) triggerDecapitation(rig, msg, "#f59e0b");
+          else bloodEffects.push(spawnBloodSpray(scene, physics.x, physics.y + BLOOD_SPRAY_HEIGHT, physics.z));
         }
       } else {
         const peer = peers.get(msg.userId);
         if (peer) startDeathFall(peer.rig, now);
         if (msg.cause === "hit" && peer) {
-          const pos = peer.rig.group.position;
-          bloodEffects.push(spawnBloodSpray(scene, pos.x, pos.y + BLOOD_SPRAY_HEIGHT, pos.z));
+          if (msg.isHeadshot) triggerDecapitation(peer.rig, msg, "#38bdf8");
+          else {
+            const pos = peer.rig.group.position;
+            bloodEffects.push(spawnBloodSpray(scene, pos.x, pos.y + BLOOD_SPRAY_HEIGHT, pos.z));
+          }
         }
         if (msg.attackerId === ctx.selfId) {
           selfKills = msg.attackerKills;
@@ -28148,10 +28349,14 @@ void main() {
       }
     }
     function onParryMessage(msg) {
-      if (msg.player1Id === ctx.selfId || msg.player2Id === ctx.selfId) {
+      const isPlayer1 = msg.player1Id === ctx.selfId;
+      if (isPlayer1 || msg.player2Id === ctx.selfId) {
         const now = performance.now();
         playerStunnedUntil = now + PARRY_STUN_MS;
         interruptToCooldown(rig, now);
+        knockbackUntil = now + PARRY_KNOCKBACK_DURATION_MS;
+        knockbackDirX = isPlayer1 ? msg.player1PushX : msg.player2PushX;
+        knockbackDirZ = isPlayer1 ? msg.player1PushZ : msg.player2PushZ;
         status.textContent = "Parry! Both swords clashed \u2014 stunned for a moment.";
       }
     }
@@ -28205,7 +28410,11 @@ void main() {
           const winnerName = winnerInfo ? winnerInfo.display_name || winnerInfo.username : `user#${msg.winnerId}`;
           status.textContent = msg.isTie ? `Time's up! Tied at ${msg.winnerKills} kills.` : `Time's up! ${winnerName} wins with ${msg.winnerKills} kill${msg.winnerKills === 1 ? "" : "s"}!`;
           matchTimeEl.textContent = "Match over";
-          if (window.CheddarHost && window.CheddarHost.finishGame) window.CheddarHost.finishGame();
+          if (ctx.onMatchOver) {
+            ctx.onMatchOver();
+          } else if (window.CheddarHost && window.CheddarHost.finishGame) {
+            window.CheddarHost.finishGame();
+          }
           break;
         }
         case "smoke":
@@ -28290,10 +28499,21 @@ void main() {
         moveZ = dashDirZ;
         isMoving = true;
       }
+      const isKnockedBack = now < knockbackUntil;
+      if (isKnockedBack) {
+        moveX = knockbackDirX;
+        moveZ = knockbackDirZ;
+        isMoving = true;
+      }
       if (!isDead) {
         stepPhysics(
           physics,
-          { moveX, moveZ, jump: playerStunned ? false : jump, speed: isDashing ? DASH_SPEED : void 0 },
+          {
+            moveX,
+            moveZ,
+            jump: playerStunned ? false : jump,
+            speed: isDashing ? DASH_SPEED : isKnockedBack ? PARRY_KNOCKBACK_SPEED : void 0
+          },
           blocks,
           dt
         );
@@ -28332,10 +28552,15 @@ void main() {
       } else if (smoke) {
         status.textContent = "Smoke skill still on cooldown\u2026";
       }
+      const smokeFrac = Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS);
+      const dashFrac = Math.max(0, (dashCooldownUntil - now) / DASH_COOLDOWN_MS);
       cooldownHud.update(
         rig.comboState === "cooldown" ? Math.max(0, 1 - (now - rig.stateEnteredAt) / ATTACK_COOLDOWN_MS) : 0,
-        Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS)
+        smokeFrac,
+        dashFrac
       );
+      smokeIcon.update(smokeFrac, SMOKE_COOLDOWN_MS);
+      dashIcon.update(dashFrac, DASH_COOLDOWN_MS);
       if (rig.isActiveSwing) socket.sendAttackSample(getSwordWorldSamplePoints(rig));
       const peerEase = 1 - Math.exp(-PEER_EASE_RATE * dt);
       for (const peer of peers.values()) {
@@ -28415,6 +28640,8 @@ void main() {
   var DUMMY_ATTACK_MAX_MS = 3400;
   var PRACTICE_HIT_RADIUS = 0.5;
   var PRACTICE_RESPAWN_MS = 1800;
+  var HEAD_Y_MIN = 1.3;
+  var NECK_Y = 1.3;
   function mountPractice(el) {
     el.innerHTML = "";
     const wrap = document.createElement("div");
@@ -28448,6 +28675,10 @@ void main() {
     canvas.style.display = "block";
     canvas.style.borderRadius = "4px";
     canvasWrap.appendChild(canvas);
+    const smokeIcon = buildSkillCanvasIcon("\u{1F4A8}", 8);
+    canvasWrap.appendChild(smokeIcon.el);
+    const dashIcon = buildSkillCanvasIcon("\u{1F4AB}", 48);
+    canvasWrap.appendChild(dashIcon.el);
     wrap.appendChild(canvasWrap);
     const cooldownHud = buildCooldownHud();
     wrap.appendChild(cooldownHud.el);
@@ -28472,6 +28703,9 @@ void main() {
     scene.add(dummy.group);
     let dummyNextAttackAt = performance.now() + DUMMY_ATTACK_MIN_MS;
     let dummyDeadUntil = 0;
+    let dummyKnockbackUntil = 0;
+    let dummyKnockbackDirX = 0;
+    let dummyKnockbackDirZ = 0;
     let facingAngle = 0;
     let pitchAngle = 0;
     const camPos = new Vector3(SPAWN.x, SPAWN.y + PLAYER_HEIGHT, SPAWN.z + CAMERA_DISTANCE);
@@ -28489,6 +28723,9 @@ void main() {
     let dashCooldownUntil = 0;
     let dashDirX = 0;
     let dashDirZ = 0;
+    let knockbackUntil = 0;
+    let knockbackDirX = 0;
+    let knockbackDirZ = 0;
     let isDead = false;
     let hasReportedFall = false;
     let hitsLanded = 0;
@@ -28508,18 +28745,35 @@ void main() {
       physics.vz = 0;
       status.textContent = "Back up \u2014 keep practicing!";
     }
-    function resolveHit(attacker, target) {
-      if (!attacker.isActiveSwing || attacker.hasHitThisSwing) return false;
+    function triggerDecapitation(targetRig, attackerX, attackerZ, color) {
+      const headPos = getHeadWorldPosition(targetRig);
+      hideHead(targetRig);
+      const dx = targetRig.group.position.x - attackerX;
+      const dz = targetRig.group.position.z - attackerZ;
+      const dist = Math.hypot(dx, dz) || 1;
+      bloodEffects.push(spawnFlyingHead(scene, headPos.x, headPos.y, headPos.z, dx / dist, 1, dz / dist, color));
+      bloodEffects.push(
+        spawnGoreFountain(scene, targetRig.group.position.x, targetRig.group.position.y + NECK_Y, targetRig.group.position.z)
+      );
+    }
+    function resolveAttack(attacker, target, now) {
+      if (!attacker.isActiveSwing || attacker.hasHitThisSwing) return null;
       const points = getSwordWorldSamplePoints(attacker);
       const targetPos = target.group.position;
-      const landed = points.some((p) => {
+      const landedPoint = points.find((p) => {
         const dx = p.x - targetPos.x;
         const dz = p.z - targetPos.z;
         return Math.hypot(dx, dz) <= PRACTICE_HIT_RADIUS && p.y >= targetPos.y && p.y <= targetPos.y + PLAYER_HEIGHT + 0.2;
       });
-      if (!landed) return false;
+      if (!landedPoint) return null;
       attacker.hasHitThisSwing = true;
-      return true;
+      const headshot = landedPoint.y >= targetPos.y + HEAD_Y_MIN;
+      const targetEngaged = target.isActiveSwing || now < target.activeSwingUntil;
+      if (targetEngaged && !target.hasHitThisSwing) {
+        target.hasHitThisSwing = true;
+        return { outcome: "parry", headshot: false };
+      }
+      return { outcome: "hit", headshot };
     }
     function frame(now) {
       const dt = Math.min(0.1, (now - lastFrameTime) / 1e3);
@@ -28563,8 +28817,28 @@ void main() {
         moveZ = dashDirZ;
         isMoving = true;
       }
+      const isKnockedBack = now < knockbackUntil;
+      if (isKnockedBack) {
+        moveX = knockbackDirX;
+        moveZ = knockbackDirZ;
+        isMoving = true;
+      }
       if (!isDead) {
-        stepPhysics(physics, { moveX, moveZ, jump: playerStunned ? false : jump, speed: isDashing ? DASH_SPEED : void 0 }, blocks, dt);
+        stepPhysics(
+          physics,
+          {
+            moveX,
+            moveZ,
+            jump: playerStunned ? false : jump,
+            speed: isDashing ? DASH_SPEED : isKnockedBack ? PARRY_KNOCKBACK_SPEED : void 0
+          },
+          blocks,
+          dt
+        );
+      }
+      if (now < dummyKnockbackUntil && !dummy.isDead) {
+        dummy.group.position.x += dummyKnockbackDirX * PARRY_KNOCKBACK_SPEED * dt;
+        dummy.group.position.z += dummyKnockbackDirZ * PARRY_KNOCKBACK_SPEED * dt;
       }
       if (!isDead && !hasReportedFall && physics.y < FALL_DEATH_Y) {
         hasReportedFall = true;
@@ -28587,13 +28861,21 @@ void main() {
       } else if (smoke && now < smokeCooldownUntil) {
         status.textContent = "Smoke skill still on cooldown\u2026";
       }
+      const smokeFrac = Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS);
+      const dashFrac = Math.max(0, (dashCooldownUntil - now) / DASH_COOLDOWN_MS);
       cooldownHud.update(
         rig.comboState === "cooldown" ? Math.max(0, 1 - (now - rig.stateEnteredAt) / ATTACK_COOLDOWN_MS) : 0,
-        Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS)
+        smokeFrac,
+        dashFrac
       );
+      smokeIcon.update(smokeFrac, SMOKE_COOLDOWN_MS);
+      dashIcon.update(dashFrac, DASH_COOLDOWN_MS);
       if (isDead) updateDeathFall(rig, now);
       else updatePlayerVisual(rig, now, isMoving, dt);
       const dummyDead = now < dummyDeadUntil;
+      if (dummy.comboState === "idle") {
+        dummy.group.rotation.y = Math.atan2(physics.x - dummy.group.position.x, physics.z - dummy.group.position.z);
+      }
       if (!dummyDead && now >= dummyNextAttackAt && dummy.comboState === "idle") {
         tryAttack(dummy, now);
         dummyNextAttackAt = now + DUMMY_ATTACK_MIN_MS + Math.random() * (DUMMY_ATTACK_MAX_MS - DUMMY_ATTACK_MIN_MS);
@@ -28601,29 +28883,47 @@ void main() {
       if (dummy.isDead) updateDeathFall(dummy, now);
       else updatePlayerVisual(dummy, now, false, dt);
       if (!isDead && !dummyDead) {
-        const playerLanded = resolveHit(rig, dummy);
-        const dummyLanded = resolveHit(dummy, rig);
-        if (playerLanded && dummyLanded) {
+        const playerResult = resolveAttack(rig, dummy, now);
+        const dummyResult = resolveAttack(dummy, rig, now);
+        if (playerResult?.outcome === "parry" || dummyResult?.outcome === "parry") {
           interruptToCooldown(rig, now);
           interruptToCooldown(dummy, now);
+          playerStunnedUntil = now + PARRY_STUN_MS;
+          const dx = dummy.group.position.x - physics.x;
+          const dz = dummy.group.position.z - physics.z;
+          const dist = Math.hypot(dx, dz) || 1;
+          knockbackUntil = now + PARRY_KNOCKBACK_DURATION_MS;
+          knockbackDirX = -dx / dist;
+          knockbackDirZ = -dz / dist;
+          dummyKnockbackUntil = now + PARRY_KNOCKBACK_DURATION_MS;
+          dummyKnockbackDirX = dx / dist;
+          dummyKnockbackDirZ = dz / dist;
           status.textContent = "Parry! Both swords clashed.";
-        } else if (playerLanded) {
+        } else if (playerResult?.outcome === "hit") {
           hitsLanded++;
           startDeathFall(dummy, now);
-          bloodEffects.push(spawnBloodSpray(scene, dummy.group.position.x, dummy.group.position.y + BLOOD_SPRAY_HEIGHT, dummy.group.position.z));
+          if (playerResult.headshot) {
+            triggerDecapitation(dummy, physics.x, physics.z, "#ef4444");
+          } else {
+            bloodEffects.push(spawnBloodSpray(scene, dummy.group.position.x, dummy.group.position.y + BLOOD_SPRAY_HEIGHT, dummy.group.position.z));
+          }
           dummyDeadUntil = now + PRACTICE_RESPAWN_MS;
-          status.textContent = "Hit!";
+          status.textContent = playerResult.headshot ? "Headshot!" : "Hit!";
           setTimeout(() => {
             resetAfterRespawn(dummy, performance.now());
             dummy.group.position.set(DUMMY_POS.x, DUMMY_POS.y, DUMMY_POS.z);
             dummyNextAttackAt = performance.now() + DUMMY_ATTACK_MIN_MS;
           }, PRACTICE_RESPAWN_MS);
-        } else if (dummyLanded) {
+        } else if (dummyResult?.outcome === "hit") {
           timesHit++;
           isDead = true;
           startDeathFall(rig, now);
-          bloodEffects.push(spawnBloodSpray(scene, physics.x, physics.y + BLOOD_SPRAY_HEIGHT, physics.z));
-          status.textContent = "You got hit! Respawning\u2026";
+          if (dummyResult.headshot) {
+            triggerDecapitation(rig, dummy.group.position.x, dummy.group.position.z, "#f59e0b");
+          } else {
+            bloodEffects.push(spawnBloodSpray(scene, physics.x, physics.y + BLOOD_SPRAY_HEIGHT, physics.z));
+          }
+          status.textContent = dummyResult.headshot ? "You got headshot! Respawning\u2026" : "You got hit! Respawning\u2026";
           setTimeout(() => respawnPlayer(performance.now()), PRACTICE_RESPAWN_MS);
         }
       }

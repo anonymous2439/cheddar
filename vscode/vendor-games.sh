@@ -14,6 +14,10 @@ GAMES=(
     "chess:../games/chess/client/dist"
     "cheddar_beats:../games/cheddar_beats/client/dist"
     "luba:../games/luba/client/dist"
+    "glsims:../games/glsims/client/dist"
+    "model_viewer:../games/modelviewer/client/dist"
+    "glsimsworld:../games/glsimsworld/client/dist"
+    "glophimon:../games/glophimon/client/dist"
 )
 
 DEST_ROOT="media/games"

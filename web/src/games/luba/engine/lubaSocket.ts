@@ -35,9 +35,27 @@ export type LubaServerMessage =
   | { type: "joined"; userId: number; x: number; y: number; z: number }
   | { type: "left"; userId: number }
   | { type: "peer_position"; userId: number; x: number; y: number; z: number; facing: number; isActiveSwing: boolean }
-  | { type: "death"; userId: number; cause: "hit" | "fall"; attackerId: number | null; attackerKills?: number }
+  | {
+      type: "death";
+      userId: number;
+      cause: "hit" | "fall";
+      attackerId: number | null;
+      attackerKills?: number;
+      isHeadshot?: boolean;
+      headPushX?: number;
+      headPushY?: number;
+      headPushZ?: number;
+    }
   | { type: "respawn"; userId: number; x: number; y: number; z: number; invulnerableMs: number }
-  | { type: "parry"; player1Id: number; player2Id: number }
+  | {
+      type: "parry";
+      player1Id: number;
+      player2Id: number;
+      player1PushX: number;
+      player1PushZ: number;
+      player2PushX: number;
+      player2PushZ: number;
+    }
   | { type: "match_over"; winnerId: number | null; winnerKills: number; isTie: boolean }
   | { type: "smoke"; userId: number; x: number; y: number; z: number; durationMs: number }
   | { type: "_disconnected" }

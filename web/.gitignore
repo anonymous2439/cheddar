@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# User-supplied 3D model assets for the Model Viewer game — large binary
+# files, personal test assets, not meant to live in the repo's history.
+public/models/
