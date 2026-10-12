@@ -2,7 +2,7 @@
   "name": "cheddar",
   "displayName": "Cheddar",
   "description": "VS Code extension with a custom bottom panel tab",
-  "version": "0.0.215",
+  "version": "0.0.304",
   "engines": {
     "vscode": "^1.108.1"
   },
@@ -64,6 +64,11 @@
           "type": "string",
           "default": "http://109.123.234.69/api/luba",
           "description": "Base URL of the Luba game API (connected to directly by the webview, not proxied through the extension host)."
+        },
+        "cheddar.glophiworldApiBaseUrl": {
+          "type": "string",
+          "default": "http://109.123.234.69/api/glophiworld",
+          "description": "Base URL of the Glophiworld game API."
         }
       }
     }

@@ -16,6 +16,23 @@
 // No chat in this phase (not asked for) — the creature/battle system is an
 // explicitly separate, later discussion (see this game's own plan file).
 import * as THREE from "three";
+// CSS3DRenderer/CSS3DObject — three.js's own addon for rendering real DOM
+// elements (here, a YouTube <iframe>) as a camera-matched layer alongside
+// the normal WebGL scene. Needed only for the floor-2 cinema screen (see
+// CINEMA_YOUTUBE_VIDEO_ID/buildCinemaScreenObject below) — a YouTube
+// player can't be captured into a THREE.VideoTexture/CanvasTexture
+// (cross-origin), so there's no way to put it on a normal WebGL mesh.
+// Resolved by build.sh's own --alias:three flag the same way plain "three"
+// imports are (confirmed by node --check + a real esbuild build — see that
+// script's own comment for why the alias exists at all).
+import { CSS3DRenderer, CSS3DObject } from "three/examples/jsm/renderers/CSS3DRenderer.js";
+// Only for the Karirs racer rigs (see buildKarirsRacerRig) — ported from
+// games/karirs/client/src/render3d.js's own identical import, same
+// resolution mechanism as CSS3DRenderer's own import just above (the
+// --alias:three build.sh flag only intercepts the bare "three" specifier,
+// not this deep subpath, so it resolves via this package's own
+// node_modules/three exactly like that one already does).
+import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import {
   buildBlockyCharacter,
   applyIdlePose,
@@ -31,7 +48,13 @@ import {
   updateTargetFlash,
   buildGlophiballMesh,
   disposeGlophiball,
+  buildFaceMarker,
+  buildBackMarker,
 } from "./character.js";
+// Phase 1 of Dama (see this game's own plan file) — a pure rules engine,
+// no rendering/networking of its own yet; exercised here only via the
+// Dev menu's self-play test modal (see damaTestButton below).
+import { createInitialDamaBoard, getAllLegalMoves, applyDamaMove, hasNoLegalMoves } from "./dama.js";
 // The chat-bubble sprite primitives GL Sims World's own conversation
 // system uses, reused as-is for Rodz's ambient shout loop (see
 // RODZ_SHOUT_TEXT/updateRodzShout) — this game has no ambient-conversation
@@ -79,11 +102,198 @@ const TOWN_DOOR_HALF_WIDTH = 2.2; // half-width of the gap left in each wall for
 const TOWN_WALL_COLOR = "#8d8d8d";
 // Walls stay fully solid by default — only the specific segment(s) that
 // actually sit between the camera and your own character fade out, and
-// only while they're actually in the way (see updateTownWallFade).
-const TOWN_WALL_OCCLUDED_OPACITY = 0.15;
+// only while they're actually in the way (see updateTownWallFade). Low
+// enough to read as fully gone rather than a visible see-through wall —
+// still a smooth opacity lerp (see TOWN_WALL_FADE_RATE), not a hard
+// visible/invisible snap, since this re-evaluates continuously as the
+// camera angle changes and an instant on/off would flicker.
+const TOWN_WALL_OCCLUDED_OPACITY = 0.02;
 const TOWN_WALL_FADE_RATE = 8; // per-second ease rate for the opacity lerp, so it fades in/out rather than snapping
 const TOWN_DOOR_POST_COLOR = "#7c4a2d";
 const TOWN_PLAZA_COLOR = "#c9b38c";
+
+// --- Glophics tower (multi-story) ------------------------------------------
+// The first thing in this entire codebase to model real vertical (Y-axis)
+// space — everything else (every peer, NPC, wild spawn, battle rig) has
+// always lived at a literal y=0. Floor 0 is the existing ground floor
+// (buildTown's own walls/plaza below) and isn't listed here; this list is
+// only the floors ABOVE it. Deliberately data-driven: adding a floor 3
+// later means appending one entry to GLOPHICS_FLOORS and nothing else —
+// wall/floor-slab building (buildGlophicsFloor), collision
+// (townWallSegmentsByFloor/isInsideTownWalls), cutaway transparency
+// (applyGlophicsFloorCutaway), and the stairs (GLOPHICS_STAIR_TRANSITIONS)
+// all derive from this array rather than hardcoding "floor 1"/"floor 2".
+// Exactly TOWN_WALL_HEIGHT — floor 2's own slab sits flush on top of the
+// ground floor's wall tops, the way a real building's next floor sits
+// directly on the one below it, with no visible gap between them. This
+// used to be a larger fixed value (3.5) meant as "headroom plus room for a
+// floor slab," but the slab itself is a paper-thin PlaneGeometry (no real
+// thickness to make room for) — that extra margin just left an empty
+// 1.1-unit gap floating between the two floors, which is exactly the
+// "floor 2 looks like it's floating" bug this fixes.
+const FLOOR_HEIGHT = TOWN_WALL_HEIGHT;
+// Floor 2's own wallColor/floorColor recolored to a cinema theme (a
+// lightened dark slate-gray wall, a lightened dark carpet-red floor — see
+// this session's own "lighten the color a bit" request) to go with the
+// actual cinema screen built onto its south wall — see CINEMA_YOUTUBE_VIDEO_ID/
+// buildCinemaScreenObject and buildCinemaSeats below. Plain color swap only,
+// same geometry as before.
+const GLOPHICS_FLOORS = [
+  // wallHeight doubled (TOWN_WALL_HEIGHT*2) and hasDoors:false per explicit
+  // request — a taller cinema room, reachable only via the stairs, never
+  // through a walk-in doorway like the ground floor's four.
+  // wallHeight raised from TOWN_WALL_HEIGHT*2 to *6 so the cinema screen
+  // (CINEMA_SCREEN_WORLD_WIDTH/HEIGHT below) can span the wall at its own
+  // real 16:9 proportions instead of being squashed to fit a shorter room —
+  // see that constant's own comment for why a screen this wide needs this
+  // much headroom once it's not being stretched.
+  { index: 1, y: FLOOR_HEIGHT, wallColor: "#3a3a45", floorColor: "#7a2e2e", wallHeight: TOWN_WALL_HEIGHT * 6, hasDoors: false },
+  // Future floors just append here, e.g.
+  // { index: 2, y: FLOOR_HEIGHT * 2, wallColor: ..., floorColor: ..., wallHeight: TOWN_WALL_HEIGHT, hasDoors: false }.
+];
+// Which GLOPHICS_FLOORS entry the cinema screen/seats live on — referenced
+// instead of a bare "1" everywhere below so both the screen's own placement
+// and its visibility gating (see frame()'s own cinemaScreenVisible check)
+// stay correct without changes if floor ordering/indices are ever reworked.
+const CINEMA_SCREEN_FLOOR_INDEX = GLOPHICS_FLOORS[0].index;
+// The roof sits directly on top of whichever floor is currently topmost —
+// that floor's own y plus its own wallHeight (not a uniform FLOOR_HEIGHT
+// multiple, since floors can now have independently different wallHeights,
+// e.g. floor 2's doubled one) — so it rises correctly no matter what a
+// future floor's own wallHeight is.
+const GLOPHICS_TOPMOST_FLOOR = GLOPHICS_FLOORS[GLOPHICS_FLOORS.length - 1];
+const GLOPHICS_ROOF_Y = GLOPHICS_TOPMOST_FLOOR.y + (GLOPHICS_TOPMOST_FLOOR.wallHeight ?? TOWN_WALL_HEIGHT);
+const GLOPHICS_ROOF_COLOR = "#6b3f2a";
+// One virtual "floor index" higher than any real floor in GLOPHICS_FLOORS —
+// lets applyGlophicsFloorCutaway treat "the roof" as just another entry
+// that's always above the topmost real floor, no special case needed.
+const GLOPHICS_ROOF_INDEX = GLOPHICS_FLOORS.length + 1;
+
+// Stairs — 2 tiles per floor transition (an "up" tile on the lower floor, a
+// "down" tile at the SAME X/Z on the floor above), Pokémon Center/Gym
+// style. Placed in the plaza's south-east corner: clear of Rodz (RODZ_X/Z
+// = 6/0), clear of Jared's shop (JARED_X/Z = -6/0 — its counter/posts/roof
+// all sit within x in [-7,-5], z in [-3,-1]), and clear of every door gap
+// (each wall's gap is centered on that wall's own midpoint, ±
+// TOWN_DOOR_HALF_WIDTH — this corner is nowhere near any of the four
+// midpoints).
+const GLOPHICS_STAIRS_X = 6;
+const GLOPHICS_STAIRS_Z = 6;
+const STAIRS_CONTACT_RADIUS = 0.9; // tighter than WILD_CONTACT_RADIUS (1.0) — shouldn't trigger from just brushing past
+const STAIRS_COOLDOWN_MS = 1200; // same "don't immediately re-trigger" reasoning as POST_BATTLE_COOLDOWN_MS, just much shorter — this is a floor change, not a fight
+const STAIRS_STEP_AWAY = 1.4; // how far the player is nudged off the tile after a floor change
+// One entry per floor transition (ground<->floor1, floor1<->floor2, ...),
+// derived from GLOPHICS_FLOORS so a future floor there automatically gets
+// its own stairs pair here too — same X/Z on every floor, a single
+// straight stairwell running up through the tower like the real games.
+const GLOPHICS_STAIR_TRANSITIONS = GLOPHICS_FLOORS.map((floor, i) => ({
+  belowFloor: i === 0 ? 0 : GLOPHICS_FLOORS[i - 1].index,
+  belowY: i === 0 ? 0 : GLOPHICS_FLOORS[i - 1].y,
+  aboveFloor: floor.index,
+  aboveY: floor.y,
+  x: GLOPHICS_STAIRS_X,
+  z: GLOPHICS_STAIRS_Z,
+}));
+
+// The single source of truth for "what world-space Y does floor N sit at" —
+// local.y, every peer's own .y, and the stairs' belowY/aboveY above all
+// ultimately trace back to this (ground is always 0; anything else is
+// looked up from GLOPHICS_FLOORS by its own index). Returns 0 for an
+// unrecognized index rather than throwing, since a peer's floor field is
+// network input and shouldn't be able to crash rendering.
+function glophicsFloorY(floorIndex) {
+  if (!floorIndex) return 0;
+  return GLOPHICS_FLOORS.find((f) => f.index === floorIndex)?.y ?? 0;
+}
+
+// --- Floor 2 cinema screen ---------------------------------------------
+// A real, actual embedded YouTube video playing on floor 2's south wall —
+// see buildCinemaScreenObject and mount()'s own cssRenderer/cssScene
+// wiring (search "CSS3DRenderer(" inside mount()) for how a DOM <iframe>
+// ends up perspective-matched into the 3D scene at all. Known, accepted
+// limitation: this is a separate DOM layer, not a WebGL mesh, so it gets no
+// real depth-occlusion against the rest of the scene (something walking
+// "in front of" it on the WebGL side won't visually block it) — a tradeoff
+// of the CSS3DRenderer technique itself, not something fixed here.
+//
+// PLACEHOLDER VIDEO — explicitly authorized this session as a stand-in
+// (Rick Astley, "Never Gonna Give You Up"). No longer the only thing that
+// can ever play here: this is now just the DEFAULT the screen falls back
+// to before any connected player has ever claimed the projectionist role
+// and changed it (see the Usher/USHER_NAME section above, and
+// cinemaScreenUrl/cinema_screen_state in mount() below) — must match the
+// api's own CINEMA_DEFAULT_SCREEN_URL (main.py) so a freshly-restarted
+// server and a freshly-loaded client agree on the same starting point.
+const CINEMA_YOUTUBE_VIDEO_ID = "dQw4w9WgXcQ";
+// autoplay=1 requires mute=1 — browsers block unmuted autoplay outright.
+// loop=1 alone only loops within a playlist context, so the documented
+// trick for looping a SINGLE video forever is playlist=<that same video
+// ID>. controls=0 since nothing here is meant to be interacted with (see
+// the pointer-events:none on the CSS3D container in mount()). enablejsapi=1
+// is required for the postMessage pauseVideo/playVideo commands frame()
+// sends the iframe when the screen is hidden/shown (see cinemaScreenShown)
+// — without it, hiding the screen via display:none stops it being DRAWN
+// but does NOT stop YouTube's own player from continuing to decode/play
+// in the background, which would otherwise waste real CPU/memory the
+// entire time this game panel is mounted, not just while on floor 2.
+const CINEMA_YOUTUBE_EMBED_URL =
+  `https://www.youtube.com/embed/${CINEMA_YOUTUBE_VIDEO_ID}?autoplay=1&mute=1&loop=1&playlist=${CINEMA_YOUTUBE_VIDEO_ID}&controls=0&enablejsapi=1`;
+// The YouTube IFrame Player API's documented postMessage command protocol
+// (https://developers.google.com/youtube/iframe_api_reference#Commands) —
+// origin-scoped to the real youtube.com embed, not "*", since this is
+// commanding a specific known frame, not broadcasting.
+function sendCinemaScreenCommand(iframe, func) {
+  iframe.contentWindow?.postMessage(JSON.stringify({ event: "command", func, args: [] }), "https://www.youtube.com");
+}
+// Now that the projectionist can point the screen at ANY http(s) URL (see
+// USHER_NAME's own section above), sendCinemaScreenCommand's YouTube-
+// specific postMessage protocol can't be assumed to do anything useful —
+// most embedded sites don't implement it at all. Every call site below
+// checks this first and, for a non-YouTube URL, just shows/hides the
+// iframe with no attempt at a controllable play state (a graceful
+// degradation, not an error — an arbitrary embedded page has no obligation
+// to expose one). Origin-matched against the exact embed host this file
+// itself builds URLs against, not a generic "contains youtube" substring
+// check, so this can't be tricked by a URL that merely mentions youtube.com
+// somewhere in a query string.
+function isYoutubeEmbedUrl(url) {
+  return typeof url === "string" && url.startsWith("https://www.youtube.com/");
+}
+// CSS-pixel size of the actual <iframe> element (16:9) — CSS3DObject
+// positions/sizes things in CSS pixels by default, so this gets scaled down
+// to CINEMA_SCREEN_WORLD_WIDTH/HEIGHT world units via the object's own
+// .scale in buildCinemaScreenObject, the same way any CSS3DRenderer scene
+// object has to be sized into a 3D world.
+const CINEMA_SCREEN_PIXEL_WIDTH = 480;
+const CINEMA_SCREEN_PIXEL_HEIGHT = 270;
+// Spans left-to-right across almost the entire south wall — floor 2 has no
+// doorway to avoid any more (hasDoors:false above), so the screen no longer
+// needs to dodge a door gap and can sit centered on the wall instead. Full
+// wall width is TOWN_HALF_X*2 = 18; inset by one wall-thickness on each
+// side so the screen doesn't visually poke past the wall's own corners.
+// Height is derived from the iframe's own real 16:9 pixel aspect — NOT set
+// independently any more (an earlier version picked a fixed, shorter
+// height here, which stretched/squashed the video to fit; a screen this
+// wide at true 16:9 needs real headroom, which is exactly why floor 2's
+// own wallHeight above was raised to *6 rather than compressing the video
+// instead).
+const CINEMA_SCREEN_WORLD_WIDTH = TOWN_HALF_X * 2 - TOWN_WALL_THICKNESS * 2;
+const CINEMA_SCREEN_WORLD_HEIGHT = CINEMA_SCREEN_WORLD_WIDTH * (CINEMA_SCREEN_PIXEL_HEIGHT / CINEMA_SCREEN_PIXEL_WIDTH);
+// Placed on floor 2's south wall (z = -TOWN_HALF_Z) — the wall farthest
+// from the stairs' floor-2 landing (world (GLOPHICS_STAIRS_X, 6), stepped
+// off to z = 6 - STAIRS_STEP_AWAY = 4.6 by goToGlophicsFloor), so the
+// screen never crowds the stairwell. Centered on the wall (x = 0) now that
+// there's no door gap to dodge.
+const CINEMA_SCREEN_X = 0;
+const CINEMA_SCREEN_Z = -TOWN_HALF_Z + TOWN_WALL_THICKNESS / 2 + 0.05; // just in front of the wall's inner face
+// Bottom edge sits CINEMA_SCREEN_BOTTOM_CLEARANCE above the floor — lower
+// than centering it in floor 2's own tall wallHeight (which put its bottom
+// edge well above head height), reading more like a real cinema screen you
+// walk up to rather than one mounted near the ceiling. Derived from the
+// screen's own height rather than a second hardcoded center value, so it
+// stays anchored to the floor if the screen's own proportions ever change.
+const CINEMA_SCREEN_BOTTOM_CLEARANCE = 0.8;
+const CINEMA_SCREEN_Y_OFFSET = CINEMA_SCREEN_BOTTOM_CLEARANCE + CINEMA_SCREEN_WORLD_HEIGHT / 2;
 
 // Sprinting — hold Shift while moving to run at SPRINT_SPEED_MULTIPLIER,
 // draining a stamina meter; regenerates whenever not sprinting (whether
@@ -93,7 +303,11 @@ const TOWN_PLAZA_COLOR = "#c9b38c";
 // recovery reads as a clearer "you're good to go again" cue than the bar
 // flipping back to blue partway through regenerating.
 const SPRINT_SPEED_MULTIPLIER = 1.9;
-const STAMINA_MAX = 100;
+// Was 100 (only ~3.6s of sprint at the drain rate below) — too short per
+// explicit feedback. Doubled rather than slowing the drain rate itself, so
+// the bar still empties/refills at the same visual speed, just holds more
+// before running out.
+const STAMINA_MAX = 200;
 const STAMINA_DRAIN_PER_SEC = 28;
 const STAMINA_REGEN_PER_SEC = 18;
 
@@ -107,7 +321,14 @@ const MIN_ZOOM_RADIUS = 5;
 // coastline/ocean.
 const MAX_ZOOM_RADIUS = 70;
 const ZOOM_SPEED = 0.02;
-const MIN_ELEVATION = 0.1;
+// Was 0.1 — always at least slightly above the look target's own height
+// (PAN_TARGET_Y), so the camera could never tilt up far enough to see
+// anything tall from up close (e.g. the cinema's own screen, now that
+// floor 2's room is much taller). Negative values put the camera BELOW
+// the look target, angled upward at it — same orbit formula as before
+// (Math.sin/cos(camElevation)), just extended past level instead of only
+// ever looking flat or down.
+const MIN_ELEVATION = -0.6;
 const MAX_ELEVATION = 1.45;
 const DRAG_SENSITIVITY = 0.006;
 const CAMERA_FOLLOW_LERP_SPEED = 6;
@@ -399,7 +620,8 @@ const BATTLE_CAM_ANGLE_OFFSET = Math.PI * 0.35;
 const ATTACK_ANIM_MS = 850; // longer, full-blast swing-through (was 500) — long enough for the wider leg-spread stance to actually read
 const DEFEND_ANIM_MS = 600;
 const CAST_ANIM_MS = 700; // heal/buff/debuff moves — see applyCastPose
-const ANIM_SETTLE_MS = Math.max(ATTACK_ANIM_MS, DEFEND_ANIM_MS, CAST_ANIM_MS) + 150; // gives the pose time to actually play before the next round's buttons appear
+const ANIM_SETTLE_BUFFER_MS = 150; // grace after a pose's own duration before the next round's buttons/camera re-aim appear
+const ANIM_SETTLE_MS = Math.max(ATTACK_ANIM_MS, DEFEND_ANIM_MS, CAST_ANIM_MS) + ANIM_SETTLE_BUFFER_MS; // no longer used by the wild battle's own round-advance timers (see effectivePoseDurationMs) now that a saved pose override can run longer than any of these fixed durations — still correct as a plain default for anything not yet made duration-aware
 // How long a win/catch's EXP-award round-trip gets before giving up and
 // revealing Continue anyway (see awardBattleResult) — a network hiccup
 // should never be able to soft-lock the battle screen.
@@ -472,6 +694,15 @@ const LABEL_VISIBLE_DISTANCE = 20;
 // for the optimistic local bump on Yes; ctx.onClaimDaily's real response
 // (via the normal glophimon.menu round-trip) is the actual source of truth.
 const DAILY_CLAIM_GLOPHIBALLS = 5;
+// Rodz's own parting line once a claim actually succeeds — picked at
+// random purely for a little variety, not because any of them mean
+// anything different (see rodzClaimBtn's own click handler below).
+const RODZ_CLAIM_SEND_OFFS = [
+  "Happy Glophimon catching!",
+  "Take care out there!",
+  "Go get 'em, trainer!",
+  "Good luck on your next catch!",
+];
 // Rodz's ambient "come claim your reward" loop while unclaimed (see
 // updateRodzShout) — a plain show/hide cycle using the same chat-bubble
 // sprite technique GL Sims World's own conversation system uses (see
@@ -535,6 +766,103 @@ const KARIRS_BOARD_HEIGHT = 1.2;
 // for the TV's simplified live view.
 const KARIRS_STEP_DELAY_MS = 300;
 
+// Practice races — see karirsPracticeState/onKarraPracticeClick/
+// simulateKarirsPracticeRace. Entirely client-local (no server call at
+// all), so blocking it is purely a courtesy against a practice race
+// visually clashing with the real one on the same shared track, not an
+// actual resource the server needs protected.
+const KARIRS_PRACTICE_COUNTDOWN_MS = 10000;
+// "the next race will start in 1 minute" — if the real race is either
+// already running, or about to (betting closes within this window), Karra
+// declines instead of starting the countdown.
+const KARIRS_PRACTICE_BLOCK_WINDOW_MS = 60000;
+// How long a finished practice race's final standings stay on the track
+// before automatically reverting to whatever the real karirsRace is doing.
+const KARIRS_PRACTICE_RESULT_HOLD_MS = 6000;
+const KARIRS_PRACTICE_FALLBACK_NAMES = ["Practice Runner A", "Practice Runner B", "Practice Runner C", "Practice Runner D"];
+// Mirrors karirs_engine.py's own step_race constants exactly (TOTAL_STEPS/
+// SPEED_RANGE/SPEED_CHANGE_STEP_INTERVAL/FINISH_LINE) — a practice race
+// should feel like a real one, just simulated locally instead of fetched
+// from the server, with no betting/payout math attached to it at all.
+const KARIRS_PRACTICE_TOTAL_STEPS = 150;
+const KARIRS_PRACTICE_SPEED_MIN = 0;
+const KARIRS_PRACTICE_SPEED_MAX = 2;
+const KARIRS_PRACTICE_SPEED_CHANGE_MIN = 5;
+const KARIRS_PRACTICE_SPEED_CHANGE_MAX = 15;
+const KARIRS_PRACTICE_FINISH_LINE = 100;
+
+// A direct port of karirs_engine.py's own step_race/compute_race — same
+// algorithm, run client-side instead of server-side, since a practice race
+// has no odds/payouts to protect and never needs to be trusted. Returns
+// the same { steps: [{positions}], winner } shape a real race's own
+// steps/winning_name already have, so updateKarirsTrackVisual's own
+// step-interpolation/gait code can render either one identically without
+// caring which kind it's looking at.
+function simulateKarirsPracticeRace(racerNames) {
+  const positions = {};
+  const speeds = {};
+  const nextChange = {};
+  for (const name of racerNames) {
+    positions[name] = 0;
+    speeds[name] = KARIRS_PRACTICE_SPEED_MIN + Math.random() * (KARIRS_PRACTICE_SPEED_MAX - KARIRS_PRACTICE_SPEED_MIN);
+    nextChange[name] =
+      KARIRS_PRACTICE_SPEED_CHANGE_MIN + Math.floor(Math.random() * (KARIRS_PRACTICE_SPEED_CHANGE_MAX - KARIRS_PRACTICE_SPEED_CHANGE_MIN + 1));
+  }
+  const steps = [];
+  let winner = null;
+  for (let step = 1; step <= KARIRS_PRACTICE_TOTAL_STEPS; step++) {
+    for (const name of racerNames) {
+      if (step >= nextChange[name]) {
+        speeds[name] = KARIRS_PRACTICE_SPEED_MIN + Math.random() * (KARIRS_PRACTICE_SPEED_MAX - KARIRS_PRACTICE_SPEED_MIN);
+        nextChange[name] =
+          step + KARIRS_PRACTICE_SPEED_CHANGE_MIN + Math.floor(Math.random() * (KARIRS_PRACTICE_SPEED_CHANGE_MAX - KARIRS_PRACTICE_SPEED_CHANGE_MIN + 1));
+      }
+    }
+    let crossed = null;
+    for (const name of racerNames) {
+      if (positions[name] < KARIRS_PRACTICE_FINISH_LINE) {
+        positions[name] = Math.min(positions[name] + speeds[name], KARIRS_PRACTICE_FINISH_LINE);
+        if (positions[name] >= KARIRS_PRACTICE_FINISH_LINE && crossed === null) crossed = name;
+      }
+    }
+    const isFinal = crossed !== null || step === KARIRS_PRACTICE_TOTAL_STEPS;
+    steps.push({ positions: { ...positions } });
+    if (isFinal) {
+      winner = crossed ?? racerNames.reduce((best, n) => (positions[n] > positions[best] ? n : best), racerNames[0]);
+      break;
+    }
+  }
+  return { steps, winner };
+}
+
+// A real racetrack rendered directly in the world just south of the field
+// itself (see buildKarirsTrack/updateKarirsTrackVisual) — lets anyone
+// standing nearby watch a race happen live without ever opening the TV
+// popup, which stays exactly as it was (a closer, exact-numbers view) for
+// anyone who wants it. Purely a second *rendering* of the same already-
+// synced karirsRace/steps data the TV already replays locally against
+// started_at — no new network state at all, since every client already
+// has everything needed to compute any racer's live percent-complete.
+// Extends south from the field's own south wall, safely inside the
+// island's own ARENA_HALF_Z=80 bound (see buildGround).
+const KARIRS_TRACK_LANE_COUNT = 4; // must match the api's own karirs_engine.DEFAULT_RACER_COUNT
+const KARIRS_TRACK_LANE_SPACING = 2.4;
+const KARIRS_TRACK_START_Z = KARIRS_FIELD_Z - KARIRS_FIELD_HALF - 3;
+const KARIRS_TRACK_LENGTH = 30;
+const KARIRS_TRACK_FINISH_Z = KARIRS_TRACK_START_Z - KARIRS_TRACK_LENGTH;
+const KARIRS_TRACK_WIDTH = KARIRS_TRACK_LANE_COUNT * KARIRS_TRACK_LANE_SPACING + 2;
+// One racer marker's own lane offset from KARIRS_FIELD_X, centered on the
+// track's own width — e.g. 4 lanes at spacing 2.4 gives [-3.6,-1.2,1.2,3.6].
+const KARIRS_TRACK_LANE_OFFSETS = Array.from(
+  { length: KARIRS_TRACK_LANE_COUNT },
+  (_, i) => (i - (KARIRS_TRACK_LANE_COUNT - 1) / 2) * KARIRS_TRACK_LANE_SPACING,
+);
+// Position itself needs no separate easing — see updateKarirsTrackVisual's
+// own step-interpolation (ported from games/karirs' own currentStepInfo()),
+// which already produces a frame-smooth value every frame, not a value
+// that jumps once every KARIRS_STEP_DELAY_MS and needs smoothing after
+// the fact.
+
 // The Luba lobby area — same walled-footprint idea as the Karirs field,
 // mirrored diagonally opposite it across the origin. Boss Rick lets any
 // player host a Luba deathmatch (see showBossRickMenu/renderBossRickMenu);
@@ -554,6 +882,39 @@ const BOSS_RICK_Z = LUBA_Z;
 // the api's own LUBA_DURATION_OPTIONS_S.
 const LUBA_DURATION_OPTIONS_S = [180, 300, 600];
 const LUBA_MAX_MEMBERS = 8;
+
+// The cinema's own greeter — floor 2's "projectionist" feature (see the
+// CINEMA_YOUTUBE_VIDEO_ID/buildCinemaScreenObject section below for the
+// screen itself) is entirely driven through him: click him to see who
+// currently holds the projectionist role (server-shared, via
+// cinema_projectionist_state), claim the role yourself if it's vacant, or —
+// if you're already holding it — change what's playing. His own popup
+// content is state-driven rather than step-driven, the same shape the
+// player-options popup (renderPlayerOptionsMenu) already uses, not Boss
+// Rick's own multi-step dialogue. Dark "uniform" colors (near-black body/
+// legs) to read as staff rather than a trainer, same idea as Boss Rick's
+// own dark suit.
+const USHER_NAME = "Usher";
+const USHER_COLORS = { head: "#d1a17a", body: "#1c1c24", arm: "#d1a17a", leg: "#0d0d12" };
+// Standing just past the stairs' floor-2 landing (world
+// (GLOPHICS_STAIRS_X, GLOPHICS_STAIRS_Z - STAIRS_STEP_AWAY) = (6, 4.6) —
+// see goToGlophicsFloor), offset well off to the side in -X so he's never
+// standing ON the exact tile a player is nudged onto when arriving, and
+// well north (larger Z) of both the bench rows (CINEMA_SEAT_ROW_Z tops out
+// at z=3.3) and the screen itself (CINEMA_SCREEN_Z, deep in -Z against the
+// south wall) — he's positioned right in the little gap between the
+// landing and the first row of seats, exactly where a real usher would
+// stand to greet people walking in before they head further into the room.
+const USHER_X = 3.5;
+const USHER_Z = 4.6;
+
+// Simple square-footprint AABB test — used by isInsideGlophicsFootprint
+// (Glophics specifically, half=TOWN_HALF_X==TOWN_HALF_Z so one half works
+// for both axes), part of the Glophics floor-cutaway feature (see
+// applyGlophicsFloorCutaway/updateGlophicsExteriorCutaway below).
+function isInsideAreaFootprint(x, z, centerX, centerZ, half) {
+  return Math.abs(x - centerX) <= half && Math.abs(z - centerZ) <= half;
+}
 
 // Tambayan — the one remaining open quadrant (Karirs top-right, Luba
 // bottom-left, this bottom-right). Two physical chessboards inside; a
@@ -579,8 +940,44 @@ const CHESS_BOARD_1_X = TAMBAYAN_X - 5;
 const CHESS_BOARD_1_Z = TAMBAYAN_Z;
 const CHESS_BOARD_2_X = TAMBAYAN_X + 5;
 const CHESS_BOARD_2_Z = TAMBAYAN_Z;
+// The third table — a standing AI match (see the api's own AI_BOARD_ID/
+// chess_ai_start/dama_ai_start), on the south side of the plaza so it
+// doesn't crowd the two player-hosted boards along the center line above.
+// Dual-purpose as of Dama Phase 3 — the host picks Chess (Stockfish) or
+// Dama (this project's own minimax search) fresh each time, same as
+// boards 1/2 already let the host pick Chess or Dama.
+const CHESS_BOARD_3_X = TAMBAYAN_X;
+const CHESS_BOARD_3_Z = TAMBAYAN_Z + 6;
+const AI_BOARD_ID = 3;
 const CHESS_BOARD_SIZE = 1.6; // top surface width/depth
 const CHESS_TABLE_HEIGHT = 0.7;
+// Matches the table box buildChessTable actually renders (CHESS_BOARD_SIZE +
+// 0.3 per side, axis-aligned, centered on the board's own x/z — facingAngle
+// is always 0 for every board, see buildTambayan).
+const CHESS_TABLE_HALF = (CHESS_BOARD_SIZE + 0.3) / 2;
+
+function isInsideChessTables(x, z) {
+  return (
+    (Math.abs(x - CHESS_BOARD_1_X) <= CHESS_TABLE_HALF && Math.abs(z - CHESS_BOARD_1_Z) <= CHESS_TABLE_HALF) ||
+    (Math.abs(x - CHESS_BOARD_2_X) <= CHESS_TABLE_HALF && Math.abs(z - CHESS_BOARD_2_Z) <= CHESS_TABLE_HALF) ||
+    (Math.abs(x - CHESS_BOARD_3_X) <= CHESS_TABLE_HALF && Math.abs(z - CHESS_BOARD_3_Z) <= CHESS_TABLE_HALF)
+  );
+}
+
+// Stockfish — stands just past its own table facing back toward it/the
+// plaza center, always "waiting for an opponent" (a plain idle pose, same
+// as every other standing NPC here). Not clickable itself — per spec, the
+// battle is started by clicking the board, same interaction shape as the
+// two player-hosted tables.
+const STOCKFISH_NAME = "Stockfish";
+const STOCKFISH_COLORS = { head: "#d1d5db", body: "#111827", arm: "#d1d5db", leg: "#1f2937" };
+const STOCKFISH_X = CHESS_BOARD_3_X;
+const STOCKFISH_Z = CHESS_BOARD_3_Z + 1.3;
+// The AI board's own Dama opponent name (see the api's own DAMA_AI_NAME) —
+// no separate standing NPC model for it, unlike Stockfish's own; the board's
+// dual purpose is communicated by the host-choice menu instead (see
+// renderChessHostMenu's isAiBoard branch).
+const DAMA_AI_NAME = "Dama AI";
 
 // Standard even-odd point-in-polygon test — used for Tambayan's own no-spawn
 // zone, the "clickable from anywhere inside" chess spectate gate, and the
@@ -599,6 +996,29 @@ function isInsidePolygon(x, z, vertices) {
 
 function isInsideTambayan(x, z) {
   return isInsidePolygon(x, z, TAMBAYAN_VERTICES);
+}
+
+// Which walled area (if any) a world position is inside — "town" (the
+// Glophics building/plaza, any floor — this is purely an X/Z footprint
+// test, so it can't tell floor 0 from the cinema above it; callers that
+// care about that (Rodz/Jared/Usher's own labels, peers' floor field) AND
+// this with their own floor check), "karirs"/"luba" (simple AABB, see
+// isInsideAreaFootprint), "tambayan" (pentagon, see isInsideTambayan), or
+// null when standing outside all of them (open plains). A single source of
+// truth for the "labels/signs belonging to a building should only be
+// visible to someone actually inside that same building" rule — every
+// world-space label/sign sprite in this file uses a depthTest:false
+// SpriteMaterial (see buildTownSign/buildKarirsBoardSign), so none of them
+// are ever occluded by wall/floor geometry the normal WebGL depth-test way;
+// distance alone (LABEL_VISIBLE_DISTANCE) let one building's labels bleed
+// through another building's walls whenever the two happened to be within
+// range of each other, which this closes off explicitly instead.
+function getAreaKey(x, z) {
+  if (isInsideAreaFootprint(x, z, 0, 0, TOWN_HALF_X)) return "town";
+  if (isInsideAreaFootprint(x, z, KARIRS_FIELD_X, KARIRS_FIELD_Z, KARIRS_FIELD_HALF)) return "karirs";
+  if (isInsideAreaFootprint(x, z, LUBA_X, LUBA_Z, LUBA_HALF)) return "luba";
+  if (isInsideTambayan(x, z)) return "tambayan";
+  return null;
 }
 
 // Shortest distance from a point to a line segment, clamped to the
@@ -654,6 +1074,28 @@ const CHESS_UNICODE = {
   k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟",
 };
 
+// Same "green" board theme the real standalone Cheddar Chess client offers
+// (games/chess/client/src/game.js's own BOARD_THEMES.green) — picked as a
+// fixed look here rather than a picker, since nothing asked for a per-player
+// preference.
+const TAMBAYAN_BOARD_LIGHT = "#eeeed2";
+const TAMBAYAN_BOARD_DARK = "#769656";
+// Last-move highlight, shared by both Chess's and Dama's own match modals —
+// a solid tint that REPLACES the square's own light/dark background
+// (rather than a translucent overlay, since nothing sits behind these
+// square divs to blend with) so it reads the same regardless of which
+// square color it lands on.
+const TAMBAYAN_LAST_MOVE_TINT = "#baca44";
+// Dama-only (see renderDamaMatchModal) — the api's own dama_move/
+// _play_dama_ai_move both now stamp last_move.by with whichever side
+// actually made it, so this can show a visually distinct tint for "the
+// opponent's (or the AI's) last move" instead of reusing the same color
+// as "my own last move" above — otherwise, after an AI/opponent move, the
+// highlighted squares read exactly the same as when YOU were the one who
+// just moved, which is exactly what made it unclear whose move had
+// actually landed.
+const TAMBAYAN_LAST_MOVE_OPPONENT_TINT = "#c97b4a";
+
 // Parses just the piece-placement field of a FEN string into an 8x8 array
 // (row 0 = rank 8 down to row 7 = rank 1, matching how FEN itself is
 // ordered), each cell either a piece letter or null. No legal-move
@@ -694,6 +1136,95 @@ const TEAM_FOCUS_CAM_BEHIND = 1.2;
 const TEAM_FOCUS_CAM_HEIGHT = 2.0;
 const TEAM_FOCUS_CAM_LOOK_Y = 0.2;
 const TEAM_FOCUS_CAM_LOOK_AHEAD = 3;
+
+// Height's own valid range for a focus shot's camera — mirrors
+// CAMERA_FOCUS_FIELDS' own "Height" slider bounds (see below) so that
+// slider and a height-bounce (heightRotateSpeed, see advanceFocusOrbit)
+// can never disagree about where the top/bottom of the bounce is, same
+// "one shared constant, not two copies of the same number" reasoning as
+// MIN_ELEVATION/MAX_ELEVATION for the orbit cameras' own pitch bounce.
+const FOCUS_CAM_HEIGHT_MIN = 0.5;
+const FOCUS_CAM_HEIGHT_MAX = 5;
+
+// Shared position/lookAt math for the wild battle's own focus camera —
+// factored out so mount()'s real focusWildCameraOnRig (which reads a live
+// rig's actual position) and the Camera Designer's own live preview for a
+// kind:"focus" slot (which has no real battle rig, just two stand-in
+// preview rigs at fixed positions — see PREVIEW_BATTLE_WILD_Z/PLAYER_Z)
+// both produce the exact same shot for a given set of behind/height/lookY/
+// lookAhead values, instead of two hand-written copies of this formula
+// drifting apart. `pos`/`lookAtPos` are bare {x,z} positions, not rigs, so
+// callers with no rig object at all (the preview) can use this too.
+//
+// `theta` (added alongside the orbit slots' own rotation support) swings
+// the camera around the anchor position while leaving the lookAt target
+// completely alone — that's what makes it read as "orbiting the subject"
+// instead of just panning the whole shot sideways. `theta = 0` (the
+// default, and the value every existing call site used to implicitly use
+// before this parameter existed) must reproduce today's exact "directly
+// behind" placement: facingAngle+PI+0 has sin/cos exactly -sin(facingAngle)/
+// -cos(facingAngle), i.e. -fx/-fz, which is exactly the original
+// `pos - fx*behind`/`pos - fz*behind` formula below.
+function computeFocusCameraFrame(pos, facingAngle, lookAtPos, params, theta = 0) {
+  const fx = Math.sin(facingAngle);
+  const fz = Math.cos(facingAngle);
+  const orbitAngle = facingAngle + Math.PI + theta;
+  return {
+    camX: pos.x + Math.sin(orbitAngle) * params.behind,
+    camY: params.height,
+    camZ: pos.z + Math.cos(orbitAngle) * params.behind,
+    lookX: lookAtPos ? lookAtPos.x : pos.x + fx * params.lookAhead,
+    lookY: params.lookY,
+    lookZ: lookAtPos ? lookAtPos.z : pos.z + fz * params.lookAhead,
+  };
+}
+
+// Continuous per-frame rotation for whichever focus-camera shot is
+// currently active (see CAMERA_FOCUS_FIELDS' angle/rotateSpeed/
+// heightRotateSpeed, added alongside the 3 orbit slots' own rotateSpeed/
+// elevationRotateSpeed). Called every frame from the `else if
+// (battle.focus)` render branch — deliberately NOT from
+// focusWildCameraOnRig's own one-shot re-aim, because a re-aim only fires
+// once per game event (declaring, an attack landing, ...), not once per
+// frame, so advancing rotation there would only tick once per re-aim
+// instead of animating continuously while the shot stays on screen.
+// battle.focus already carries everything needed to keep recomputing the
+// shot (anchorRig/facingAngle/lookAtPos/params, stashed by
+// focusWildCameraOnRig) — this just re-derives camX/camY/camZ/lookX/lookY/
+// lookZ from those plus an advancing angle/height and overwrites them in
+// place, mutating the same object the render block reads a moment later.
+//
+// Runtime angle/height state is keyed by slot id on battle.focusOrbitState
+// (NOT on battle.focus itself, which gets wholesale-replaced by every
+// re-aim) so a slot's rotation keeps advancing across re-aims of that same
+// slot within a round, and resumes where it left off if the active slot
+// changes away and later comes back, rather than snapping to theta=0 every
+// single re-aim.
+//
+// A shot with no rotation configured (rotateSpeed and heightRotateSpeed
+// both 0, or autoRotate off) — the default for all 4 focus slots until a
+// player customizes one — bails out immediately and leaves the static
+// snapshot focusWildCameraOnRig already computed completely untouched, so
+// today's exact behavior is unaffected until rotation is actually turned
+// on.
+function advanceFocusOrbit(battle, focus, dt) {
+  const params = focus.params;
+  if (!params || !params.autoRotate) return;
+  if (params.rotateSpeed <= 0 && params.heightRotateSpeed <= 0) return;
+  if (!focus.anchorRig) return; // shouldn't normally happen — every focusWildCameraOnRig call passes a rig
+  battle.focusOrbitState = battle.focusOrbitState || {};
+  const key = focus.slotId || "_default";
+  const state = battle.focusOrbitState[key] || (battle.focusOrbitState[key] = { angle: params.angle ?? 0, camElevation: params.height, camElevationDir: 1 });
+  state.angle += params.rotateSpeed * dt;
+  const height = advanceOrbitElevation(state, params.height, params.heightRotateSpeed, dt, FOCUS_CAM_HEIGHT_MIN, FOCUS_CAM_HEIGHT_MAX);
+  const frame = computeFocusCameraFrame(focus.anchorRig.group.position, focus.facingAngle, focus.lookAtPos, { ...params, height }, state.angle);
+  focus.camX = frame.camX;
+  focus.camY = frame.camY;
+  focus.camZ = frame.camZ;
+  focus.lookX = frame.lookX;
+  focus.lookY = frame.lookY;
+  focus.lookZ = frame.lookZ;
+}
 
 function randomInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -919,17 +1450,237 @@ function resolveMove({ move, attackerCombatant, defenderCombatant, targets, defe
   return { hit: true, damage: totalDmg };
 }
 
+// --- Procedural terrain (hills/mountains/desert) ------------------------
+// Every open stretch of the island — away from Town/Karirs/Luba/Tambayan,
+// the racetrack connecting Karirs to its own finish line, and the
+// coastline — gets real elevation instead of being flat, so the "plains"
+// actually reads as land instead of a green floor. A broad, slow-varying
+// "biome" value per position decides whether that patch reads as desert
+// (low, gentle dunes), hills (moderate rolling bumps), or mountains (tall,
+// rocky/snow-capped peaks), blended smoothly rather than in hard bands so
+// one biome fades into the next. Every existing built area stays exactly
+// as flat as it always was — this only ever ADDS elevation in the open
+// space between them, via a smooth "how far outside every protected area
+// am I" factor (see terrainFlattenFactor) that's 0 right at each area's
+// own edge, ramps up to full elevation over TERRAIN_FLATTEN_MARGIN, and
+// ramps back down to 0 again right at the coastline so the ground still
+// meets the ocean plane cleanly with no cliff/gap.
+//
+// Hand-written value-noise rather than a noise library dependency — no
+// noise package exists in this project's own deps, and this needs nothing
+// fancier than smoothed, deterministic, seed-free pseudo-randomness — same
+// "small hand-written thing instead of a new dependency" choice this
+// project already made elsewhere (e.g. the Dama AI's own search, see
+// dama_ai.py). Deterministic is what actually matters here: every client
+// (and the server, which never touches height at all) independently
+// computes the exact same Y for any given X/Z, so this needs zero network
+// protocol changes — walking/wild-movement/collision all stay pure X/Z
+// exactly as before, this is a purely visual layer on top.
+
+// Pseudo-random in [0,1) from integer grid coordinates — a fixed
+// bit-mixing function, not an RNG with state, so it's trivially
+// deterministic and needs no seed.
+function terrainHash(x, z) {
+  let h = (x * 374761393 + z * 668265263) | 0;
+  h = (h ^ (h >>> 13)) * 1274126177;
+  h = h ^ (h >>> 16);
+  return (h >>> 0) / 4294967295;
+}
+
+// Smoothstep-interpolated between the 4 surrounding integer grid points'
+// own hashes — one "octave" of noise.
+function terrainSmoothNoise(x, z) {
+  const x0 = Math.floor(x);
+  const z0 = Math.floor(z);
+  const sx = x - x0;
+  const sz = z - z0;
+  const n00 = terrainHash(x0, z0);
+  const n10 = terrainHash(x0 + 1, z0);
+  const n01 = terrainHash(x0, z0 + 1);
+  const n11 = terrainHash(x0 + 1, z0 + 1);
+  const ux = sx * sx * (3 - 2 * sx);
+  const uz = sz * sz * (3 - 2 * sz);
+  const nx0 = n00 + (n10 - n00) * ux;
+  const nx1 = n01 + (n11 - n01) * ux;
+  return nx0 + (nx1 - nx0) * uz;
+}
+
+// Layered ("fractal") noise — a few octaves of the smooth noise above at
+// increasing frequency and decreasing weight, which is what actually
+// gives natural-looking terrain instead of one uniform wave pattern.
+function terrainFractalNoise(x, z, octaves, scale) {
+  let total = 0;
+  let amplitude = 1;
+  let frequency = scale;
+  let maxValue = 0;
+  for (let i = 0; i < octaves; i++) {
+    total += terrainSmoothNoise(x * frequency, z * frequency) * amplitude;
+    maxValue += amplitude;
+    amplitude *= 0.5;
+    frequency *= 2;
+  }
+  return total / maxValue; // normalized to [0,1)
+}
+
+function terrainSmooth01(t) {
+  const c = Math.min(1, Math.max(0, t));
+  return c * c * (3 - 2 * c);
+}
+
+// A broad, slow-varying [0,1) value deciding the local biome — sampled far
+// from the elevation noise's own coordinates (+5000/-5000) so the two are
+// uncorrelated; otherwise biome boundaries would always land exactly on
+// elevation contours, which looks artificial rather than like real,
+// independently-varying land and climate. scale=0.006 (a wavelength close
+// to the whole island's own diameter) was tried first and confirmed, by
+// directly scanning it, to only ever reach ~0.30-0.61 across the entire
+// map — never actually crossing the desert/mountain thresholds below, so
+// every open stretch of land rendered as "hills" no matter where you went.
+// 0.025 (checked the same way) spans ~0.11-0.92, comfortably covering both
+// biome extremes in patches large enough to read as real regions rather
+// than tiny scattered speckles.
+function terrainBiomeValue(x, z) {
+  return terrainFractalNoise(x + 5000, z - 5000, 3, 0.025);
+}
+
+// desert (gentle dunes) below ~0.38, mountains (tall peaks) above ~0.62,
+// hills in between — the thresholds themselves are blended across via
+// terrainSmooth01 rather than switched on abruptly, so nothing snaps.
+function terrainBiomeAmplitude(biome) {
+  const DESERT_AMPLITUDE = 1.2;
+  const HILL_AMPLITUDE = 4.5;
+  const MOUNTAIN_AMPLITUDE = 13;
+  if (biome < 0.5) {
+    return DESERT_AMPLITUDE + (HILL_AMPLITUDE - DESERT_AMPLITUDE) * terrainSmooth01((biome - 0.3) / 0.2);
+  }
+  return HILL_AMPLITUDE + (MOUNTAIN_AMPLITUDE - HILL_AMPLITUDE) * terrainSmooth01((biome - 0.5) / 0.2);
+}
+
+// How many units it takes each protected area's edge (or the coastline) to
+// fade between "fully flat" and "full open-terrain elevation."
+const TERRAIN_FLATTEN_MARGIN = 10;
+
+// 0 = fully flat/protected (inside or right at an existing built area's
+// own edge, or right at the coastline), 1 = full open-terrain elevation.
+// Every one of those systems already has its own exact footprint test
+// (walls, collision, no-spawn zones); this only needs a rough "how far
+// past that footprint's edge am I," so plain axis-aligned/circular
+// distance checks against the very same center/half-extent constants
+// those already use is enough — no need to share their own more precise
+// shape logic.
+function terrainFlattenFactor(x, z) {
+  let factor = 1;
+  factor = Math.min(factor, terrainSmooth01(Math.max(Math.abs(x) - TOWN_HALF_X, Math.abs(z) - TOWN_HALF_Z) / TERRAIN_FLATTEN_MARGIN));
+  factor = Math.min(factor, terrainSmooth01(Math.max(Math.abs(x - KARIRS_FIELD_X) - KARIRS_FIELD_HALF, Math.abs(z - KARIRS_FIELD_Z) - KARIRS_FIELD_HALF) / TERRAIN_FLATTEN_MARGIN));
+  factor = Math.min(factor, terrainSmooth01(Math.max(Math.abs(x - LUBA_X) - LUBA_HALF, Math.abs(z - LUBA_Z) - LUBA_HALF) / TERRAIN_FLATTEN_MARGIN));
+  factor = Math.min(factor, terrainSmooth01((Math.hypot(x - TAMBAYAN_X, z - TAMBAYAN_Z) - TAMBAYAN_RADIUS) / TERRAIN_FLATTEN_MARGIN));
+  // The Karirs racetrack corridor — a straight strip running from the
+  // field's own south edge down to the finish line (see KARIRS_TRACK_*),
+  // not just a circle around one point like every other area above.
+  const trackHalfWidth = KARIRS_TRACK_WIDTH / 2;
+  const distX = Math.abs(x - KARIRS_FIELD_X) - trackHalfWidth;
+  const distZ = z > KARIRS_TRACK_START_Z ? z - KARIRS_TRACK_START_Z : z < KARIRS_TRACK_FINISH_Z ? KARIRS_TRACK_FINISH_Z - z : 0;
+  factor = Math.min(factor, terrainSmooth01(Math.max(distX, distZ) / TERRAIN_FLATTEN_MARGIN));
+  // Coastline — fades back to 0 near the island's own edge too, so hills
+  // never jut into the ocean or leave a cliff/gap at the shoreline.
+  const distFromEdge = Math.min(ARENA_HALF_X - Math.abs(x), ARENA_HALF_Z - Math.abs(z));
+  factor = Math.min(factor, terrainSmooth01(distFromEdge / TERRAIN_FLATTEN_MARGIN));
+  return factor;
+}
+
+// The single source of truth for "how tall is the ground at this X/Z" —
+// used to build the ground mesh itself (see buildGround) and to place
+// every entity that stands on it (the local player, peers, wild
+// Glophimon) at the correct height each frame (see entityGroundY).
+function terrainHeight(x, z) {
+  const flatten = terrainFlattenFactor(x, z);
+  if (flatten <= 0) return 0;
+  const biome = terrainBiomeValue(x, z);
+  // 0..1, deliberately never negative — real hills/mountains rise ABOVE a
+  // base plain, they don't dip below it. The ocean plane sits at a fixed
+  // y just under the whole island (see buildGround's own comment); a
+  // height that ever went negative here would sink part of the ground
+  // mesh below it, which looks exactly like flood water sitting in a
+  // valley in the middle of dry land — confirmed as a real bug via an
+  // actual screenshot before this fix, not just a theoretical concern.
+  const detail = terrainFractalNoise(x, z, 4, 0.035);
+  return detail * terrainBiomeAmplitude(biome) * flatten;
+}
+
+// floor 0 is the actual outdoor ground, which now has real elevation (see
+// terrainHeight above); every other floor still just sits at its own
+// fixed GLOPHICS_FLOORS Y (glophicsFloorY) — this is the one place that
+// distinction is made, used everywhere a player/peer's own Y needs
+// setting for whatever floor they're currently on.
+function entityGroundY(floorIndex, x, z) {
+  return floorIndex === 0 ? terrainHeight(x, z) : glophicsFloorY(floorIndex);
+}
+
+const TERRAIN_COLOR_GRASS = new THREE.Color("#4a7c4a");
+const TERRAIN_COLOR_DIRT = new THREE.Color("#8a6d4a");
+const TERRAIN_COLOR_SAND = new THREE.Color("#d9c58a");
+const TERRAIN_COLOR_ROCK = new THREE.Color("#767068");
+const TERRAIN_COLOR_SNOW = new THREE.Color("#f2f2f2");
+
+// Grass near sea level fading to dirt as elevation rises, skewed toward
+// sand in desert biomes regardless of elevation, and toward bare rock —
+// snow-capped at the very top — at real altitude regardless of biome
+// (a tall enough peak reads as rock/snow even inside an otherwise "hill"
+// region, same as real mountains).
+function terrainColorAt(height, biome) {
+  const color = TERRAIN_COLOR_GRASS.clone();
+  color.lerp(TERRAIN_COLOR_DIRT, terrainSmooth01(height / 3));
+  color.lerp(TERRAIN_COLOR_SAND, terrainSmooth01((0.4 - biome) / 0.15));
+  color.lerp(TERRAIN_COLOR_ROCK, terrainSmooth01((height - 5) / 4));
+  color.lerp(TERRAIN_COLOR_SNOW, terrainSmooth01((height - 10) / 3));
+  return color;
+}
+
 // Ocean half-extent — vastly bigger than the island itself (see
 // ARENA_HALF_X/Z) so its own outer edge can never be reached at any zoom
 // level; a flat plane this size costs nothing extra to render regardless.
 const OCEAN_HALF_EXTENT = 2000;
 
+// Vertex spacing on the displaced ground mesh below — 128 segments across
+// a ~166-unit island is a little under 1.3 units/vertex, smooth enough for
+// hills/mountains to read as real curved terrain rather than faceted
+// blocks, without pushing vertex count (129² ≈ 16.6k) anywhere near a real
+// cost for a one-time build.
+const TERRAIN_MESH_SEGMENTS = 128;
+
 function buildGround(scene) {
   const groundWidth = (ARENA_HALF_X + 3) * 2;
   const groundDepth = (ARENA_HALF_Z + 3) * 2;
+  const geometry = new THREE.PlaneGeometry(groundWidth, groundDepth, TERRAIN_MESH_SEGMENTS, TERRAIN_MESH_SEGMENTS);
+  const positions = geometry.attributes.position;
+  const colors = new Float32Array(positions.count * 3);
+  for (let i = 0; i < positions.count; i++) {
+    // PlaneGeometry's own vertices start flat in local (x, y, 0) — rotating
+    // by -Math.PI/2 around X below is what turns this into a horizontal
+    // ground plane, and per this project's own established convention for
+    // that exact rotation (see e.g. buildTambayanPlazaGeometry's own
+    // comment), it maps local x -> world x unchanged, local y -> world -z,
+    // and (whatever we set this vertex's own local z to right here) ->
+    // world y. So: sample terrain height at the vertex's real WORLD x/z,
+    // then store it in local z for the rotation to turn into world height.
+    const localX = positions.getX(i);
+    const localY = positions.getY(i);
+    const worldX = localX;
+    const worldZ = -localY;
+    const height = terrainHeight(worldX, worldZ);
+    positions.setZ(i, height);
+    const biome = terrainBiomeValue(worldX, worldZ);
+    const color = terrainColorAt(height, biome);
+    colors[i * 3] = color.r;
+    colors[i * 3 + 1] = color.g;
+    colors[i * 3 + 2] = color.b;
+  }
+  geometry.computeVertexNormals();
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(groundWidth, groundDepth),
-    new THREE.MeshStandardMaterial({ color: "#4a7c4a" }),
+    geometry,
+    new THREE.MeshStandardMaterial({ vertexColors: true }),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
@@ -1047,11 +1798,16 @@ function updateSkyFollowCamera(skyDome, sunSprite, camera) {
 // Standard slab-method segment/AABB test, restricted to the parametric
 // segment (t in [0,1]) rather than an infinite ray — used by
 // updateTownWallFade to find which wall segment(s), if any, actually sit
-// between the camera and the character this frame. Walls always span
-// y in [0, TOWN_WALL_HEIGHT], so that axis doesn't need to be part of box.
+// between the camera and the character this frame. Reads the box's own
+// baseY/wallHeight (see buildTownWallSegment) rather than a hardcoded
+// [0, TOWN_WALL_HEIGHT] range, since an upper Glophics floor's walls sit at
+// a raised baseY and, for floor 2, a taller wallHeight than the ground
+// floor's own walls.
 function segmentIntersectsWallBox(x0, y0, z0, x1, y1, z1, box) {
-  const minB = [box.minX, 0, box.minZ];
-  const maxB = [box.maxX, TOWN_WALL_HEIGHT, box.maxZ];
+  const baseY = box.baseY ?? 0;
+  const wallHeight = box.wallHeight ?? TOWN_WALL_HEIGHT;
+  const minB = [box.minX, baseY, box.minZ];
+  const maxB = [box.maxX, baseY + wallHeight, box.maxZ];
   const p = [x0, y0, z0];
   const d = [x1 - x0, y1 - y0, z1 - z0];
   let tMin = 0;
@@ -1071,30 +1827,40 @@ function segmentIntersectsWallBox(x0, y0, z0, x1, y1, z1, box) {
   return true;
 }
 
-function buildTownWallSegment(scene, minX, maxX, minZ, maxZ, wallSegments) {
+// baseY raises the whole wall segment onto an upper floor (0 = ground,
+// the only case before the Glophics tower existed) — the geometry/height
+// itself never changes, just where its vertical center sits. color lets an
+// upper floor use a different wall material than the ground floor's own
+// TOWN_WALL_COLOR (see GLOPHICS_FLOORS' own wallColor).
+function buildTownWallSegment(scene, minX, maxX, minZ, maxZ, wallSegments, baseY = 0, color = TOWN_WALL_COLOR, wallHeight = TOWN_WALL_HEIGHT) {
   // Solid/opaque by default — see updateTownWallFade, which is the only
-  // thing that ever touches this material's opacity/transparent flag
-  // afterward, and only for the segment(s) actually blocking the view of
-  // your own character.
+  // thing that ever touches a GROUND-FLOOR segment's opacity/transparent
+  // flag afterward (only for the segment(s) actually blocking the view of
+  // your own character) — upper floors are instead faded as a whole group
+  // by applyGlophicsFloorCutaway, never per-segment like this.
+  // wallHeight defaults to TOWN_WALL_HEIGHT for every existing caller
+  // (ground floor, Karirs, Luba) — floor 2 passes its own taller value (see
+  // GLOPHICS_FLOORS' own wallHeight field) so its walls/ceiling can differ
+  // from the ground floor's without a second copy of this function.
   const mesh = new THREE.Mesh(
-    new THREE.BoxGeometry(maxX - minX, TOWN_WALL_HEIGHT, maxZ - minZ),
-    new THREE.MeshStandardMaterial({ color: TOWN_WALL_COLOR }),
+    new THREE.BoxGeometry(maxX - minX, wallHeight, maxZ - minZ),
+    new THREE.MeshStandardMaterial({ color }),
   );
-  mesh.position.set((minX + maxX) / 2, TOWN_WALL_HEIGHT / 2, (minZ + maxZ) / 2);
+  mesh.position.set((minX + maxX) / 2, baseY + wallHeight / 2, (minZ + maxZ) / 2);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   scene.add(mesh);
-  wallSegments.push({ mesh, minX, maxX, minZ, maxZ, faded: false });
+  wallSegments.push({ mesh, minX, maxX, minZ, maxZ, baseY, wallHeight, faded: false });
 }
 
-function buildTownDoorPost(scene, x, z) {
+function buildTownDoorPost(scene, x, z, baseY = 0) {
   const size = TOWN_WALL_THICKNESS + 0.3;
   const height = TOWN_WALL_HEIGHT * 1.15; // a touch taller than the walls, so the doorway actually reads as one
   const mesh = new THREE.Mesh(
     new THREE.BoxGeometry(size, height, size),
     new THREE.MeshStandardMaterial({ color: TOWN_DOOR_POST_COLOR }),
   );
-  mesh.position.set(x, height / 2, z);
+  mesh.position.set(x, baseY + height / 2, z);
   mesh.castShadow = true;
   scene.add(mesh);
 }
@@ -1132,44 +1898,308 @@ function buildTownSign(text) {
 }
 
 // Four walls (each split around a door-sized gap) plus their flanking door
+// Generic "translucent so it doesn't block the view" toggle over an
+// arbitrary THREE.Group — the mechanics setRigTransparent (inside mount())
+// wraps for a character rig's own .group, generalized here to module scope
+// since applyGlophicsFloorCutaway needs to apply the exact same treatment
+// to plain scenery groups (an upper Glophics floor's walls+slab, or the
+// roof) that were never built via buildBlockyCharacter. Only meshes are
+// touched, same as disposeRig's own mesh-only traversal.
+function setGroupTransparent(group, on) {
+  group.traverse((obj) => {
+    if (obj.isMesh) {
+      obj.material.transparent = true;
+      obj.material.opacity = on ? 0.3 : 1;
+      // Confirmed the hard way (see updateTownWallFade's own comment) —
+      // three.js doesn't pick up a `transparent` flip on an
+      // already-rendered material without this.
+      obj.material.needsUpdate = true;
+    }
+  });
+}
+
+// A full, hard removal — used by applyGlophicsFloorCutaway instead of
+// setGroupTransparent above, since a floor-above-you being merely 30%
+// see-through (setGroupTransparent's own opacity) still reads as "there,
+// just faint" rather than actually gone. This is a discrete state flip
+// (a floor change is a one-off event, not something re-evaluated every
+// frame the way the wall-occlusion fade is), so there's no need for the
+// smooth opacity lerp that mechanic uses — just hide the whole group
+// outright. setGroupTransparent itself is untouched and still used as-is
+// for the battle-avatar fade (setRigTransparent/setLocalTransparent),
+// which really does want a translucent "still there, just faded" look,
+// not a hard disappearance.
+function setGroupHidden(group, hidden) {
+  group.visible = !hidden;
+}
+
 // posts, centered on (centerX, centerZ) with the given half-extent (a
 // square footprint, same on both axes) — shared by both Glophics
 // (buildTown) and the Karirs field (buildKarirsField) so the two walled
 // areas' segments end up in the very same wallSegments array, meaning
 // isInsideTownWalls/updateTownWallFade automatically cover both without
 // knowing there's more than one.
-function buildAreaWalls(scene, centerX, centerZ, half, wallSegments) {
+// baseY/color let this same builder produce an upper Glophics floor's own
+// walls (see buildGlophicsFloor) — raised onto that floor's own Y, in that
+// floor's own wall color — without duplicating any of the door-gap layout
+// math below. Every other caller (buildTown's ground floor, the Karirs
+// field, the Luba area) just leans on the baseY=0/color=TOWN_WALL_COLOR
+// defaults, so this is a pure generalization, not a behavior change for them.
+// wallHeight/hasDoors are the same kind of opt-in generalization, added for
+// floor 2's own request: doubled ceiling height, and no doorways at all
+// (only reachable via the stairs) — hasDoors=false skips the gap/door-post
+// layout entirely and just builds each side as one continuous solid wall.
+function buildAreaWalls(scene, centerX, centerZ, half, wallSegments, baseY = 0, color = TOWN_WALL_COLOR, wallHeight = TOWN_WALL_HEIGHT, hasDoors = true) {
   const H = half;
   const T = TOWN_WALL_THICKNESS;
   const D = TOWN_DOOR_HALF_WIDTH;
   const postOffset = D + T / 2 + 0.2;
 
+  if (!hasDoors) {
+    // Four full, ungapped walls — nothing to walk through, matching the
+    // ask that floor 2 only ever be reachable via the stairs.
+    for (const zOff of [-H, H]) {
+      const z = centerZ + zOff;
+      buildTownWallSegment(scene, centerX - H, centerX + H, z - T / 2, z + T / 2, wallSegments, baseY, color, wallHeight);
+    }
+    for (const xOff of [-H, H]) {
+      const x = centerX + xOff;
+      buildTownWallSegment(scene, x - T / 2, x + T / 2, centerZ - H, centerZ + H, wallSegments, baseY, color, wallHeight);
+    }
+    return;
+  }
+
   // North/south walls — split along x around the doorway.
   for (const zOff of [-H, H]) {
     const z = centerZ + zOff;
-    buildTownWallSegment(scene, centerX - H, centerX - D, z - T / 2, z + T / 2, wallSegments);
-    buildTownWallSegment(scene, centerX + D, centerX + H, z - T / 2, z + T / 2, wallSegments);
-    buildTownDoorPost(scene, centerX - postOffset, z);
-    buildTownDoorPost(scene, centerX + postOffset, z);
+    buildTownWallSegment(scene, centerX - H, centerX - D, z - T / 2, z + T / 2, wallSegments, baseY, color, wallHeight);
+    buildTownWallSegment(scene, centerX + D, centerX + H, z - T / 2, z + T / 2, wallSegments, baseY, color, wallHeight);
+    buildTownDoorPost(scene, centerX - postOffset, z, baseY);
+    buildTownDoorPost(scene, centerX + postOffset, z, baseY);
   }
   // East/west walls — split along z around the doorway.
   for (const xOff of [-H, H]) {
     const x = centerX + xOff;
-    buildTownWallSegment(scene, x - T / 2, x + T / 2, centerZ - H, centerZ - D, wallSegments);
-    buildTownWallSegment(scene, x - T / 2, x + T / 2, centerZ + D, centerZ + H, wallSegments);
-    buildTownDoorPost(scene, x, centerZ - postOffset);
-    buildTownDoorPost(scene, x, centerZ + postOffset);
+    buildTownWallSegment(scene, x - T / 2, x + T / 2, centerZ - H, centerZ - D, wallSegments, baseY, color, wallHeight);
+    buildTownWallSegment(scene, x - T / 2, x + T / 2, centerZ + D, centerZ + H, wallSegments, baseY, color, wallHeight);
+    buildTownDoorPost(scene, x, centerZ - postOffset, baseY);
+    buildTownDoorPost(scene, x, centerZ + postOffset, baseY);
   }
 }
 
-// Builds Glophics: its four walls/doors (see buildAreaWalls) plus a
-// distinct plaza floor patch and name sign — see TOWN_HALF_X/Z and
-// friends above. Returns the wall segments (world-space box + mesh) both
-// movement resolution (isInsideTownWalls) and the camera-occlusion fade
-// (updateTownWallFade) check against.
+// One above-ground Glophics floor: its own walls (same X/Z footprint as
+// the ground floor, see buildAreaWalls) plus a floor slab, all parented
+// under one THREE.Group so applyGlophicsFloorCutaway can fade the entire
+// floor transparent/opaque as a single unit rather than walking every mesh
+// in the scene by hand. Pushes this floor's own wall segments into
+// wallSegmentsByFloor[floor.index] — a SEPARATE array from every other
+// floor's — so isInsideTownWalls only ever tests the one array that
+// actually matters for whichever floor the player is standing on.
+function buildGlophicsFloor(scene, floor, wallSegmentsByFloor) {
+  const group = new THREE.Group();
+  scene.add(group);
+  const segments = [];
+  // group.add works exactly like scene.add here (both are THREE.Object3D) —
+  // buildAreaWalls/buildTownWallSegment/buildTownDoorPost don't need to know
+  // or care which one they were handed.
+  buildAreaWalls(group, 0, 0, TOWN_HALF_X, segments, floor.y, floor.wallColor, floor.wallHeight ?? TOWN_WALL_HEIGHT, floor.hasDoors ?? true);
+  wallSegmentsByFloor[floor.index] = segments;
+
+  const slab = new THREE.Mesh(
+    new THREE.PlaneGeometry(TOWN_HALF_X * 2, TOWN_HALF_Z * 2),
+    new THREE.MeshStandardMaterial({ color: floor.floorColor }),
+  );
+  slab.rotation.x = -Math.PI / 2;
+  slab.position.y = floor.y + 0.015; // same z-fighting offset the ground plaza uses below
+  slab.receiveShadow = true;
+  slab.castShadow = true; // this slab is also the ceiling of the floor below it
+  group.add(slab);
+
+  return group;
+}
+
+// The tower's cap — a flat slab at GLOPHICS_ROOF_Y, same footprint (plus a
+// small overhang) as every floor below it. Its own group, so it fades via
+// applyGlophicsFloorCutaway exactly like an upper floor's group does (see
+// GLOPHICS_ROOF_INDEX).
+function buildGlophicsRoof(scene) {
+  const group = new THREE.Group();
+  scene.add(group);
+  const roof = new THREE.Mesh(
+    new THREE.BoxGeometry(TOWN_HALF_X * 2 + TOWN_WALL_THICKNESS * 2, 0.3, TOWN_HALF_Z * 2 + TOWN_WALL_THICKNESS * 2),
+    new THREE.MeshStandardMaterial({ color: GLOPHICS_ROOF_COLOR }),
+  );
+  roof.position.y = GLOPHICS_ROOF_Y;
+  roof.castShadow = true;
+  roof.receiveShadow = true;
+  group.add(roof);
+  return group;
+}
+
+// A small canvas-texture ground decal (UP/DOWN, color-coded) for a stair
+// tile — same canvas-texture technique buildTownSign/buildKarirsBoardSign
+// already use, just laid flat instead of billboarded, and deliberately
+// simple (a colored square + a border + a text label) rather than a real
+// modeled staircase, matching this session's "don't over-engineer the
+// visual" instruction.
+function buildStairsTileTexture(label, color) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx2d = canvas.getContext("2d");
+  ctx2d.fillStyle = color;
+  ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+  ctx2d.strokeStyle = "rgba(0,0,0,0.55)";
+  ctx2d.lineWidth = 8;
+  ctx2d.strokeRect(4, 4, canvas.width - 8, canvas.height - 8);
+  ctx2d.fillStyle = "rgba(0,0,0,0.8)";
+  ctx2d.font = "bold 30px sans-serif";
+  ctx2d.textAlign = "center";
+  ctx2d.textBaseline = "middle";
+  ctx2d.fillText(label, canvas.width / 2, canvas.height / 2 + 2);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  return texture;
+}
+
+// 2 tiles per entry in GLOPHICS_STAIR_TRANSITIONS (an "up" tile on the
+// lower floor, a "down" tile at the same X/Z on the floor above) — see
+// checkStairsContact for the actual proximity-triggered floor change these
+// are purely a visual cue for. Each tile is parented under its OWN floor's
+// group (falling back to the scene directly for the ground floor, which
+// has no group of its own to fade) so it fades/hides in lockstep with the
+// rest of that floor if that floor is ever faded.
+function buildGlophicsStairs(scene, glophicsFloorGroups) {
+  const groupForFloor = (floorIndex) => glophicsFloorGroups.find((f) => f.index === floorIndex)?.group;
+  for (const t of GLOPHICS_STAIR_TRANSITIONS) {
+    const upTile = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.4, 1.4),
+      new THREE.MeshBasicMaterial({ map: buildStairsTileTexture("UP", "#f2c94c") }),
+    );
+    upTile.rotation.x = -Math.PI / 2;
+    upTile.position.set(t.x, t.belowY + 0.02, t.z);
+    (groupForFloor(t.belowFloor) || scene).add(upTile);
+
+    const downTile = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.4, 1.4),
+      new THREE.MeshBasicMaterial({ map: buildStairsTileTexture("DOWN", "#f2994a") }),
+    );
+    downTile.rotation.x = -Math.PI / 2;
+    downTile.position.set(t.x, t.aboveY + 0.02, t.z);
+    (groupForFloor(t.aboveFloor) || scene).add(downTile);
+  }
+}
+
+// The actual cinema screen — a real YouTube <iframe> wrapped in a
+// CSS3DObject (see CINEMA_YOUTUBE_VIDEO_ID's own comment for why this can't
+// just be a textured WebGL mesh). Returns both the CSS3DObject (to add to
+// mount()'s own cssScene) and the raw iframe element (so mount()'s cleanup
+// can blank its src before removal — see that comment for why that matters).
+function buildCinemaScreenObject() {
+  const iframe = document.createElement("iframe");
+  iframe.width = String(CINEMA_SCREEN_PIXEL_WIDTH);
+  iframe.height = String(CINEMA_SCREEN_PIXEL_HEIGHT);
+  iframe.src = CINEMA_YOUTUBE_EMBED_URL;
+  iframe.style.border = "0";
+  iframe.allow = "autoplay; encrypted-media";
+  // Baseline safety net now that the projectionist can point this at ANY
+  // http(s) URL, not just a fixed known-safe YouTube embed: allow-scripts
+  // (needed for embedded players, including YouTube's own, to run at all)
+  // + allow-same-origin (needed for a site's own embed to use its own
+  // storage/fetch the way it normally would — without it lots of embeds,
+  // YouTube included, silently break) + allow-presentation (fullscreen/
+  // Picture-in-Picture, harmless). Deliberately NOT allow-top-navigation or
+  // allow-popups — an arbitrary embedded page has no business hijacking
+  // this game's own tab or spawning popups, sandboxed or not. This trio is
+  // expected to leave the existing YouTube embed's autoplay/loop/
+  // enablejsapi behavior intact — sandboxing an iframe never blocks
+  // postMessage delivered TO it from the parent, which is all
+  // sendCinemaScreenCommand above ever needs — but this has NOT been
+  // click-tested in a live browser session; if YouTube's own autoplay ever
+  // regresses, allow-same-origin is the first flag to double-check (some
+  // embeds also want allow-forms for their own settings gear, which this
+  // deliberately leaves out unless it turns out to be needed).
+  iframe.sandbox = "allow-scripts allow-same-origin allow-presentation";
+
+  const cssObject = new CSS3DObject(iframe);
+  cssObject.position.set(
+    CINEMA_SCREEN_X,
+    glophicsFloorY(CINEMA_SCREEN_FLOOR_INDEX) + CINEMA_SCREEN_Y_OFFSET,
+    CINEMA_SCREEN_Z,
+  );
+  // No rotation needed: a CSS3DObject's own default (unrotated) orientation
+  // already faces +Z, and floor 2's south wall (z = -TOWN_HALF_Z) faces
+  // straight into the room along +Z too — they already line up. If this
+  // screen ever moves to a different wall, rotation.y would need to be set
+  // to that wall's own inward-facing normal angle instead.
+  cssObject.scale.set(
+    CINEMA_SCREEN_WORLD_WIDTH / CINEMA_SCREEN_PIXEL_WIDTH,
+    CINEMA_SCREEN_WORLD_HEIGHT / CINEMA_SCREEN_PIXEL_HEIGHT,
+    1,
+  );
+  return { cssObject, iframe };
+}
+
+// A handful of plain bench-row boxes facing the cinema screen — purely
+// decorative, deliberately modest (3 boxes, not a modeled theater). Called
+// directly from buildTown for floor 2's own group specifically rather than
+// folded into buildGlophicsFloor's generic per-floor builder, since this is
+// a one-off floor-2 decoration (like Jared's shop or Rodz on the ground
+// floor), not something a future floor 3 should automatically inherit.
+// Rows sit at z = -1/1/3 — clear of both the screen (CINEMA_SCREEN_Z, well
+// behind them in -Z) and the stairs landing (world (6, ~4.6), see
+// GLOPHICS_STAIRS_X/Z) since every row's own x is centered on
+// CINEMA_SCREEN_X (-5), nowhere near x = 6.
+const CINEMA_SEAT_ROW_Z = [-1, 1, 3];
+const CINEMA_SEAT_COLOR = "#2b2b33";
+function buildCinemaSeats(group, floorY) {
+  for (const z of CINEMA_SEAT_ROW_Z) {
+    const bench = new THREE.Mesh(
+      new THREE.BoxGeometry(4, 0.5, 0.6),
+      new THREE.MeshStandardMaterial({ color: CINEMA_SEAT_COLOR }),
+    );
+    bench.position.set(CINEMA_SCREEN_X, floorY + 0.27, z);
+    bench.castShadow = true;
+    bench.receiveShadow = true;
+    group.add(bench);
+  }
+}
+
+// The Usher — a normal clickable NPC rig (see USHER_NAME's own comment for
+// why he's positioned where he is), but unlike Rodz/Jared/Karra/Boss Rick
+// he's built here, inside buildTown, rather than later in mount() — those
+// other NPCs are added straight to `scene` since they live on the ground
+// floor, which is never faded; the Usher lives on floor 2 and needs to
+// fade/reappear in lockstep with the rest of that floor (seats, walls,
+// screen) via applyGlophicsFloorCutaway, which only ever walks
+// glophicsFloorGroups' own group hierarchies — so his rig's .group has to
+// be parented under cinemaFloorGroup at construction time, exactly like
+// buildCinemaSeats' benches just above. Returns the rig itself (not void,
+// unlike buildCinemaSeats) since mount() still needs it for click/
+// proximity/highlight/name-label handling, the same as every other NPC rig.
+function buildCinemaUsher(group, floorY) {
+  const rig = buildBlockyCharacter(USHER_COLORS, USHER_NAME);
+  rig.group.position.set(USHER_X, floorY, USHER_Z);
+  group.add(rig.group);
+  return rig;
+}
+
+// Builds Glophics: its ground floor (four walls/doors via buildAreaWalls, a
+// distinct plaza floor patch, the name sign — see TOWN_HALF_X/Z and
+// friends above), every above-ground floor and the roof (see
+// GLOPHICS_FLOORS/buildGlophicsFloor/buildGlophicsRoof), and the stairs
+// connecting them (buildGlophicsStairs). Returns:
+//   - wallSegmentsByFloor: {0: [...], 1: [...], ...} — floor index ->
+//     world-space box+mesh wall segments, used both by movement resolution
+//     (isInsideTownWalls) and, for floor 0 only, the camera-occlusion fade
+//     (updateTownWallFade — see that function's own comment for why it
+//     stays scoped to the ground floor).
+//   - glophicsFloorGroups: [{index, group}, ...] for every ABOVE-ground
+//     floor plus the roof (never floor 0 — the ground floor is never
+//     faded) — what applyGlophicsFloorCutaway iterates.
 function buildTown(scene) {
-  const wallSegments = [];
-  buildAreaWalls(scene, 0, 0, TOWN_HALF_X, wallSegments);
+  const wallSegmentsByFloor = { 0: [] };
+  buildAreaWalls(scene, 0, 0, TOWN_HALF_X, wallSegmentsByFloor[0]);
 
   const plaza = new THREE.Mesh(
     new THREE.PlaneGeometry(TOWN_HALF_X * 2, TOWN_HALF_Z * 2),
@@ -1184,7 +2214,27 @@ function buildTown(scene) {
   sign.position.set(0, TOWN_WALL_HEIGHT + 1.3, 0); // hovers above the plaza center, readable from any approach
   scene.add(sign);
 
-  return wallSegments;
+  const glophicsFloorGroups = GLOPHICS_FLOORS.map((floor) => ({
+    index: floor.index,
+    group: buildGlophicsFloor(scene, floor, wallSegmentsByFloor),
+  }));
+  glophicsFloorGroups.push({ index: GLOPHICS_ROOF_INDEX, group: buildGlophicsRoof(scene) });
+  buildGlophicsStairs(scene, glophicsFloorGroups);
+
+  // Floor 2's cinema theming (seats only — the actual screen is a separate
+  // CSS3D DOM layer, built/wired up by mount() itself, not here — see
+  // buildCinemaScreenObject). Parented under floor 2's own group so it
+  // fades/reappears in lockstep with the rest of that floor via
+  // applyGlophicsFloorCutaway, same as everything else built into it.
+  const cinemaFloor = GLOPHICS_FLOORS.find((f) => f.index === CINEMA_SCREEN_FLOOR_INDEX);
+  const cinemaFloorGroup = glophicsFloorGroups.find((f) => f.index === CINEMA_SCREEN_FLOOR_INDEX)?.group;
+  let cinemaUsherRig = null;
+  if (cinemaFloor && cinemaFloorGroup) {
+    buildCinemaSeats(cinemaFloorGroup, cinemaFloor.y);
+    cinemaUsherRig = buildCinemaUsher(cinemaFloorGroup, cinemaFloor.y);
+  }
+
+  return { wallSegmentsByFloor, glophicsFloorGroups, sign, cinemaUsherRig };
 }
 
 // Jared's shop stall — purely decorative scenery (a counter + a canopy on
@@ -1221,6 +2271,7 @@ function buildJaredShop(scene) {
   const sign = buildTownSign(`${JARED_NAME}'s Shop`);
   sign.position.set(JARED_X, 2.9, JARED_Z - 2);
   scene.add(sign);
+  return sign;
 }
 
 // A blank sign whose text gets redrawn in place later (see
@@ -1336,6 +2387,200 @@ function buildKarirsField(scene, wallSegments) {
   return { board, tvGroup };
 }
 
+// The real racetrack (see KARIRS_TRACK_* constants' own comment) — just a
+// clay strip (reusing KARIRS_FIELD_COLOR for a matching theme), lane
+// dividers, and start/finish crossbars. No walls, no collision — purely
+// decorative ground detail a player can freely walk across, same as any
+// other flat floor patch in this file.
+function buildKarirsTrack(scene) {
+  const centerZ = (KARIRS_TRACK_START_Z + KARIRS_TRACK_FINISH_Z) / 2;
+  const trackLength = KARIRS_TRACK_START_Z - KARIRS_TRACK_FINISH_Z;
+
+  const dirt = new THREE.Mesh(
+    new THREE.PlaneGeometry(KARIRS_TRACK_WIDTH, trackLength),
+    new THREE.MeshStandardMaterial({ color: KARIRS_FIELD_COLOR }),
+  );
+  dirt.rotation.x = -Math.PI / 2;
+  dirt.position.set(KARIRS_FIELD_X, 0.01, centerZ);
+  dirt.receiveShadow = true;
+  scene.add(dirt);
+
+  // One more divider than there are lanes — fences both edges too, not
+  // just the gaps between racers.
+  const laneLineMat = new THREE.MeshBasicMaterial({ color: "#f5f5f4" });
+  for (let i = 0; i <= KARIRS_TRACK_LANE_COUNT; i++) {
+    const x = KARIRS_FIELD_X + (i - KARIRS_TRACK_LANE_COUNT / 2) * KARIRS_TRACK_LANE_SPACING;
+    const line = new THREE.Mesh(new THREE.PlaneGeometry(0.08, trackLength), laneLineMat);
+    line.rotation.x = -Math.PI / 2;
+    line.position.set(x, 0.02, centerZ);
+    scene.add(line);
+  }
+
+  const startLine = new THREE.Mesh(
+    new THREE.PlaneGeometry(KARIRS_TRACK_WIDTH, 0.4),
+    new THREE.MeshBasicMaterial({ color: "#f5f5f4" }),
+  );
+  startLine.rotation.x = -Math.PI / 2;
+  startLine.position.set(KARIRS_FIELD_X, 0.02, KARIRS_TRACK_START_Z);
+  scene.add(startLine);
+
+  const finishLine = new THREE.Mesh(
+    new THREE.PlaneGeometry(KARIRS_TRACK_WIDTH, 0.4),
+    new THREE.MeshBasicMaterial({ color: "#facc15" }),
+  );
+  finishLine.rotation.x = -Math.PI / 2;
+  finishLine.position.set(KARIRS_FIELD_X, 0.02, KARIRS_TRACK_FINISH_Z);
+  scene.add(finishLine);
+}
+
+const KARIRS_RACER_COLORS = ["#f59e0b", "#3b82f6", "#ef4444", "#10b981"];
+
+// Rig + gait ported from games/karirs/client/src/render3d.js's own
+// buildRacerRig/update (itself a port of the web app's render3d.ts — see
+// that file's own header) — same constants, same math, minus the parts
+// with no equivalent data here: no per-racer face photo (faceImageUrl/
+// faceDecal), no bet-marker torus, and no "shouting"/signature-move ninja
+// pose or chat bubble, since main.py's own step_race only ever yields
+// {positions}, never a per-step shouting flag the way games/karirs' own
+// separate race engine does — there is nothing here to drive that pose
+// with. The core "how a racer's own instantaneous speed drives idle vs.
+// walk vs. sprint vs. exhausted" gait is unchanged from the source.
+const KARIRS_GAIT_SPRINT_SPEED = 6.7; // race.py's SPEED_RANGE tops out at 2.0/~300ms tick ≈ 6.7/sec — "full sprint" for normalizing
+const KARIRS_GAIT_STOP_SPEED_THRESHOLD = 0.35;
+const KARIRS_GAIT_WALK_FREQUENCY = 3.5;
+const KARIRS_GAIT_SPRINT_FREQUENCY = 9;
+const KARIRS_GAIT_SPRINT_STRIDE = 0.55;
+const KARIRS_GAIT_SPRINT_BOUNCE = 0.12;
+const KARIRS_GAIT_HEAD_BOB = 0.055;
+const KARIRS_GAIT_EXHAUSTED_SPEED_THRESHOLD = 1.4;
+const KARIRS_GAIT_EXHAUSTED_LEAN = 0.38;
+const KARIRS_GAIT_EXHAUSTED_HEAD_DROOP = 0.22;
+const KARIRS_GAIT_EXHAUSTED_ARM_FORWARD = -1.05;
+const KARIRS_GAIT_EXHAUSTED_TREMBLE = 0.06;
+const KARIRS_GAIT_EXHAUSTED_BREATH_FREQUENCY = 2.6;
+const KARIRS_GAIT_EXHAUSTED_BREATH_AMPLITUDE = 0.05;
+const KARIRS_GAIT_POSE_EASE_RATE = 4;
+const KARIRS_RACER_TORSO_Y = 0.82;
+
+// One lane's own runner — a real humanoid rig (torso/head/two arms/two
+// legs with hands and shoes, not a placeholder capsule), plus a
+// redrawable name-label sprite above it, same canvas-texture-redraw
+// technique buildKarirsBoardSign already uses for the bulletin board (the
+// racer occupying a given lane changes every race, so the label has to be
+// redrawable in place, not a one-shot buildTownSign-style sprite).
+//
+// Built facing local +Z, legs/arms swinging in the local YZ (fore-aft)
+// plane — same convention render3d.js's own buildRacerRig uses — then
+// rotated 180° (not that source's own 90°, since its track runs along
+// world +X and this one runs along world -Z) so "facing forward" actually
+// means "facing the finish line" for this track's own orientation.
+function buildKarirsRacerRig(scene, color) {
+  const group = new THREE.Group();
+  group.rotation.y = Math.PI;
+
+  const torsoMaterial = new THREE.MeshStandardMaterial({ color });
+  const torso = new THREE.Mesh(new RoundedBoxGeometry(0.7, 0.9, 0.46, 3, 0.09), torsoMaterial);
+  const torsoTop = KARIRS_RACER_TORSO_Y + 0.9 / 2;
+  torso.position.y = KARIRS_RACER_TORSO_Y;
+  torso.castShadow = true;
+  group.add(torso);
+
+  // Child of the torso, not the group, so the exhausted lean (torso.rotation.x)
+  // carries the head along with it instead of leaving it locked upright
+  // while the torso tilts out from under it.
+  const headMaterial = new THREE.MeshStandardMaterial({ color });
+  const headSize = 0.62;
+  const headBaseY = torsoTop + headSize / 2 - torso.position.y;
+  const head = new THREE.Mesh(new RoundedBoxGeometry(headSize, headSize, headSize, 3, 0.07), headMaterial);
+  head.position.y = headBaseY;
+  head.castShadow = true;
+  torso.add(head);
+
+  const eyeMaterial = new THREE.MeshBasicMaterial({ color: "#171717" });
+  const eyeGeometry = new THREE.SphereGeometry(0.05, 8, 8);
+  const leftEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
+  leftEye.position.set(-0.13, 0.03, headSize / 2 + 0.01);
+  const rightEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
+  rightEye.position.set(0.13, 0.03, headSize / 2 + 0.01);
+  head.add(leftEye, rightEye);
+
+  const limbMaterial = new THREE.MeshStandardMaterial({ color: "#262626" });
+  const shoeMaterial = new THREE.MeshStandardMaterial({ color: "#f5f5f5" });
+  const handMaterial = new THREE.MeshStandardMaterial({ color });
+  function limb(w, h, d, x, y, cap) {
+    const mesh = new THREE.Mesh(new RoundedBoxGeometry(w, h, d, 2, Math.min(w, d) * 0.25), limbMaterial);
+    mesh.position.set(x, y, 0);
+    // Pivot at the top (hip/shoulder), not center, so rotating swings the
+    // limb like a real joint instead of clipping through the torso.
+    mesh.geometry.translate(0, -h / 2, 0);
+    mesh.castShadow = true;
+    const capMesh =
+      cap === "shoe"
+        ? new THREE.Mesh(new RoundedBoxGeometry(w * 1.2, h * 0.22, d * 1.5, 2, 0.03), shoeMaterial)
+        : new THREE.Mesh(new THREE.SphereGeometry(w * 0.62, 10, 8), handMaterial);
+    capMesh.position.set(0, cap === "shoe" ? -h + (h * 0.22) / 2 : -h, cap === "shoe" ? d * 0.18 : 0);
+    capMesh.castShadow = true;
+    mesh.add(capMesh);
+    return mesh;
+  }
+  const leftLeg = limb(0.22, 0.56, 0.22, -0.18, 0.38, "shoe");
+  const rightLeg = limb(0.22, 0.56, 0.22, 0.18, 0.38, "shoe");
+  const leftArm = limb(0.16, 0.46, 0.16, -0.43, 1.2, "hand");
+  const rightArm = limb(0.16, 0.46, 0.16, 0.43, 1.2, "hand");
+  group.add(leftLeg, rightLeg, leftArm, rightArm);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx2d = canvas.getContext("2d");
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const labelMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+  const label = new THREE.Sprite(labelMaterial);
+  label.renderOrder = 999;
+  label.scale.set(1.6, 0.4, 1);
+  label.position.y = 2.15; // matches render3d.js's own name-sprite height above its identical rig
+  group.add(label);
+
+  group.position.set(KARIRS_FIELD_X, 0, KARIRS_TRACK_START_Z);
+  scene.add(group);
+  return {
+    group,
+    torso,
+    torsoMaterial,
+    head,
+    headBaseY,
+    leftLeg,
+    rightLeg,
+    leftArm,
+    rightArm,
+    canvas,
+    ctx: ctx2d,
+    texture,
+    label,
+    currentName: null,
+    z: KARIRS_TRACK_START_Z,
+    // Gait state — see updateKarirsTrackVisual's own per-frame block,
+    // ported from render3d.js's update() almost line-for-line.
+    prevPos: NaN,
+    gaitPhase: 0,
+    exhaustedBlend: 0,
+  };
+}
+
+function updateKarirsRacerLabel(marker, name) {
+  const { canvas, ctx: ctx2d, texture } = marker;
+  ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+  ctx2d.fillStyle = "rgba(0,0,0,0.6)";
+  ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+  ctx2d.fillStyle = "#ffffff";
+  ctx2d.font = "bold 28px sans-serif";
+  ctx2d.textAlign = "center";
+  ctx2d.textBaseline = "middle";
+  ctx2d.fillText(name, canvas.width / 2, canvas.height / 2);
+  texture.needsUpdate = true;
+}
+
 // The Luba lobby area's static scenery — same "walls pushed into the
 // shared wallSegments array plus a plaza plate plus a signpost" shape as
 // buildKarirsField, just without that field's own TV/board props (Boss
@@ -1357,6 +2602,8 @@ function buildLubaArea(scene, wallSegments) {
   const sign = buildTownSign(LUBA_NAME);
   sign.position.set(LUBA_X, TOWN_WALL_HEIGHT + 1.3, LUBA_Z);
   scene.add(sign);
+
+  return { sign };
 }
 
 // A checkerboard pattern painted once onto a canvas and applied as a
@@ -1463,8 +2710,9 @@ function buildDiagonalWallSegment(scene, x1, z1, x2, z2) {
 // a self-contained parallel to buildAreaWalls, not pushed into the shared
 // rectangular townWallSegments array at all, since movement collision
 // against it is resolved separately too, see isInsideTambayanWalls), a
-// distinct pentagon plaza floor, a name sign, and the two chess tables.
-// Returns the two tables' groups+status-signs for later raycast/highlight/
+// distinct pentagon plaza floor, a name sign, and all three chess tables
+// (two player-hosted, one a standing AI match — see AI_BOARD_ID).
+// Returns each table's group+status-sign for later raycast/highlight/
 // indicator use (see mount()'s own call site), mirroring buildKarirsField's
 // own return-groups-for-later-use shape. Deliberately no camera-occlusion
 // wall fade here (unlike the rectangular walls) — updateTownWallFade is
@@ -1492,8 +2740,13 @@ function buildTambayan(scene) {
 
   const board1 = buildChessTable(scene, CHESS_BOARD_1_X, CHESS_BOARD_1_Z, 0);
   const board2 = buildChessTable(scene, CHESS_BOARD_2_X, CHESS_BOARD_2_Z, 0);
+  const board3 = buildChessTable(scene, CHESS_BOARD_3_X, CHESS_BOARD_3_Z, 0);
 
-  return { board1Group: board1.group, board1StatusSign: board1.statusSign, board2Group: board2.group, board2StatusSign: board2.statusSign };
+  return {
+    board1Group: board1.group, board1StatusSign: board1.statusSign,
+    board2Group: board2.group, board2StatusSign: board2.statusSign,
+    board3Group: board3.group, board3StatusSign: board3.statusSign,
+  };
 }
 
 function createScene(canvas) {
@@ -1642,20 +2895,78 @@ export function mount(el, ctx) {
   canvasWrapEl.style.position = "relative";
   // Matches the canvas's own width/maxWidth exactly — a bare block div
   // would otherwise stretch to fill `wrap`'s full width regardless of the
-  // canvas's own 720px cap, leaving right-anchored overlays (like the
-  // wild's HP HUD) sitting well outside the canvas's actual visible area.
+  // canvas's own cap, leaving right-anchored overlays (like the wild's HP
+  // HUD) sitting well outside the canvas's actual visible area. The cap
+  // itself is generous (was 720px) rather than removed outright — this is
+  // a per-frame-resized WebGL canvas (see frame()'s own renderer.setSize),
+  // so it genuinely renders sharper at a bigger size rather than just
+  // stretching a fixed image, but an *unbounded* one would still render at
+  // a needlessly huge resolution on a very wide monitor once the chat log
+  // is hidden (see /chats hide) and this becomes the panel's only content.
   canvasWrapEl.style.width = "100%";
-  canvasWrapEl.style.maxWidth = "720px";
+  canvasWrapEl.style.maxWidth = "1400px";
   wrap.appendChild(canvasWrapEl);
 
   const canvas = document.createElement("canvas");
   canvas.width = 640;
   canvas.height = 360;
   canvas.style.width = "100%";
-  canvas.style.maxWidth = "720px";
+  canvas.style.maxWidth = "1400px";
   canvas.style.display = "block";
   canvas.style.borderRadius = "4px";
   canvasWrapEl.appendChild(canvas);
+
+  // CSS3D overlay — a second, DOM-based render layer sitting exactly over
+  // the WebGL canvas, used only for the floor-2 cinema screen's real
+  // YouTube <iframe> (see CINEMA_YOUTUBE_VIDEO_ID/buildCinemaScreenObject).
+  // Absolutely positioned to match the canvas's own rect exactly, resized
+  // in lockstep with it down in frame() (see that function's own
+  // cssRenderer.setSize call, right next to renderer.setSize). pointer-
+  // events:none on the container itself is important — without it this
+  // layer would sit on top of the canvas and swallow clicks meant for the
+  // game's own canvas-raycast interactions (NPCs, chess boards, etc.); the
+  // video has nothing to click anyway (controls=0, autoplay+loop).
+  const cssRenderer = new CSS3DRenderer();
+  cssRenderer.domElement.style.position = "absolute";
+  cssRenderer.domElement.style.top = "0";
+  cssRenderer.domElement.style.left = "0";
+  cssRenderer.domElement.style.pointerEvents = "none";
+  cssRenderer.setSize(canvas.width, canvas.height);
+  canvasWrapEl.appendChild(cssRenderer.domElement);
+  // A separate, minimal scene just for CSS3DObjects — CSS3DRenderer only
+  // needs its target(s) to live in *a* THREE.Scene for its own traversal,
+  // it doesn't need to share the main WebGL `scene` at all.
+  const cssScene = new THREE.Scene();
+  const cinemaScreen = buildCinemaScreenObject();
+  cssScene.add(cinemaScreen.cssObject);
+  // Tracks the CSS3D layer's own shown/hidden state so frame() only ever
+  // touches domElement.style.display on an actual change — see
+  // cinemaScreenVisible in frame() for the exact gating conditions
+  // (floor >= CINEMA_SCREEN_FLOOR_INDEX, and no battle of any kind active).
+  // A per-frame occlusion raycast against the player's own rig used to also
+  // factor into this (hiding the screen whenever the player stood in front
+  // of it, so their character wouldn't render "behind" it) — removed by
+  // explicit request after it caused a severe bug (a client resuming
+  // directly on floor 1 could hit it before the player's rig had a valid
+  // world matrix yet, throwing and freezing the entire game). Simpler and
+  // safer to just always show the screen while on floor 2, same as before
+  // that feature ever existed.
+  let cinemaScreenShown = true;
+  // The cinema's actual current screen URL — starts at the same default
+  // both this client and the api's own CINEMA_DEFAULT_SCREEN_URL fall back
+  // to, then kept in sync with the shared, server-owned value via
+  // cinema_screen_state (see onSocketMessage) for as long as this session
+  // stays connected. Read by isYoutubeEmbedUrl's own call sites below to
+  // decide whether sendCinemaScreenCommand's YouTube-only postMessage
+  // protocol is even worth attempting.
+  let cinemaScreenUrl = CINEMA_YOUTUBE_EMBED_URL;
+  // Who currently holds the cinema's projectionist role — {user_id,
+  // display_name}, or null while it's vacant. Kept in sync with the
+  // shared, server-owned cinema_projectionist via cinema_projectionist_state
+  // (see onSocketMessage). Drives the Usher's own popup content entirely
+  // (see renderUsherMenu) — this client never decides on its own who holds
+  // the role, it only ever reflects the last thing the server said.
+  let cinemaProjectionist = null;
 
   // Minimap — a fixed full-world top-down overview (not a following/zoomed
   // view), since the world is now big enough (see ARENA_HALF_X/Z) that
@@ -1676,6 +2987,25 @@ export function mount(el, ctx) {
   minimapCanvas.style.zIndex = "15";
   canvasWrapEl.appendChild(minimapCanvas);
   const minimapCtx = minimapCanvas.getContext("2d");
+
+  // The current area's own name, beside the minimap — "Plains" out in the
+  // open world, or whichever real walled area (see AREA_LABELS/
+  // updateAreaLabels) local.x/z is currently inside. Same small-badge look
+  // as the minimap itself so the two read as one HUD cluster.
+  const minimapAreaLabelEl = document.createElement("div");
+  minimapAreaLabelEl.style.position = "absolute";
+  minimapAreaLabelEl.style.top = "6px";
+  minimapAreaLabelEl.style.left = `${MINIMAP_SIZE + 6 + 6}px`; // minimap's own left(6) + its width + a matching gap
+  minimapAreaLabelEl.style.padding = "3px 8px";
+  minimapAreaLabelEl.style.borderRadius = "4px";
+  minimapAreaLabelEl.style.background = "#00000066";
+  minimapAreaLabelEl.style.color = "#ffffffcc";
+  minimapAreaLabelEl.style.fontSize = "11px";
+  minimapAreaLabelEl.style.fontFamily = "inherit";
+  minimapAreaLabelEl.style.pointerEvents = "none";
+  minimapAreaLabelEl.style.zIndex = "15";
+  minimapAreaLabelEl.textContent = "Plains";
+  canvasWrapEl.appendChild(minimapAreaLabelEl);
 
   // Stamina bar — bottom-left overlay, only relevant (and only shown)
   // while actually walking around the world, not mid-battle.
@@ -1809,7 +3139,23 @@ export function mount(el, ctx) {
       entity.chatBubble = null;
       return;
     }
-    entity.chatBubble.visible = Math.hypot(local.x - entity.x, local.z - entity.z) <= LABEL_VISIBLE_DISTANCE;
+    // entity.floor only exists on a peer object (ensurePeer's own shape) —
+    // undefined here means this is being called for `local` itself (see
+    // frame()'s own two call sites), which is trivially always "on my own
+    // floor," hence the ?? fallback. A separate scene object, not a child
+    // of entity.rig.group (see disposeChatBubble/scene.remove above), so
+    // hiding a floor-mismatched peer's rig via setPeerHidden does NOT
+    // retroactively hide an already-shown bubble the way a real child
+    // object would — this needs its own explicit floor check rather than
+    // relying on that unrelated mechanism.
+    const entityFloor = entity.floor ?? local.currentFloor;
+    // Also require the two of you to be inside the same walled area (or
+    // both outdoors) — see getAreaKey's own comment for why distance/floor
+    // alone let a bubble bleed through a totally different building's
+    // walls (e.g. Karirs Field) whenever it was within LABEL_VISIBLE_DISTANCE.
+    const sameArea = getAreaKey(entity.x, entity.z) === getAreaKey(local.x, local.z);
+    entity.chatBubble.visible =
+      sameArea && entityFloor === local.currentFloor && Math.hypot(local.x - entity.x, local.z - entity.z) <= LABEL_VISIBLE_DISTANCE;
     if (!entity.chatBubble.visible) return;
 
     // entity (local or a peer) already has the x/y/z/rig shape
@@ -1851,7 +3197,7 @@ export function mount(el, ctx) {
     minimapCtx.strokeStyle = TOWN_WALL_COLOR;
     minimapCtx.lineWidth = 1.5;
     minimapCtx.strokeRect(tl.mx, tl.my, br.mx - tl.mx, br.my - tl.my);
-    minimapCtx.fillStyle = "#2b2b2b";
+    minimapCtx.fillStyle = "#ffffff";
     minimapCtx.font = "bold 8px sans-serif";
     minimapCtx.textAlign = "center";
     minimapCtx.textBaseline = "bottom";
@@ -1881,7 +3227,7 @@ export function mount(el, ctx) {
       vertices.reduce((sum, [, z]) => sum + z, 0) / vertices.length,
     );
     const topMy = Math.min(...vertices.map(([x, z]) => worldToMinimap(x, z).my));
-    minimapCtx.fillStyle = "#2b2b2b";
+    minimapCtx.fillStyle = "#ffffff";
     minimapCtx.font = "bold 8px sans-serif";
     minimapCtx.textAlign = "center";
     minimapCtx.textBaseline = "bottom";
@@ -1919,7 +3265,12 @@ export function mount(el, ctx) {
     drawMinimapDot(KARRA_X, KARRA_Z, 3, KARRA_COLORS.body);
     drawMinimapDot(JARED_X, JARED_Z, 3, JARED_COLORS.body);
     drawMinimapDot(BOSS_RICK_X, BOSS_RICK_Z, 3, BOSS_RICK_COLORS.body);
+    drawMinimapDot(USHER_X, USHER_Z, 3, USHER_COLORS.body);
+    // Same declutter rule as their name labels (LABEL_VISIBLE_DISTANCE) —
+    // a wild far from the player doesn't need to show up on the minimap
+    // either.
     for (const spawn of wildSpawns.values()) {
+      if (Math.hypot(local.x - spawn.x, local.z - spawn.z) > LABEL_VISIBLE_DISTANCE) continue;
       drawMinimapDot(spawn.x, spawn.z, 2.5, spawn.difficulty === "hard" ? WILD_LABEL_COLOR_HARD : WILD_LABEL_COLOR_EASY);
     }
     for (const peer of peers.values()) {
@@ -2354,6 +3705,22 @@ export function mount(el, ctx) {
   karraClaimBtn.style.marginBottom = "6px";
   karraClaimSectionEl.appendChild(karraClaimBtn);
   karraMenuEl.appendChild(karraClaimSectionEl);
+  // Practice race — see karirsPracticeState/onKarraPracticeClick. Its own
+  // section, independent of the betting section above (you can bet AND
+  // practice, or neither) — hidden only while a practice is already
+  // counting down/running, so the button can't be double-clicked into two
+  // overlapping countdowns.
+  const karraPracticeSectionEl = document.createElement("div");
+  const karraPracticeMsgEl = document.createElement("p");
+  karraPracticeMsgEl.style.margin = "0 0 6px 0";
+  karraPracticeMsgEl.style.display = "none";
+  karraPracticeSectionEl.appendChild(karraPracticeMsgEl);
+  const karraPracticeBtn = document.createElement("button");
+  karraPracticeBtn.textContent = "Practice Race";
+  karraPracticeBtn.style.fontSize = "11px";
+  karraPracticeBtn.style.marginBottom = "6px";
+  karraPracticeSectionEl.appendChild(karraPracticeBtn);
+  karraMenuEl.appendChild(karraPracticeSectionEl);
   const karraCancelBtn = document.createElement("button");
   karraCancelBtn.textContent = "Cancel";
   karraCancelBtn.style.fontSize = "11px";
@@ -2461,6 +3828,30 @@ export function mount(el, ctx) {
   const playerOptionsMenuBodyEl = document.createElement("div");
   playerOptionsMenuEl.appendChild(playerOptionsMenuBodyEl);
   wrap.appendChild(playerOptionsMenuEl);
+
+  // The Usher's popup — same click-positioned shell as every NPC popup
+  // above, state-driven (like playerOptionsMenuEl) rather than step-driven
+  // (like bossRickMenuEl): its body is entirely a function of the shared
+  // cinemaProjectionist value (see renderUsherMenu), not any local
+  // multi-step flow of its own.
+  const usherMenuEl = document.createElement("div");
+  usherMenuEl.style.position = "absolute";
+  usherMenuEl.style.display = "none";
+  usherMenuEl.style.background = "#1a1a1aee";
+  usherMenuEl.style.border = "1px solid #3333334d";
+  usherMenuEl.style.borderRadius = "4px";
+  usherMenuEl.style.padding = "6px";
+  usherMenuEl.style.zIndex = "10";
+  usherMenuEl.style.fontSize = "12px";
+  usherMenuEl.style.width = "220px";
+  const usherMenuLabel = document.createElement("strong");
+  usherMenuLabel.textContent = USHER_NAME;
+  usherMenuLabel.style.display = "block";
+  usherMenuLabel.style.marginBottom = "4px";
+  usherMenuEl.appendChild(usherMenuLabel);
+  const usherMenuBodyEl = document.createElement("div");
+  usherMenuEl.appendChild(usherMenuBodyEl);
+  wrap.appendChild(usherMenuEl);
 
   // Incoming PVP invite — server-pushed, so unlike every popup above it
   // can appear with nothing clicked; a small fixed-position banner (top
@@ -2612,6 +4003,98 @@ export function mount(el, ctx) {
   chessLeaveWarningTextEl.style.margin = "0";
   chessLeaveWarningEl.appendChild(chessLeaveWarningTextEl);
   wrap.appendChild(chessLeaveWarningEl);
+
+  // Dama Phase 2 (see this game's own plan file) — networked, sharing
+  // tables 1/2 with Chess (see the api's own DamaBoardState comment).
+  // Same shells/positions as the chess popups above, kept as separate
+  // elements/functions rather than generalizing chess's own — this
+  // session's own established "give it its own thing" pattern, so a bug
+  // here can never touch the already-working Chess boards.
+  //
+  // Board-choice popup, shown instead of chessHostMenuEl specifically for
+  // an EMPTY table 1/2 (board 3, the Stockfish table, keeps using
+  // chessHostMenuEl/onChessBoardClick completely unchanged — it's always
+  // chess, never offered a choice).
+  const boardHostChoiceMenuEl = document.createElement("div");
+  boardHostChoiceMenuEl.style.position = "absolute";
+  boardHostChoiceMenuEl.style.display = "none";
+  boardHostChoiceMenuEl.style.background = "#1a1a1aee";
+  boardHostChoiceMenuEl.style.border = "1px solid #3333334d";
+  boardHostChoiceMenuEl.style.borderRadius = "4px";
+  boardHostChoiceMenuEl.style.padding = "6px";
+  boardHostChoiceMenuEl.style.zIndex = "10";
+  boardHostChoiceMenuEl.style.fontSize = "12px";
+  boardHostChoiceMenuEl.style.width = "180px";
+  const boardHostChoiceLabel = document.createElement("strong");
+  boardHostChoiceLabel.textContent = "Host a game here";
+  boardHostChoiceLabel.style.display = "block";
+  boardHostChoiceLabel.style.marginBottom = "4px";
+  boardHostChoiceMenuEl.appendChild(boardHostChoiceLabel);
+  const boardHostChoiceBodyEl = document.createElement("div");
+  boardHostChoiceMenuEl.appendChild(boardHostChoiceBodyEl);
+  wrap.appendChild(boardHostChoiceMenuEl);
+
+  const damaJoinMenuEl = document.createElement("div");
+  damaJoinMenuEl.style.position = "absolute";
+  damaJoinMenuEl.style.display = "none";
+  damaJoinMenuEl.style.background = "#1a1a1aee";
+  damaJoinMenuEl.style.border = "1px solid #3333334d";
+  damaJoinMenuEl.style.borderRadius = "4px";
+  damaJoinMenuEl.style.padding = "6px";
+  damaJoinMenuEl.style.zIndex = "10";
+  damaJoinMenuEl.style.fontSize = "12px";
+  damaJoinMenuEl.style.width = "180px";
+  const damaJoinMenuLabel = document.createElement("strong");
+  damaJoinMenuLabel.textContent = "Dama Table";
+  damaJoinMenuLabel.style.display = "block";
+  damaJoinMenuLabel.style.marginBottom = "4px";
+  damaJoinMenuEl.appendChild(damaJoinMenuLabel);
+  const damaJoinMenuBodyEl = document.createElement("div");
+  damaJoinMenuEl.appendChild(damaJoinMenuBodyEl);
+  wrap.appendChild(damaJoinMenuEl);
+
+  const damaWaitingModalEl = document.createElement("div");
+  damaWaitingModalEl.style.position = "absolute";
+  damaWaitingModalEl.style.display = "none";
+  damaWaitingModalEl.style.bottom = "8px";
+  damaWaitingModalEl.style.left = "8px";
+  damaWaitingModalEl.style.width = "200px";
+  damaWaitingModalEl.style.background = "#1a1a1aee";
+  damaWaitingModalEl.style.border = "1px solid #3333334d";
+  damaWaitingModalEl.style.borderRadius = "4px";
+  damaWaitingModalEl.style.padding = "6px 8px";
+  damaWaitingModalEl.style.zIndex = "20";
+  damaWaitingModalEl.style.fontSize = "12px";
+  wrap.appendChild(damaWaitingModalEl);
+  const { heading: damaWaitingHeadingEl, closeBtn: damaWaitingCloseBtn, body: damaWaitingBodyEl } =
+    setupModalCard(damaWaitingModalEl, "50%");
+  damaWaitingHeadingEl.textContent = "Dama";
+  damaWaitingCloseBtn.addEventListener("click", () => {
+    if (myHostedDamaBoardId != null) socket.sendDamaCancelHost(myHostedDamaBoardId);
+  });
+
+  const damaMatchModalEl = document.createElement("div");
+  damaMatchModalEl.style.position = "absolute";
+  damaMatchModalEl.style.display = "none";
+  damaMatchModalEl.style.inset = "0";
+  damaMatchModalEl.style.background = "#000000b3";
+  damaMatchModalEl.style.zIndex = "26";
+  damaMatchModalEl.style.alignItems = "center";
+  damaMatchModalEl.style.justifyContent = "center";
+  const damaMatchCardEl = document.createElement("div");
+  damaMatchCardEl.style.background = "#1a1a1aee";
+  damaMatchCardEl.style.border = "1px solid #3333334d";
+  damaMatchCardEl.style.borderRadius = "6px";
+  damaMatchCardEl.style.padding = "10px";
+  damaMatchCardEl.style.width = "300px";
+  damaMatchCardEl.style.fontSize = "12px";
+  damaMatchCardEl.style.display = "flex";
+  damaMatchModalEl.appendChild(damaMatchCardEl);
+  wrap.appendChild(damaMatchModalEl);
+  const { heading: damaMatchHeadingEl, closeBtn: damaMatchCloseBtn, body: damaMatchBodyEl } =
+    setupModalCard(damaMatchCardEl, "80%");
+  damaMatchHeadingEl.textContent = "Dama";
+  damaMatchCloseBtn.addEventListener("click", () => hideDamaMatchModal());
 
   // The Luba lobby modal — top-left (distinct from every NPC popup above,
   // which follow the click position), stays open across normal world
@@ -2809,6 +4292,45 @@ export function mount(el, ctx) {
   devMenuPanelEl.appendChild(devVisionLabel);
   devMenuPanelEl.appendChild(battleButton);
   devMenuPanelEl.appendChild(teamBattleButton);
+  // Every rig in this game — players, NPCs, wild Glophimon alike — is built
+  // by the same buildBlockyCharacter and driven by the same handful of pose
+  // functions (see character.js), so there's really only one shared
+  // "movement set" to browse here, not one per character type.
+  const charMovementsButton = document.createElement("button");
+  charMovementsButton.textContent = "🕺 Character Movements";
+  charMovementsButton.style.fontSize = "11px";
+  charMovementsButton.style.display = "block";
+  charMovementsButton.style.width = "100%";
+  charMovementsButton.style.marginTop = "4px";
+  charMovementsButton.style.cursor = "pointer";
+  devMenuPanelEl.appendChild(charMovementsButton);
+  const poseDesignerButton = document.createElement("button");
+  poseDesignerButton.textContent = "🎨 Pose Designer";
+  poseDesignerButton.style.fontSize = "11px";
+  poseDesignerButton.style.display = "block";
+  poseDesignerButton.style.width = "100%";
+  poseDesignerButton.style.marginTop = "4px";
+  poseDesignerButton.style.cursor = "pointer";
+  devMenuPanelEl.appendChild(poseDesignerButton);
+  const cameraDesignerButton = document.createElement("button");
+  cameraDesignerButton.textContent = "🎥 Camera Designer";
+  cameraDesignerButton.style.fontSize = "11px";
+  cameraDesignerButton.style.display = "block";
+  cameraDesignerButton.style.width = "100%";
+  cameraDesignerButton.style.marginTop = "4px";
+  cameraDesignerButton.style.cursor = "pointer";
+  devMenuPanelEl.appendChild(cameraDesignerButton);
+  // Dama Phase 1 (see this game's own plan file) — a pure rules-engine
+  // test via self-play, no hosting/networking/AI yet. Same self-contained
+  // "own thing" pattern as everything else in this menu.
+  const damaTestButton = document.createElement("button");
+  damaTestButton.textContent = "🀄 Test Dama";
+  damaTestButton.style.fontSize = "11px";
+  damaTestButton.style.display = "block";
+  damaTestButton.style.width = "100%";
+  damaTestButton.style.marginTop = "4px";
+  damaTestButton.style.cursor = "pointer";
+  devMenuPanelEl.appendChild(damaTestButton);
   wrap.appendChild(devMenuPanelEl);
 
   devMenuButton.addEventListener("click", () => {
@@ -2816,6 +4338,1203 @@ export function mount(el, ctx) {
   });
   devVisionToggle.addEventListener("change", () => {
     showWildVisionRange = devVisionToggle.checked;
+  });
+
+  // Character Movements modal — same outer-dim-overlay/inner-card shape as
+  // the Chess match modal above, since this is also a dense panel (a live
+  // rotate-to-inspect preview + a row of pose buttons), not a tooltip.
+  const CHARACTER_MOVEMENTS = [
+    { id: "idle", label: "Idle" },
+    { id: "walk", label: "Walk" },
+    { id: "ready", label: "Ready" },
+    { id: "attack", label: "Attack" },
+    { id: "defend", label: "Defend" },
+    { id: "cast", label: "Cast" },
+  ];
+  const charMovementsModalEl = document.createElement("div");
+  charMovementsModalEl.style.position = "absolute";
+  charMovementsModalEl.style.display = "none";
+  charMovementsModalEl.style.inset = "0";
+  charMovementsModalEl.style.background = "#000000b3";
+  charMovementsModalEl.style.zIndex = "26";
+  charMovementsModalEl.style.alignItems = "center";
+  charMovementsModalEl.style.justifyContent = "center";
+  const charMovementsCardEl = document.createElement("div");
+  charMovementsCardEl.style.background = "#1a1a1aee";
+  charMovementsCardEl.style.border = "1px solid #3333334d";
+  charMovementsCardEl.style.borderRadius = "6px";
+  charMovementsCardEl.style.padding = "10px";
+  charMovementsCardEl.style.width = "340px";
+  charMovementsCardEl.style.fontSize = "12px";
+  charMovementsCardEl.style.display = "flex";
+  charMovementsModalEl.appendChild(charMovementsCardEl);
+  wrap.appendChild(charMovementsModalEl);
+  const { heading: charMovementsHeadingEl, closeBtn: charMovementsCloseBtn, body: charMovementsBodyEl } =
+    setupModalCard(charMovementsCardEl, "80%");
+  charMovementsHeadingEl.textContent = "Character Movements";
+
+  const charMovementsPreviewEl = document.createElement("div");
+  charMovementsBodyEl.appendChild(charMovementsPreviewEl);
+
+  const charMovementsButtonsRowEl = document.createElement("div");
+  charMovementsButtonsRowEl.style.display = "flex";
+  charMovementsButtonsRowEl.style.flexWrap = "wrap";
+  charMovementsButtonsRowEl.style.gap = "4px";
+  charMovementsButtonsRowEl.style.marginTop = "8px";
+  charMovementsBodyEl.appendChild(charMovementsButtonsRowEl);
+
+  let charMovementsPreview = null;
+  const charMovementButtonEls = [];
+  function setActiveMovementButton(activeId) {
+    for (const { id, btn } of charMovementButtonEls) {
+      btn.style.background = id === activeId ? "#0080ba6a" : "#c4c4c454";
+    }
+  }
+  for (const movement of CHARACTER_MOVEMENTS) {
+    const btn = document.createElement("button");
+    btn.textContent = movement.label;
+    btn.style.fontSize = "11px";
+    btn.style.color = "#ffffffaa";
+    btn.style.border = "unset";
+    btn.style.padding = "2px 10px";
+    btn.style.cursor = "pointer";
+    btn.addEventListener("click", () => {
+      charMovementsPreview?.setPose(movement.id);
+      setActiveMovementButton(movement.id);
+    });
+    charMovementsButtonsRowEl.appendChild(btn);
+    charMovementButtonEls.push({ id: movement.id, btn });
+  }
+
+  function hideCharMovementsModal() {
+    charMovementsModalEl.style.display = "none";
+    charMovementsPreview?.dispose();
+    charMovementsPreview = null;
+  }
+  charMovementsCloseBtn.addEventListener("click", hideCharMovementsModal);
+  charMovementsButton.addEventListener("click", () => {
+    devMenuPanelEl.style.display = "none"; // tuck the dev panel away so it isn't left open behind the modal
+    charMovementsModalEl.style.display = "flex";
+    // localColors is the local player's own customization — assigned
+    // earlier in mount() (see localRig) and still in scope here; using it
+    // rather than a generic color set so the preview is recognizably "you".
+    charMovementsPreview = mountPreview(charMovementsPreviewEl, localColors);
+    setActiveMovementButton("idle");
+  });
+
+  // Pose Designer — sliders drive the live preview rig directly (see
+  // poseDesignerValues/applyPoseDesignerValues); "Add Keyframe" snapshots
+  // the current slider values into a timeline; "Play" loops through that
+  // timeline, blending linearly between consecutive keyframes over each
+  // one's own transition time (wrapping from the last keyframe back to the
+  // first). "Export" is the actual point of this tool — it's not meant to
+  // run in-game forever, just to let a real pose function get authored
+  // visually and then handed off as a spec (see this feature's own
+  // discussion) rather than hand-picked numbers guessed blind.
+  //
+  // State intentionally lives here in mount()'s own closure, not reset
+  // each time the modal opens/closes, so closing it (even by accident)
+  // never loses work in progress — only the explicit Clear button does.
+  const poseDesignerValues = poseDesignerDefaultValues();
+  let poseDesignerKeyframes = [];
+  let poseDesignerPlaying = false;
+  let poseDesignerPlaybackMs = 0;
+  let poseDesignerPreview = null;
+
+  function poseDesignerFrame(rig, dt) {
+    if (poseDesignerPlaying && poseDesignerKeyframes.length > 0) {
+      poseDesignerPlaybackMs += dt * 1000;
+      playPoseKeyframes(rig, poseDesignerKeyframes, poseDesignerPlaybackMs);
+    } else {
+      applyPoseDesignerValues(rig, poseDesignerValues);
+    }
+  }
+
+  const poseDesignerModalEl = document.createElement("div");
+  poseDesignerModalEl.style.position = "absolute";
+  poseDesignerModalEl.style.display = "none";
+  poseDesignerModalEl.style.inset = "0";
+  poseDesignerModalEl.style.background = "#000000b3";
+  poseDesignerModalEl.style.zIndex = "26";
+  poseDesignerModalEl.style.alignItems = "center";
+  poseDesignerModalEl.style.justifyContent = "center";
+  const poseDesignerCardEl = document.createElement("div");
+  poseDesignerCardEl.style.background = "#1a1a1aee";
+  poseDesignerCardEl.style.border = "1px solid #3333334d";
+  poseDesignerCardEl.style.borderRadius = "6px";
+  poseDesignerCardEl.style.padding = "10px";
+  // Wide enough to let the preview and controls sit side by side (see
+  // poseDesignerLayoutEl's own flex-wrap below) whenever there's room —
+  // capped relative to the viewport so it still fits a normal, narrow
+  // panel width, where flex-wrap just falls back to the original stacked
+  // layout on its own, no separate breakpoint logic needed.
+  poseDesignerCardEl.style.width = "min(94vw, 760px)";
+  poseDesignerCardEl.style.fontSize = "11px";
+  poseDesignerCardEl.style.display = "flex";
+  poseDesignerModalEl.appendChild(poseDesignerCardEl);
+  wrap.appendChild(poseDesignerModalEl);
+  const { heading: poseDesignerHeadingEl, closeBtn: poseDesignerCloseBtn, body: poseDesignerBodyEl } =
+    setupModalCard(poseDesignerCardEl, "85%");
+  poseDesignerHeadingEl.textContent = "Pose Designer";
+  // setupModalCard defaults the body itself to overflowY:auto — one shared
+  // scrollbar for everything in it. Overridden here so each column below
+  // gets its own independent one instead (see poseDesignerPreviewColEl/
+  // poseDesignerControlsColEl) — scrolling through the sliders must never
+  // carry the preview along with it.
+  poseDesignerBodyEl.style.overflow = "hidden";
+
+  // Side by side whenever the card is wide enough to fit both comfortably
+  // (see poseDesignerCardEl's own width above), stacked otherwise — plain
+  // flex-wrap, not a manual width breakpoint, so it degrades gracefully at
+  // any in-between size too. The whole point (see this feature's own
+  // discussion): the preview never has to be scrolled past to reach the
+  // sliders once there's room for both at once.
+  const poseDesignerLayoutEl = document.createElement("div");
+  poseDesignerLayoutEl.style.display = "flex";
+  poseDesignerLayoutEl.style.flexWrap = "wrap";
+  poseDesignerLayoutEl.style.gap = "10px";
+  poseDesignerBodyEl.appendChild(poseDesignerLayoutEl);
+
+  const poseDesignerPreviewColEl = document.createElement("div");
+  poseDesignerPreviewColEl.style.flex = "0 0 320px";
+  // A fixed-aspect canvas never actually grows past this, but bounding it
+  // the same way as the controls column keeps both columns' scroll
+  // behavior consistent rather than one of them being a special case.
+  poseDesignerPreviewColEl.style.maxHeight = "70vh";
+  poseDesignerPreviewColEl.style.overflowY = "auto";
+  poseDesignerLayoutEl.appendChild(poseDesignerPreviewColEl);
+
+  const poseDesignerControlsColEl = document.createElement("div");
+  poseDesignerControlsColEl.style.flex = "1 1 280px";
+  poseDesignerControlsColEl.style.minWidth = "260px";
+  poseDesignerControlsColEl.style.maxHeight = "70vh";
+  poseDesignerControlsColEl.style.overflowY = "auto";
+  poseDesignerLayoutEl.appendChild(poseDesignerControlsColEl);
+
+  const poseDesignerPreviewEl = document.createElement("div");
+  poseDesignerPreviewColEl.appendChild(poseDesignerPreviewEl);
+
+  const poseDesignerNameLabel = document.createElement("label");
+  poseDesignerNameLabel.style.display = "flex";
+  poseDesignerNameLabel.style.gap = "6px";
+  poseDesignerNameLabel.style.alignItems = "center";
+  poseDesignerNameLabel.style.margin = "8px 0 4px 0";
+  const poseDesignerNameInput = document.createElement("input");
+  poseDesignerNameInput.type = "text";
+  poseDesignerNameInput.placeholder = "e.g. wave, bow, taunt";
+  poseDesignerNameInput.style.flex = "1";
+  poseDesignerNameLabel.append(document.createTextNode("Name"), poseDesignerNameInput);
+  poseDesignerControlsColEl.appendChild(poseDesignerNameLabel);
+
+  // The 6 real pose slots this actually plugs into live (see
+  // tryPlayLocalOverride above and the api's own POSE_OVERRIDE_SLOTS) —
+  // Idle/Walk drive the local player's own overworld avatar; Ready/Attack/
+  // Defend/Cast (the battle-creature poses) drive that action for EVERY rig
+  // in a battle this client renders — the player's own Glophimon and the
+  // wild/opponent side alike (see updateBattleRigAnim) — since it's a
+  // purely local rendering preference, not something synced to other
+  // players' own clients.
+  const POSE_OVERRIDE_SLOTS = [
+    { id: "idle", label: "Idle" },
+    { id: "walk", label: "Walk" },
+    { id: "ready", label: "Ready" },
+    { id: "attack", label: "Attack" },
+    { id: "defend", label: "Defend" },
+    { id: "cast", label: "Cast" },
+  ];
+  const poseDesignerSlotLabel = document.createElement("label");
+  poseDesignerSlotLabel.style.display = "flex";
+  poseDesignerSlotLabel.style.gap = "6px";
+  poseDesignerSlotLabel.style.alignItems = "center";
+  poseDesignerSlotLabel.style.margin = "0 0 4px 0";
+  const poseDesignerSlotSelect = document.createElement("select");
+  poseDesignerSlotSelect.style.flex = "1";
+  const poseDesignerNoSlotOpt = document.createElement("option");
+  poseDesignerNoSlotOpt.value = "";
+  poseDesignerNoSlotOpt.textContent = "(not saved to the game — export/import only)";
+  poseDesignerSlotSelect.appendChild(poseDesignerNoSlotOpt);
+  for (const slot of POSE_OVERRIDE_SLOTS) {
+    const opt = document.createElement("option");
+    opt.value = slot.id;
+    opt.textContent = slot.label;
+    poseDesignerSlotSelect.appendChild(opt);
+  }
+  poseDesignerSlotLabel.append(document.createTextNode("Pose slot"), poseDesignerSlotSelect);
+  poseDesignerControlsColEl.appendChild(poseDesignerSlotLabel);
+
+  const poseDesignerSlotBtnsRowEl = document.createElement("div");
+  poseDesignerSlotBtnsRowEl.style.display = "flex";
+  poseDesignerSlotBtnsRowEl.style.gap = "4px";
+  poseDesignerSlotBtnsRowEl.style.marginBottom = "4px";
+  const poseDesignerSaveToGameBtn = document.createElement("button");
+  poseDesignerSaveToGameBtn.textContent = "Save to Game";
+  poseDesignerSaveToGameBtn.style.fontSize = "11px";
+  poseDesignerSaveToGameBtn.style.flex = "1";
+  poseDesignerSaveToGameBtn.style.cursor = "pointer";
+  const poseDesignerResetToDefaultBtn = document.createElement("button");
+  poseDesignerResetToDefaultBtn.textContent = "Reset to Default";
+  poseDesignerResetToDefaultBtn.style.fontSize = "11px";
+  poseDesignerResetToDefaultBtn.style.flex = "1";
+  poseDesignerResetToDefaultBtn.style.cursor = "pointer";
+  poseDesignerSlotBtnsRowEl.append(poseDesignerSaveToGameBtn, poseDesignerResetToDefaultBtn);
+  poseDesignerControlsColEl.appendChild(poseDesignerSlotBtnsRowEl);
+
+  // "Recreate" the built-in animation as editable keyframes (see
+  // sampleBuiltinPoseKeyframes) — loads it into the sliders/keyframe list
+  // and starts playing it, same as picking an already-saved pose does, but
+  // sourced from the real procedural pose instead of a saved override.
+  // Purely local until Save to Game is actually clicked afterward.
+  const poseDesignerRecreateBtn = document.createElement("button");
+  poseDesignerRecreateBtn.textContent = "Recreate Built-in as Keyframes";
+  poseDesignerRecreateBtn.style.fontSize = "11px";
+  poseDesignerRecreateBtn.style.display = "block";
+  poseDesignerRecreateBtn.style.width = "100%";
+  poseDesignerRecreateBtn.style.marginBottom = "4px";
+  poseDesignerRecreateBtn.style.cursor = "pointer";
+  poseDesignerControlsColEl.appendChild(poseDesignerRecreateBtn);
+
+  poseDesignerRecreateBtn.addEventListener("click", () => {
+    const slotId = poseDesignerSlotSelect.value;
+    if (!slotId) {
+      poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+      poseDesignerSlotStatusEl.textContent = "Pick a pose slot above first.";
+      return;
+    }
+    poseDesignerKeyframes = sampleBuiltinPoseKeyframes(slotId);
+    loadPoseDesignerValues(poseDesignerKeyframes[0].values);
+    poseDesignerPlaying = poseDesignerKeyframes.length > 1;
+    poseDesignerPlaybackMs = 0;
+    poseDesignerPlayBtn.textContent = poseDesignerPlaying ? "⏹ Stop" : "▶ Play";
+    renderPoseDesignerKeyframes();
+    poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+    poseDesignerSlotStatusEl.textContent = "Loaded the built-in animation — edit freely, then Save to Game when ready.";
+  });
+
+  const poseDesignerSlotStatusEl = document.createElement("p");
+  poseDesignerSlotStatusEl.style.fontSize = "10px";
+  poseDesignerSlotStatusEl.style.margin = "0 0 6px 0";
+  poseDesignerControlsColEl.appendChild(poseDesignerSlotStatusEl);
+
+  poseDesignerSlotSelect.addEventListener("change", () => {
+    poseDesignerSlotStatusEl.textContent = "";
+    const slotId = poseDesignerSlotSelect.value;
+    const existing = slotId ? poseOverrides[slotId] : null;
+    if (existing && existing.keyframes && existing.keyframes.length > 0) {
+      poseDesignerKeyframes = existing.keyframes.map((kf) => ({
+        values: { ...poseDesignerDefaultValues(), ...kf.values },
+        transitionMs: kf.transitionMs,
+      }));
+      loadPoseDesignerValues(poseDesignerKeyframes[0].values);
+      // Choosing an already-saved pose should show what it actually looks
+      // like in motion right away — a static first-keyframe pose plus a
+      // list of ms numbers doesn't really answer "what does this sequence
+      // do." Playing (not just Loading) is also what lets you scrub in and
+      // Save over whatever you land on, same as authoring a new one.
+      poseDesignerPlaying = true;
+      poseDesignerPlaybackMs = 0;
+      poseDesignerPlayBtn.textContent = "⏹ Stop";
+    } else if (slotId) {
+      // No custom override saved yet for a real pose slot — start from the
+      // real built-in animation (see sampleBuiltinPoseKeyframes) rather
+      // than a blank slate, so there's always something to look at and
+      // tweak instead of an extra manual step to get there.
+      poseDesignerKeyframes = sampleBuiltinPoseKeyframes(slotId);
+      loadPoseDesignerValues(poseDesignerKeyframes[0].values);
+      poseDesignerPlaying = poseDesignerKeyframes.length > 1;
+      poseDesignerPlaybackMs = 0;
+      poseDesignerPlayBtn.textContent = poseDesignerPlaying ? "⏹ Stop" : "▶ Play";
+    } else {
+      // "(not saved to the game)" — a genuine blank slate for a one-off
+      // export/import-only pose, unrelated to any of the 6 real slots.
+      poseDesignerKeyframes = [];
+      loadPoseDesignerValues(poseDesignerDefaultValues());
+      poseDesignerPlaying = false;
+      poseDesignerPlayBtn.textContent = "▶ Play";
+    }
+    poseDesignerNameInput.value = slotId ? POSE_OVERRIDE_SLOTS.find((s) => s.id === slotId).label : "";
+    renderPoseDesignerKeyframes();
+  });
+
+  poseDesignerSaveToGameBtn.addEventListener("click", async () => {
+    const slotId = poseDesignerSlotSelect.value;
+    if (!slotId) {
+      poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+      poseDesignerSlotStatusEl.textContent = "Pick a pose slot above first.";
+      return;
+    }
+    if (poseDesignerKeyframes.length === 0) {
+      poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+      poseDesignerSlotStatusEl.textContent = "Add at least one keyframe first.";
+      return;
+    }
+    poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+    poseDesignerSlotStatusEl.textContent = "Saving…";
+    const keyframes = poseDesignerKeyframes.map((kf) => ({ values: { ...kf.values }, transitionMs: kf.transitionMs }));
+    const result = await ctx.onSavePoseOverride?.(slotId, keyframes);
+    if (result && result.ok) {
+      // Takes effect immediately — the very next time tryPlayLocalOverride
+      // checks this slot, not just on your next reconnect.
+      poseOverrides = result.poseOverrides || {};
+      poseDesignerSlotStatusEl.style.color = "#4ade80";
+      const label = POSE_OVERRIDE_SLOTS.find((s) => s.id === slotId).label;
+      poseDesignerSlotStatusEl.textContent = `Saved — your ${label} will use this now.`;
+    } else {
+      poseDesignerSlotStatusEl.style.color = "#ef4444";
+      poseDesignerSlotStatusEl.textContent = "Could not save — try again?";
+    }
+  });
+
+  poseDesignerResetToDefaultBtn.addEventListener("click", async () => {
+    const slotId = poseDesignerSlotSelect.value;
+    if (!slotId) {
+      poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+      poseDesignerSlotStatusEl.textContent = "Pick a pose slot above first.";
+      return;
+    }
+    poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+    poseDesignerSlotStatusEl.textContent = "Resetting…";
+    const result = await ctx.onResetPoseOverride?.(slotId);
+    if (result && result.ok) {
+      poseOverrides = result.poseOverrides || {};
+      poseDesignerKeyframes = [];
+      loadPoseDesignerValues(poseDesignerDefaultValues());
+      renderPoseDesignerKeyframes();
+      poseDesignerSlotStatusEl.style.color = "#4ade80";
+      const label = POSE_OVERRIDE_SLOTS.find((s) => s.id === slotId).label;
+      poseDesignerSlotStatusEl.textContent = `Reset — your ${label} is back to the built-in animation.`;
+    } else {
+      poseDesignerSlotStatusEl.style.color = "#ef4444";
+      poseDesignerSlotStatusEl.textContent = "Could not reset — try again?";
+    }
+  });
+
+  const poseDesignerSlidersEl = document.createElement("div");
+  poseDesignerSlidersEl.style.display = "flex";
+  poseDesignerSlidersEl.style.flexDirection = "column";
+  poseDesignerSlidersEl.style.gap = "3px";
+  poseDesignerControlsColEl.appendChild(poseDesignerSlidersEl);
+
+  const poseDesignerSliderEls = {};
+  for (const spec of POSE_DESIGNER_PARTS) {
+    const row = document.createElement("div");
+    const topRow = document.createElement("div");
+    topRow.style.display = "flex";
+    topRow.style.justifyContent = "space-between";
+    const labelEl = document.createElement("span");
+    labelEl.textContent = spec.label;
+    const valueEl = document.createElement("span");
+    valueEl.style.color = "#a3a3a3";
+    valueEl.textContent = "0.00";
+    topRow.append(labelEl, valueEl);
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = String(spec.min);
+    slider.max = String(spec.max);
+    slider.step = String(spec.step);
+    slider.value = "0";
+    slider.style.width = "100%";
+    slider.addEventListener("input", () => {
+      const v = parseFloat(slider.value);
+      poseDesignerValues[spec.key] = v;
+      valueEl.textContent = v.toFixed(2);
+    });
+    row.append(topRow, slider);
+    poseDesignerSlidersEl.appendChild(row);
+    poseDesignerSliderEls[spec.key] = { slider, valueEl };
+  }
+
+  function loadPoseDesignerValues(values) {
+    for (const spec of POSE_DESIGNER_PARTS) {
+      const v = values[spec.key] ?? 0;
+      poseDesignerValues[spec.key] = v;
+      const { slider, valueEl } = poseDesignerSliderEls[spec.key];
+      slider.value = String(v);
+      valueEl.textContent = v.toFixed(2);
+    }
+  }
+
+  const poseDesignerActionsRowEl = document.createElement("div");
+  poseDesignerActionsRowEl.style.display = "flex";
+  poseDesignerActionsRowEl.style.gap = "4px";
+  poseDesignerActionsRowEl.style.margin = "8px 0 4px 0";
+  const poseDesignerAddBtn = document.createElement("button");
+  poseDesignerAddBtn.textContent = "+ Keyframe";
+  poseDesignerAddBtn.style.fontSize = "11px";
+  poseDesignerAddBtn.style.cursor = "pointer";
+  const poseDesignerPlayBtn = document.createElement("button");
+  poseDesignerPlayBtn.textContent = "▶ Play";
+  poseDesignerPlayBtn.style.fontSize = "11px";
+  poseDesignerPlayBtn.style.cursor = "pointer";
+  const poseDesignerClearBtn = document.createElement("button");
+  poseDesignerClearBtn.textContent = "Clear";
+  poseDesignerClearBtn.style.fontSize = "11px";
+  poseDesignerClearBtn.style.cursor = "pointer";
+  poseDesignerActionsRowEl.append(poseDesignerAddBtn, poseDesignerPlayBtn, poseDesignerClearBtn);
+  poseDesignerControlsColEl.appendChild(poseDesignerActionsRowEl);
+
+  const poseDesignerKeyframesEl = document.createElement("div");
+  poseDesignerKeyframesEl.style.display = "flex";
+  poseDesignerKeyframesEl.style.flexDirection = "column";
+  poseDesignerKeyframesEl.style.gap = "2px";
+  poseDesignerKeyframesEl.style.margin = "4px 0";
+  poseDesignerControlsColEl.appendChild(poseDesignerKeyframesEl);
+
+  function renderPoseDesignerKeyframes() {
+    poseDesignerKeyframesEl.innerHTML = "";
+    poseDesignerKeyframes.forEach((kf, i) => {
+      const row = document.createElement("div");
+      row.style.display = "flex";
+      row.style.alignItems = "center";
+      row.style.gap = "4px";
+      const label = document.createElement("span");
+      label.textContent = `${i + 1}.`;
+      const msInput = document.createElement("input");
+      msInput.type = "number";
+      msInput.min = "1";
+      msInput.step = "50";
+      msInput.value = String(kf.transitionMs);
+      msInput.style.width = "60px";
+      msInput.addEventListener("input", () => {
+        kf.transitionMs = Math.max(1, parseInt(msInput.value, 10) || 1);
+      });
+      const msSuffix = document.createElement("span");
+      msSuffix.textContent = "ms";
+      const loadBtn = document.createElement("button");
+      loadBtn.textContent = "Load";
+      loadBtn.style.fontSize = "10px";
+      loadBtn.style.cursor = "pointer";
+      loadBtn.addEventListener("click", () => loadPoseDesignerValues(kf.values));
+      // The other half of Load: after loading a keyframe onto the sliders
+      // and tweaking them, this writes the sliders' *current* values back
+      // into this same keyframe slot — Load and Save are deliberately two
+      // separate buttons rather than one "edit mode" toggle, since it also
+      // lets you load one keyframe as a starting point and save the result
+      // into a different one.
+      const saveBtn = document.createElement("button");
+      saveBtn.textContent = "Save";
+      saveBtn.style.fontSize = "10px";
+      saveBtn.style.cursor = "pointer";
+      saveBtn.addEventListener("click", () => {
+        kf.values = { ...poseDesignerValues };
+      });
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "✕";
+      delBtn.style.fontSize = "10px";
+      delBtn.style.cursor = "pointer";
+      delBtn.addEventListener("click", () => {
+        poseDesignerKeyframes.splice(i, 1);
+        renderPoseDesignerKeyframes();
+      });
+      row.append(label, msInput, msSuffix, loadBtn, saveBtn, delBtn);
+      poseDesignerKeyframesEl.appendChild(row);
+    });
+  }
+
+  poseDesignerAddBtn.addEventListener("click", () => {
+    poseDesignerKeyframes.push({ values: { ...poseDesignerValues }, transitionMs: 400 });
+    renderPoseDesignerKeyframes();
+  });
+  poseDesignerPlayBtn.addEventListener("click", () => {
+    poseDesignerPlaying = !poseDesignerPlaying;
+    poseDesignerPlaybackMs = 0;
+    poseDesignerPlayBtn.textContent = poseDesignerPlaying ? "⏹ Stop" : "▶ Play";
+  });
+  poseDesignerClearBtn.addEventListener("click", () => {
+    poseDesignerPlaying = false;
+    poseDesignerPlayBtn.textContent = "▶ Play";
+    poseDesignerKeyframes = [];
+    poseDesignerNameInput.value = "";
+    loadPoseDesignerValues(poseDesignerDefaultValues());
+    renderPoseDesignerKeyframes();
+  });
+
+  // Export and Import share this one textarea rather than each getting
+  // their own — the whole "save and continue later" workflow this is for
+  // is: Export, copy the JSON out somewhere, come back another day, paste
+  // it into this same box, Import. Read-only would only get in the way of
+  // the second half of that.
+  const poseDesignerIoRowEl = document.createElement("div");
+  poseDesignerIoRowEl.style.display = "flex";
+  poseDesignerIoRowEl.style.gap = "4px";
+  poseDesignerIoRowEl.style.marginTop = "6px";
+  const poseDesignerExportBtn = document.createElement("button");
+  poseDesignerExportBtn.textContent = "Export";
+  poseDesignerExportBtn.style.fontSize = "11px";
+  poseDesignerExportBtn.style.flex = "1";
+  poseDesignerExportBtn.style.cursor = "pointer";
+  const poseDesignerImportBtn = document.createElement("button");
+  poseDesignerImportBtn.textContent = "Import";
+  poseDesignerImportBtn.style.fontSize = "11px";
+  poseDesignerImportBtn.style.flex = "1";
+  poseDesignerImportBtn.style.cursor = "pointer";
+  poseDesignerIoRowEl.append(poseDesignerExportBtn, poseDesignerImportBtn);
+  poseDesignerControlsColEl.appendChild(poseDesignerIoRowEl);
+
+  const poseDesignerExportEl = document.createElement("textarea");
+  poseDesignerExportEl.placeholder = "Export writes here — or paste a previously exported pose here and hit Import.";
+  poseDesignerExportEl.style.width = "100%";
+  poseDesignerExportEl.style.height = "70px";
+  poseDesignerExportEl.style.marginTop = "4px";
+  poseDesignerExportEl.style.fontSize = "10px";
+  poseDesignerControlsColEl.appendChild(poseDesignerExportEl);
+
+  const poseDesignerIoErrorEl = document.createElement("p");
+  poseDesignerIoErrorEl.style.color = "#ef4444";
+  poseDesignerIoErrorEl.style.fontSize = "10px";
+  poseDesignerIoErrorEl.style.margin = "4px 0 0 0";
+  poseDesignerIoErrorEl.style.display = "none";
+  poseDesignerControlsColEl.appendChild(poseDesignerIoErrorEl);
+
+  poseDesignerExportBtn.addEventListener("click", () => {
+    poseDesignerIoErrorEl.style.display = "none";
+    const payload = {
+      name: poseDesignerNameInput.value.trim() || "untitled",
+      keyframes: poseDesignerKeyframes.map((kf) => ({ values: { ...kf.values }, transitionMs: kf.transitionMs })),
+    };
+    const json = JSON.stringify(payload, null, 2);
+    poseDesignerExportEl.value = json;
+    poseDesignerExportEl.focus();
+    poseDesignerExportEl.select();
+    navigator.clipboard?.writeText(json).catch(() => {}); // best-effort — the textarea above is the reliable fallback either way
+  });
+
+  poseDesignerImportBtn.addEventListener("click", () => {
+    poseDesignerIoErrorEl.style.display = "none";
+    let payload;
+    try {
+      payload = JSON.parse(poseDesignerExportEl.value);
+    } catch {
+      poseDesignerIoErrorEl.textContent = "Not valid JSON — paste an export from this same tool.";
+      poseDesignerIoErrorEl.style.display = "block";
+      return;
+    }
+    if (!Array.isArray(payload?.keyframes)) {
+      poseDesignerIoErrorEl.textContent = 'Missing a "keyframes" array — paste an export from this same tool.';
+      poseDesignerIoErrorEl.style.display = "block";
+      return;
+    }
+    poseDesignerPlaying = false;
+    poseDesignerPlayBtn.textContent = "▶ Play";
+    poseDesignerNameInput.value = typeof payload.name === "string" ? payload.name : "";
+    // Merged with defaults (not used as-is) so importing an older export —
+    // from before a slider existed — doesn't leave that slider's value
+    // undefined; it just falls back to 0 same as a brand new keyframe would.
+    poseDesignerKeyframes = payload.keyframes.map((kf) => ({
+      values: { ...poseDesignerDefaultValues(), ...kf.values },
+      transitionMs: Math.max(1, parseInt(kf.transitionMs, 10) || 400),
+    }));
+    if (poseDesignerKeyframes.length > 0) loadPoseDesignerValues(poseDesignerKeyframes[0].values);
+    renderPoseDesignerKeyframes();
+  });
+
+  function hidePoseDesignerModal() {
+    poseDesignerModalEl.style.display = "none";
+    poseDesignerPreview?.dispose();
+    poseDesignerPreview = null;
+  }
+  poseDesignerCloseBtn.addEventListener("click", hidePoseDesignerModal);
+  poseDesignerButton.addEventListener("click", () => {
+    devMenuPanelEl.style.display = "none";
+    poseDesignerModalEl.style.display = "flex";
+    poseDesignerPreview = mountPreview(poseDesignerPreviewEl, localColors, { showFrontMarker: true });
+    poseDesignerPreview.setCustomPose(poseDesignerFrame);
+    renderPoseDesignerKeyframes();
+  });
+
+  // Camera Designer — modeled exactly on the Pose Designer above (same
+  // modal shape via setupModalCard, same two-column preview/controls
+  // layout, same slot-select + Save to Game/Reset to Default pipeline),
+  // but far simpler: no keyframe timeline, since the reset/orbit camera is
+  // just 4 numbers plus an on/off toggle, not a posable rig. This only ever
+  // customizes each battle type's own wide "nothing focused" fallback
+  // framing (see the per-frame battle camera blocks in frame() below,
+  // where cameraOverrides is actually read) — the focus camera that
+  // follows whoever's declaring/acting is untouched and not exposed here.
+  const cameraDesignerModalEl = document.createElement("div");
+  cameraDesignerModalEl.style.position = "absolute";
+  cameraDesignerModalEl.style.display = "none";
+  cameraDesignerModalEl.style.inset = "0";
+  cameraDesignerModalEl.style.background = "#000000b3";
+  cameraDesignerModalEl.style.zIndex = "26";
+  cameraDesignerModalEl.style.alignItems = "center";
+  cameraDesignerModalEl.style.justifyContent = "center";
+  const cameraDesignerCardEl = document.createElement("div");
+  cameraDesignerCardEl.style.background = "#1a1a1aee";
+  cameraDesignerCardEl.style.border = "1px solid #3333334d";
+  cameraDesignerCardEl.style.borderRadius = "6px";
+  cameraDesignerCardEl.style.padding = "10px";
+  cameraDesignerCardEl.style.width = "min(94vw, 760px)";
+  cameraDesignerCardEl.style.fontSize = "11px";
+  cameraDesignerCardEl.style.display = "flex";
+  cameraDesignerModalEl.appendChild(cameraDesignerCardEl);
+  wrap.appendChild(cameraDesignerModalEl);
+  const { heading: cameraDesignerHeadingEl, closeBtn: cameraDesignerCloseBtn, body: cameraDesignerBodyEl } =
+    setupModalCard(cameraDesignerCardEl, "85%");
+  cameraDesignerHeadingEl.textContent = "Camera Designer";
+  cameraDesignerBodyEl.style.overflow = "hidden";
+
+  const cameraDesignerLayoutEl = document.createElement("div");
+  cameraDesignerLayoutEl.style.display = "flex";
+  cameraDesignerLayoutEl.style.flexWrap = "wrap";
+  cameraDesignerLayoutEl.style.gap = "10px";
+  cameraDesignerBodyEl.appendChild(cameraDesignerLayoutEl);
+
+  const cameraDesignerPreviewColEl = document.createElement("div");
+  cameraDesignerPreviewColEl.style.flex = "0 0 320px";
+  cameraDesignerPreviewColEl.style.maxHeight = "70vh";
+  cameraDesignerPreviewColEl.style.overflowY = "auto";
+  cameraDesignerLayoutEl.appendChild(cameraDesignerPreviewColEl);
+
+  const cameraDesignerControlsColEl = document.createElement("div");
+  cameraDesignerControlsColEl.style.flex = "1 1 280px";
+  cameraDesignerControlsColEl.style.minWidth = "260px";
+  cameraDesignerControlsColEl.style.maxHeight = "70vh";
+  cameraDesignerControlsColEl.style.overflowY = "auto";
+  cameraDesignerLayoutEl.appendChild(cameraDesignerControlsColEl);
+
+  const cameraDesignerPreviewEl = document.createElement("div");
+  cameraDesignerPreviewColEl.appendChild(cameraDesignerPreviewEl);
+
+  // The real slots this actually plugs into live — the original 3
+  // kind:"orbit" reset/orbit cameras plus the wild battle's own 4
+  // kind:"focus" re-aim moments (see CAMERA_OVERRIDE_SLOTS, now module-level
+  // alongside CAMERA_DESIGNER_FIELDS/CAMERA_FOCUS_FIELDS, and cameraOverrides
+  // below) — no "(not saved to the game)" blank-slate option like the Pose
+  // Designer's own select, since there's no export/import concept here;
+  // picking a slot always means "customize this camera moment."
+  const cameraDesignerSlotLabel = document.createElement("label");
+  cameraDesignerSlotLabel.style.display = "flex";
+  cameraDesignerSlotLabel.style.gap = "6px";
+  cameraDesignerSlotLabel.style.alignItems = "center";
+  cameraDesignerSlotLabel.style.margin = "0 0 4px 0";
+  const cameraDesignerSlotSelect = document.createElement("select");
+  cameraDesignerSlotSelect.style.flex = "1";
+  const cameraDesignerNoSlotOpt = document.createElement("option");
+  cameraDesignerNoSlotOpt.value = "";
+  cameraDesignerNoSlotOpt.textContent = "(pick a battle type below)";
+  cameraDesignerSlotSelect.appendChild(cameraDesignerNoSlotOpt);
+  for (const slot of CAMERA_OVERRIDE_SLOTS) {
+    const opt = document.createElement("option");
+    opt.value = slot.id;
+    opt.textContent = slot.label;
+    cameraDesignerSlotSelect.appendChild(opt);
+  }
+  cameraDesignerSlotLabel.append(document.createTextNode("Battle type"), cameraDesignerSlotSelect);
+  cameraDesignerControlsColEl.appendChild(cameraDesignerSlotLabel);
+
+  const cameraDesignerSlotBtnsRowEl = document.createElement("div");
+  cameraDesignerSlotBtnsRowEl.style.display = "flex";
+  cameraDesignerSlotBtnsRowEl.style.gap = "4px";
+  cameraDesignerSlotBtnsRowEl.style.marginBottom = "4px";
+  const cameraDesignerSaveToGameBtn = document.createElement("button");
+  cameraDesignerSaveToGameBtn.textContent = "Save to Game";
+  cameraDesignerSaveToGameBtn.style.fontSize = "11px";
+  cameraDesignerSaveToGameBtn.style.flex = "1";
+  cameraDesignerSaveToGameBtn.style.cursor = "pointer";
+  const cameraDesignerResetToDefaultBtn = document.createElement("button");
+  cameraDesignerResetToDefaultBtn.textContent = "Reset to Default";
+  cameraDesignerResetToDefaultBtn.style.fontSize = "11px";
+  cameraDesignerResetToDefaultBtn.style.flex = "1";
+  cameraDesignerResetToDefaultBtn.style.cursor = "pointer";
+  cameraDesignerSlotBtnsRowEl.append(cameraDesignerSaveToGameBtn, cameraDesignerResetToDefaultBtn);
+  cameraDesignerControlsColEl.appendChild(cameraDesignerSlotBtnsRowEl);
+
+  const cameraDesignerStatusEl = document.createElement("p");
+  cameraDesignerStatusEl.style.fontSize = "10px";
+  cameraDesignerStatusEl.style.margin = "0 0 6px 0";
+  cameraDesignerControlsColEl.appendChild(cameraDesignerStatusEl);
+
+  // State lives here in mount()'s own closure (not reset on modal close),
+  // same "don't lose in-progress tweaking by accident" reasoning as the
+  // Pose Designer's own poseDesignerValues. cameraDesignerPreviewAngle is
+  // separate from cameraDesignerValues.angle — it's the *live* preview
+  // angle (which keeps advancing every frame while autoRotate is on),
+  // while .angle is the *saved* starting angle a fresh battle should open
+  // on; see cameraDesignerDriver below for how the two relate. Both
+  // cameraDesignerValues and cameraDesignerFields are `let`, not `const` —
+  // switching a kind:"orbit" slot to a kind:"focus" one (or back) replaces
+  // both wholesale (see renderCameraDesignerSliders/loadCameraDesignerValues
+  // below) rather than merging mismatched shapes into one object.
+  let cameraDesignerValues = cameraDesignerDefaultValues("wild");
+  let cameraDesignerFields = CAMERA_DESIGNER_FIELDS;
+  let cameraDesignerPreviewAngle = cameraDesignerValues.angle;
+  // Vertical-axis counterpart to cameraDesignerPreviewAngle above — passed
+  // straight into the shared advanceOrbitElevation (same function the real
+  // battle cameras use), so the preview bounces between MIN_ELEVATION/
+  // MAX_ELEVATION exactly the same way a real orbit slot's own "Rotation
+  // Speed (X axis)" would, rather than a second hand-rolled copy of that
+  // bounce logic.
+  const cameraDesignerPreviewElevationState = { camElevation: cameraDesignerValues.elevation, camElevationDir: 1 };
+  // Focus-slot counterparts to cameraDesignerPreviewAngle/
+  // cameraDesignerPreviewElevationState above — a focus slot now supports
+  // its own orbit (angle/rotateSpeed) and height-bounce (heightRotateSpeed)
+  // too (see CAMERA_FOCUS_FIELDS), so the preview needs its own live
+  // running angle/height state for that shape, kept separate from the
+  // orbit shape's own state above since the two kinds can be switched
+  // between at any time without one clobbering the other's progress.
+  let cameraDesignerFocusPreviewAngle = cameraDesignerValues.angle ?? 0;
+  const cameraDesignerFocusPreviewHeightState = { camElevation: TEAM_FOCUS_CAM_HEIGHT, camElevationDir: 1 };
+  let cameraDesignerPreview = null;
+
+  const cameraDesignerSlidersEl = document.createElement("div");
+  cameraDesignerSlidersEl.style.display = "flex";
+  cameraDesignerSlidersEl.style.flexDirection = "column";
+  cameraDesignerSlidersEl.style.gap = "3px";
+  cameraDesignerControlsColEl.appendChild(cameraDesignerSlidersEl);
+
+  // Rebuilt wholesale — not just re-valued — every time the slot <select>
+  // switches to a different `kind` (see the "change" handler below), since
+  // CAMERA_DESIGNER_FIELDS (orbit) and CAMERA_FOCUS_FIELDS (focus) don't
+  // share keys, ranges, or labels at all. cameraDesignerSliderEls is
+  // likewise rebuilt each time so nothing keeps a reference to a slider
+  // already removed from the DOM by the previous kind's own render.
+  let cameraDesignerSliderEls = {};
+  function renderCameraDesignerSliders(fields) {
+    cameraDesignerFields = fields;
+    cameraDesignerSlidersEl.innerHTML = "";
+    cameraDesignerSliderEls = {};
+    for (const spec of fields) {
+      const row = document.createElement("div");
+      const topRow = document.createElement("div");
+      topRow.style.display = "flex";
+      topRow.style.justifyContent = "space-between";
+      const labelEl = document.createElement("span");
+      labelEl.textContent = spec.label;
+      const valueEl = document.createElement("span");
+      valueEl.style.color = "#a3a3a3";
+      valueEl.textContent = "0.00";
+      topRow.append(labelEl, valueEl);
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.min = String(spec.min);
+      slider.max = String(spec.max);
+      slider.step = String(spec.step);
+      slider.value = "0";
+      slider.style.width = "100%";
+      slider.addEventListener("input", () => {
+        const v = parseFloat(slider.value);
+        cameraDesignerValues[spec.key] = v;
+        valueEl.textContent = v.toFixed(2);
+        // Moving the Starting Angle slider while paused (autoRotate off)
+        // should visibly relocate the preview right away rather than
+        // waiting for rotation to carry it there — see cameraDesignerDriver,
+        // which only reads cameraDesignerPreviewAngle/
+        // cameraDesignerFocusPreviewAngle (not .angle directly) so it can
+        // keep spinning smoothly while autoRotate is on. Both kinds have an
+        // "angle" field now (orbit's own starting angle, and a focus shot's
+        // new orbit offset — see CAMERA_FOCUS_FIELDS), so this picks
+        // whichever live preview-angle variable matches the currently
+        // rendered field set.
+        if (spec.key === "angle" && !cameraDesignerValues.autoRotate) {
+          if (cameraDesignerFields === CAMERA_DESIGNER_FIELDS) cameraDesignerPreviewAngle = v;
+          else cameraDesignerFocusPreviewAngle = v;
+        }
+      });
+      row.append(topRow, slider);
+      cameraDesignerSlidersEl.appendChild(row);
+      cameraDesignerSliderEls[spec.key] = { slider, valueEl };
+    }
+  }
+  renderCameraDesignerSliders(CAMERA_DESIGNER_FIELDS);
+
+  // autoRotate now applies to both kinds — a kind:"focus" slot got its own
+  // angle/rotateSpeed/heightRotateSpeed too (see CAMERA_FOCUS_FIELDS), so
+  // this control is no longer hidden for those slots (see the slot-select
+  // "change" handler, which used to force-hide it via
+  // `slot.kind === "focus" ? "none" : "flex"` — that special-casing is
+  // gone now that a focus shot can orbit its own anchor rig just like the
+  // 3 orbit slots orbit their own reset framing).
+  const cameraDesignerAutoRotateLabel = document.createElement("label");
+  cameraDesignerAutoRotateLabel.style.display = "flex";
+  cameraDesignerAutoRotateLabel.style.gap = "6px";
+  cameraDesignerAutoRotateLabel.style.alignItems = "center";
+  cameraDesignerAutoRotateLabel.style.margin = "6px 0 0 0";
+  const cameraDesignerAutoRotateToggle = document.createElement("input");
+  cameraDesignerAutoRotateToggle.type = "checkbox";
+  cameraDesignerAutoRotateLabel.append(cameraDesignerAutoRotateToggle, document.createTextNode("Auto-rotate (satellite drift)"));
+  cameraDesignerControlsColEl.appendChild(cameraDesignerAutoRotateLabel);
+
+  cameraDesignerAutoRotateToggle.addEventListener("change", () => {
+    cameraDesignerValues.autoRotate = cameraDesignerAutoRotateToggle.checked;
+    // Rotation Speed is meaningless while not rotating — greyed out (not
+    // hidden) so its own last value is still visible/rememberable, same as
+    // any other disabled-but-not-cleared control.
+    cameraDesignerSliderEls.rotateSpeed.slider.disabled = !cameraDesignerValues.autoRotate;
+    // Resume spinning from wherever the static preview was left sitting
+    // (its current angle/height), not a stale position from before it was
+    // paused — whichever kind is currently active.
+    if (cameraDesignerValues.autoRotate) {
+      if (cameraDesignerFields === CAMERA_DESIGNER_FIELDS) {
+        cameraDesignerPreviewAngle = cameraDesignerValues.angle;
+      } else {
+        cameraDesignerFocusPreviewAngle = cameraDesignerValues.angle;
+        cameraDesignerFocusPreviewHeightState.camElevation = cameraDesignerValues.height;
+        cameraDesignerFocusPreviewHeightState.camElevationDir = 1;
+      }
+    }
+  });
+
+  // Reassigns cameraDesignerValues wholesale (rather than merging into the
+  // existing object) so switching kinds never leaves a stale key from the
+  // previous shape lying around (e.g. a leftover "radius" surviving a
+  // switch to a focus slot) — see cameraDesignerFields above for which
+  // field spec set is currently authoritative. autoRotate/rotateSpeed now
+  // apply to both shapes (see CAMERA_FOCUS_FIELDS), so this is no longer
+  // gated to CAMERA_DESIGNER_FIELDS specifically.
+  function loadCameraDesignerValues(values) {
+    const next = {};
+    for (const spec of cameraDesignerFields) {
+      const v = values[spec.key] ?? 0;
+      next[spec.key] = v;
+      const { slider, valueEl } = cameraDesignerSliderEls[spec.key];
+      slider.value = String(v);
+      valueEl.textContent = v.toFixed(2);
+    }
+    next.autoRotate = values.autoRotate !== false;
+    cameraDesignerValues = next;
+    cameraDesignerAutoRotateToggle.checked = cameraDesignerValues.autoRotate;
+    cameraDesignerSliderEls.rotateSpeed.slider.disabled = !cameraDesignerValues.autoRotate;
+    if (cameraDesignerFields === CAMERA_DESIGNER_FIELDS) {
+      cameraDesignerPreviewAngle = cameraDesignerValues.angle;
+    } else {
+      cameraDesignerFocusPreviewAngle = cameraDesignerValues.angle;
+      cameraDesignerFocusPreviewHeightState.camElevation = cameraDesignerValues.height;
+      cameraDesignerFocusPreviewHeightState.camElevationDir = 1;
+    }
+  }
+  loadCameraDesignerValues(cameraDesignerValues);
+
+  cameraDesignerSlotSelect.addEventListener("change", () => {
+    cameraDesignerStatusEl.textContent = "";
+    const slotId = cameraDesignerSlotSelect.value;
+    // Falls back to "wild" (kind:"orbit") for the blank "(pick a battle
+    // type below)" placeholder option, same fallback the rest of this
+    // handler already used before focus slots existed.
+    const slot = CAMERA_OVERRIDE_SLOTS.find((s) => s.id === slotId) || CAMERA_OVERRIDE_SLOTS.find((s) => s.id === "wild");
+    renderCameraDesignerSliders(slot.kind === "focus" ? CAMERA_FOCUS_FIELDS : CAMERA_DESIGNER_FIELDS);
+    const defaults = cameraDesignerDefaultValues(slotId || "wild");
+    // Merged with this slot's own defaults (not used as-is) so a saved
+    // override captured before some field existed doesn't leave it
+    // undefined — same "fill the gap, don't guess 0" reasoning as the Pose
+    // Designer's own poseDesignerDefaultValues merge.
+    const existing = slotId ? cameraOverrides[slotId] : null;
+    loadCameraDesignerValues(existing ? { ...defaults, ...existing } : defaults);
+  });
+
+  cameraDesignerSaveToGameBtn.addEventListener("click", async () => {
+    const slotId = cameraDesignerSlotSelect.value;
+    if (!slotId) {
+      cameraDesignerStatusEl.style.color = "#a3a3a3";
+      cameraDesignerStatusEl.textContent = "Pick a battle type above first.";
+      return;
+    }
+    cameraDesignerStatusEl.style.color = "#a3a3a3";
+    cameraDesignerStatusEl.textContent = "Saving…";
+    const values = { ...cameraDesignerValues };
+    const result = await ctx.onSaveCameraOverride?.(slotId, values);
+    if (result && result.ok) {
+      // Takes effect immediately — the very next battle of this type reads
+      // cameraOverrides fresh (see frame()'s own per-battle camera blocks),
+      // not just on your next reconnect.
+      cameraOverrides = result.cameraOverrides || {};
+      cameraDesignerStatusEl.style.color = "#4ade80";
+      const label = CAMERA_OVERRIDE_SLOTS.find((s) => s.id === slotId).label;
+      cameraDesignerStatusEl.textContent = `Saved — ${label}'s camera will use this now.`;
+    } else {
+      cameraDesignerStatusEl.style.color = "#ef4444";
+      cameraDesignerStatusEl.textContent = "Could not save — try again?";
+    }
+  });
+
+  cameraDesignerResetToDefaultBtn.addEventListener("click", async () => {
+    const slotId = cameraDesignerSlotSelect.value;
+    if (!slotId) {
+      cameraDesignerStatusEl.style.color = "#a3a3a3";
+      cameraDesignerStatusEl.textContent = "Pick a battle type above first.";
+      return;
+    }
+    cameraDesignerStatusEl.style.color = "#a3a3a3";
+    cameraDesignerStatusEl.textContent = "Resetting…";
+    const result = await ctx.onResetCameraOverride?.(slotId);
+    if (result && result.ok) {
+      cameraOverrides = result.cameraOverrides || {};
+      loadCameraDesignerValues(cameraDesignerDefaultValues(slotId));
+      cameraDesignerStatusEl.style.color = "#4ade80";
+      const label = CAMERA_OVERRIDE_SLOTS.find((s) => s.id === slotId).label;
+      cameraDesignerStatusEl.textContent = `Reset — ${label}'s camera is back to the built-in framing.`;
+    } else {
+      cameraDesignerStatusEl.style.color = "#ef4444";
+      cameraDesignerStatusEl.textContent = "Could not reset — try again?";
+    }
+  });
+
+  // Drives the shared mountPreview camera (see that function's own
+  // options.cameraDriver hook) from these live slider values instead of
+  // mouse drag. For a kind:"orbit" slot this is the exact same position/
+  // lookAt formula shape the real per-battle reset cameras use (see
+  // frame()'s own cameraOverrides blocks below), just centered on the
+  // preview's own origin instead of a battle's centerX/centerZ. For a
+  // kind:"focus" slot it instead demonstrates the focus formula itself via
+  // computeFocusCameraFrame — the exact same shared function
+  // focusWildCameraOnRig calls — anchored on one of the preview's own two
+  // battle-scene rigs (see PREVIEW_BATTLE_WILD_Z/PLAYER_Z in mountPreview;
+  // read as plain {x,z} positions here since this preview never gets a
+  // handle to the real rig objects, only mountPreview's own fixed layout of
+  // them), now also demonstrating a focus slot's own orbit
+  // (angle/rotateSpeed) and height-bounce (heightRotateSpeed) the same way
+  // the orbit branch below does for its own rotateSpeed/
+  // elevationRotateSpeed — see cameraDesignerFocusPreviewAngle/
+  // cameraDesignerFocusPreviewHeightState above. NOTE: there was no live
+  // three.js rendering available while writing this branch — the math
+  // mirrors the real formula exactly, but it needs an actual click-through
+  // in the Camera Designer to confirm the resulting shot (and its
+  // rotation, now) looks right for all 4 focus slots.
+  function cameraDesignerDriver(camera, dt) {
+    const slotId = cameraDesignerSlotSelect.value;
+    const slot = CAMERA_OVERRIDE_SLOTS.find((s) => s.id === slotId);
+    if (slot && slot.kind === "focus") {
+      const playerPos = { x: 0, z: PREVIEW_BATTLE_PLAYER_Z };
+      const wildPos = { x: 0, z: PREVIEW_BATTLE_WILD_Z };
+      // "wild_decide_defend"/"wild_declare"/"wild_attack_scene" all anchor
+      // on the player-side rig looking at the wild — matching (or, for
+      // wild_declare, illustrating a clearer version of) their own real
+      // call sites in beginRound/showWildDeclareStep/resolvePlayerAttack.
+      // "wild_defend_scene" anchors on the wild rig instead, looking back
+      // at the player — mirroring that slot's own "the wild is defending"
+      // real variant (resolvePlayerAttack's own wild_defend_scene call) and
+      // giving this slot a visibly distinct preview shot from the other 3.
+      let anchorPos = playerPos;
+      let anchorFacing = 0; // the preview's own player-side rig faces forward, unrotated — see mountPreview's battleScenePreview branch
+      let lookAtPos = wildPos;
+      if (slotId === "wild_defend_scene") {
+        anchorPos = wildPos;
+        anchorFacing = Math.PI; // matches mountPreview's own wildRig.group.rotation.y for the battle-scene preview
+        lookAtPos = playerPos;
+      }
+      if (cameraDesignerValues.autoRotate) {
+        cameraDesignerFocusPreviewAngle += (cameraDesignerValues.rotateSpeed ?? 0) * dt;
+      }
+      const theta = cameraDesignerValues.autoRotate ? cameraDesignerFocusPreviewAngle : (cameraDesignerValues.angle ?? 0);
+      const heightRotateSpeed = cameraDesignerValues.autoRotate ? (cameraDesignerValues.heightRotateSpeed ?? 0) : 0;
+      const height = advanceOrbitElevation(cameraDesignerFocusPreviewHeightState, cameraDesignerValues.height, heightRotateSpeed, dt, FOCUS_CAM_HEIGHT_MIN, FOCUS_CAM_HEIGHT_MAX);
+      const frame = computeFocusCameraFrame(anchorPos, anchorFacing, lookAtPos, { ...cameraDesignerValues, height }, theta);
+      camera.position.set(frame.camX, frame.camY, frame.camZ);
+      camera.lookAt(frame.lookX, frame.lookY, frame.lookZ);
+      return;
+    }
+    if (cameraDesignerValues.autoRotate) {
+      cameraDesignerPreviewAngle += cameraDesignerValues.rotateSpeed * dt;
+    }
+    const angle = cameraDesignerValues.autoRotate ? cameraDesignerPreviewAngle : cameraDesignerValues.angle;
+    const radius = cameraDesignerValues.radius;
+    const elevationRotateSpeed = cameraDesignerValues.autoRotate ? (cameraDesignerValues.elevationRotateSpeed ?? 0) : 0;
+    const elevation = advanceOrbitElevation(cameraDesignerPreviewElevationState, cameraDesignerValues.elevation, elevationRotateSpeed, dt, MIN_ELEVATION, MAX_ELEVATION);
+    camera.position.set(
+      Math.sin(angle) * Math.cos(elevation) * radius,
+      PREVIEW_TARGET_Y + Math.sin(elevation) * radius,
+      Math.cos(angle) * Math.cos(elevation) * radius,
+    );
+    camera.lookAt(0, PREVIEW_TARGET_Y, 0);
+  }
+
+  function hideCameraDesignerModal() {
+    cameraDesignerModalEl.style.display = "none";
+    cameraDesignerPreview?.dispose();
+    cameraDesignerPreview = null;
+  }
+  cameraDesignerCloseBtn.addEventListener("click", hideCameraDesignerModal);
+  cameraDesignerButton.addEventListener("click", () => {
+    devMenuPanelEl.style.display = "none";
+    cameraDesignerModalEl.style.display = "flex";
+    // battleScenePreview — see mountPreview's own option — replaces the
+    // single centered character every other preview caller gets with a
+    // small randomized "battle" (a wild-side rig + a your-side rig) so the
+    // Camera Designer actually frames something battle-shaped, not a lone
+    // character spinning in place. Re-mounted fresh (new random species)
+    // every time the panel opens, same as re-picking a wild encounter.
+    cameraDesignerPreview = mountPreview(cameraDesignerPreviewEl, localColors, {
+      cameraDriver: cameraDesignerDriver,
+      battleScenePreview: true,
+    });
+  });
+
+  // Dama Phase 1 — a self-play test modal for the pure rules engine (see
+  // dama.js). No hosting, no networking, no AI: the same player just moves
+  // both sides, purely to prove the rules/board actually work before any
+  // of that gets built. board/sideToMove/etc. all live here in mount()'s
+  // own closure, same shape as every other Dev-menu tool's state.
+  let damaBoard = null;
+  let damaSideToMove = "white";
+  let damaSelectedSquare = null; // {row, col} | null
+  let damaLegalMoves = []; // getAllLegalMoves(damaBoard, damaSideToMove) — already capture-only if any capture exists
+  let damaMidChain = false; // true while a multi-jump capture must continue with the same piece
+  let damaWinner = null; // "white" | "black" | null
+
+  const damaModalEl = document.createElement("div");
+  damaModalEl.style.position = "absolute";
+  damaModalEl.style.display = "none";
+  damaModalEl.style.inset = "0";
+  damaModalEl.style.background = "#000000b3";
+  damaModalEl.style.zIndex = "26";
+  damaModalEl.style.alignItems = "center";
+  damaModalEl.style.justifyContent = "center";
+  const damaCardEl = document.createElement("div");
+  damaCardEl.style.background = "#1a1a1aee";
+  damaCardEl.style.border = "1px solid #3333334d";
+  damaCardEl.style.borderRadius = "6px";
+  damaCardEl.style.padding = "10px";
+  damaCardEl.style.width = "320px";
+  damaCardEl.style.fontSize = "12px";
+  damaCardEl.style.display = "flex";
+  damaModalEl.appendChild(damaCardEl);
+  wrap.appendChild(damaModalEl);
+  const { heading: damaHeadingEl, closeBtn: damaCloseBtn, body: damaBodyEl } = setupModalCard(damaCardEl, "85%");
+  damaHeadingEl.textContent = "Dama (test — self-play)";
+
+  const damaStatusEl = document.createElement("p");
+  damaStatusEl.style.fontSize = "11px";
+  damaStatusEl.style.margin = "0 0 6px 0";
+  damaBodyEl.appendChild(damaStatusEl);
+
+  const damaGridEl = document.createElement("div");
+  damaGridEl.style.display = "grid";
+  damaGridEl.style.gridTemplateColumns = "repeat(8, 36px)";
+  damaGridEl.style.gridTemplateRows = "repeat(8, 36px)";
+  damaGridEl.style.width = "288px";
+  damaBodyEl.appendChild(damaGridEl);
+
+  const damaNewGameBtn = document.createElement("button");
+  damaNewGameBtn.textContent = "New Game";
+  damaNewGameBtn.style.fontSize = "11px";
+  damaNewGameBtn.style.marginTop = "8px";
+  damaNewGameBtn.style.cursor = "pointer";
+  damaBodyEl.appendChild(damaNewGameBtn);
+
+  function resetDamaGame() {
+    damaBoard = createInitialDamaBoard();
+    damaSideToMove = "white";
+    damaSelectedSquare = null;
+    damaMidChain = false;
+    damaWinner = null;
+    damaLegalMoves = getAllLegalMoves(damaBoard, damaSideToMove);
+  }
+
+  function renderDamaModal() {
+    damaGridEl.innerHTML = "";
+    const destinations = damaSelectedSquare
+      ? damaLegalMoves.filter((m) => m.from.row === damaSelectedSquare.row && m.from.col === damaSelectedSquare.col).map((m) => m.to)
+      : [];
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 8; col++) {
+        const sq = document.createElement("div");
+        sq.style.width = "36px";
+        sq.style.height = "36px";
+        sq.style.display = "flex";
+        sq.style.alignItems = "center";
+        sq.style.justifyContent = "center";
+        sq.style.position = "relative";
+        sq.style.cursor = "pointer";
+        const light = (row + col) % 2 === 0;
+        sq.style.background = light ? TAMBAYAN_BOARD_LIGHT : TAMBAYAN_BOARD_DARK;
+        const isSelected = damaSelectedSquare && damaSelectedSquare.row === row && damaSelectedSquare.col === col;
+        sq.style.boxShadow = isSelected ? "inset 0 0 0 2px orange" : "none";
+        const piece = damaBoard[row][col];
+        if (piece) {
+          const disc = document.createElement("div");
+          disc.style.width = "26px";
+          disc.style.height = "26px";
+          disc.style.borderRadius = "50%";
+          disc.style.display = "flex";
+          disc.style.alignItems = "center";
+          disc.style.justifyContent = "center";
+          disc.style.fontSize = "13px";
+          disc.style.background = piece.side === "white" ? "#f5f5f5" : "#1f2937";
+          disc.style.border = piece.side === "white" ? "2px solid #1f2937" : "2px solid #f5f5f5";
+          if (piece.king) {
+            disc.textContent = "★";
+            disc.style.color = piece.side === "white" ? "#1f2937" : "#f5f5f5";
+          }
+          sq.appendChild(disc);
+        }
+        if (destinations.some((d) => d.row === row && d.col === col)) {
+          const dot = document.createElement("div");
+          dot.style.position = "absolute";
+          dot.style.width = "10px";
+          dot.style.height = "10px";
+          dot.style.borderRadius = "50%";
+          dot.style.background = "#4ade8099";
+          sq.appendChild(dot);
+        }
+        sq.addEventListener("click", () => onDamaSquareClick(row, col));
+        damaGridEl.appendChild(sq);
+      }
+    }
+    if (damaWinner) {
+      damaStatusEl.textContent = `${damaWinner === "white" ? "White" : "Black"} wins!`;
+    } else {
+      const mandatory = damaLegalMoves.length > 0 && damaLegalMoves[0].captured;
+      const turnText = `${damaSideToMove === "white" ? "White" : "Black"}'s turn`;
+      damaStatusEl.textContent = damaMidChain
+        ? `${turnText} — continue capturing with the same piece`
+        : mandatory
+          ? `${turnText} — capture available (mandatory)`
+          : turnText;
+    }
+  }
+
+  function onDamaSquareClick(row, col) {
+    if (!damaBoard || damaWinner) return;
+    const piece = damaBoard[row][col];
+
+    if (damaSelectedSquare) {
+      const move = damaLegalMoves.find(
+        (m) => m.from.row === damaSelectedSquare.row && m.from.col === damaSelectedSquare.col && m.to.row === row && m.to.col === col,
+      );
+      if (move) {
+        const result = applyDamaMove(damaBoard, move);
+        damaBoard = result.board;
+        if (result.continuedCaptureFrom) {
+          damaMidChain = true;
+          damaSelectedSquare = result.continuedCaptureFrom;
+          damaLegalMoves = getAllLegalMoves(damaBoard, damaSideToMove, damaSelectedSquare);
+        } else {
+          damaMidChain = false;
+          damaSelectedSquare = null;
+          damaSideToMove = damaSideToMove === "white" ? "black" : "white";
+          damaLegalMoves = getAllLegalMoves(damaBoard, damaSideToMove);
+          if (damaLegalMoves.length === 0) damaWinner = damaSideToMove === "white" ? "black" : "white";
+        }
+        renderDamaModal();
+        return;
+      }
+      if (damaMidChain) return; // must keep capturing with the same piece — ignore anything else
+      if (piece && piece.side === damaSideToMove && damaLegalMoves.some((m) => m.from.row === row && m.from.col === col)) {
+        damaSelectedSquare = { row, col };
+      } else {
+        damaSelectedSquare = null;
+      }
+      renderDamaModal();
+      return;
+    }
+
+    if (piece && piece.side === damaSideToMove && damaLegalMoves.some((m) => m.from.row === row && m.from.col === col)) {
+      damaSelectedSquare = { row, col };
+      renderDamaModal();
+    }
+  }
+
+  damaNewGameBtn.addEventListener("click", () => {
+    resetDamaGame();
+    renderDamaModal();
+  });
+  damaCloseBtn.addEventListener("click", () => {
+    damaModalEl.style.display = "none";
+  });
+  damaTestButton.addEventListener("click", () => {
+    devMenuPanelEl.style.display = "none";
+    damaModalEl.style.display = "flex";
+    resetDamaGame();
+    renderDamaModal();
   });
 
   el.appendChild(wrap);
@@ -2826,21 +5545,52 @@ export function mount(el, ctx) {
   // comments for why this couldn't just live inside createScene itself.
   const skyDome = buildSkyDome(scene);
   const sunSprite = buildSunSprite(scene);
-  const townWallSegments = buildTown(scene);
-  buildJaredShop(scene);
-  const { board: karirsBoard, tvGroup: karirsTvGroup } = buildKarirsField(scene, townWallSegments);
-  buildLubaArea(scene, townWallSegments);
+  // See buildTown's own comment — townWallSegmentsByFloor is keyed by
+  // floor index (0 = ground), and glophicsFloorGroups is every ABOVE-ground
+  // floor's + the roof's own THREE.Group (see applyGlophicsFloorCutaway).
+  // groundWallSegments is just a convenience alias for the one array that
+  // existed before floors did — the Karirs field/Luba area are both
+  // ground-only, so their own walls get folded into that same array
+  // exactly like before this feature existed.
+  const { wallSegmentsByFloor: townWallSegmentsByFloor, glophicsFloorGroups, sign: townSign, cinemaUsherRig: usherRig } = buildTown(scene);
+  const groundWallSegments = townWallSegmentsByFloor[0];
+  const jaredSign = buildJaredShop(scene);
+  const { board: karirsBoard, tvGroup: karirsTvGroup } = buildKarirsField(scene, groundWallSegments);
+  buildKarirsTrack(scene);
+  const karirsRacerMarkers = KARIRS_TRACK_LANE_OFFSETS.map((_, i) =>
+    buildKarirsRacerRig(scene, KARIRS_RACER_COLORS[i % KARIRS_RACER_COLORS.length]),
+  );
+  const { sign: lubaSign } = buildLubaArea(scene, groundWallSegments);
+  // Every real walled area's own floating name sign (Karirs has none —
+  // buildKarirsField never built one, so `sign` stays null there and the
+  // fade below just skips it) plus its footprint, used by updateAreaLabels
+  // (frame()'s own per-frame call) to fade the FLOATING 3D sign out while
+  // you're standing inside that area and drive the flat 2D label beside
+  // the minimap instead — "Plains" whenever you're inside none of them.
+  const AREA_LABELS = [
+    { name: TOWN_NAME, x: 0, z: 0, half: TOWN_HALF_X, sign: townSign },
+    { name: KARIRS_FIELD_NAME, x: KARIRS_FIELD_X, z: KARIRS_FIELD_Z, half: KARIRS_FIELD_HALF, sign: null },
+    { name: LUBA_NAME, x: LUBA_X, z: LUBA_Z, half: LUBA_HALF, sign: lubaSign },
+  ];
   const {
     board1Group: chessBoard1Group, board1StatusSign: chessBoard1StatusSign,
     board2Group: chessBoard2Group, board2StatusSign: chessBoard2StatusSign,
+    board3Group: chessBoard3Group, board3StatusSign: chessBoard3StatusSign,
   } = buildTambayan(scene);
   // Blocks movement into a solid wall segment while leaving the door gaps
   // and the whole interior plaza open — see buildAreaWalls for how these
-  // boxes are laid out (both Glophics' and the Karirs field's walls share
-  // this one array). Both the local player's own movement and every wild
-  // spawn's wander/chase/flee movement resolve against this.
-  function isInsideTownWalls(x, z) {
-    for (const seg of townWallSegments) {
+  // boxes are laid out (both Glophics' ground floor and the Karirs field's
+  // walls share groundWallSegments/townWallSegmentsByFloor[0]). Both the
+  // local player's own movement and every wild spawn's wander/chase/flee
+  // movement resolve against this — floor defaults to 0 (ground) since
+  // every wild spawn and every other walled area (Karirs, Luba, Tambayan)
+  // only ever exists on the ground; only the local player's own movement
+  // resolution (see frame()'s own per-axis block) ever passes a non-zero
+  // floor, once they've gone upstairs inside Glophics.
+  function isInsideTownWalls(x, z, floor = 0) {
+    const segs = townWallSegmentsByFloor[floor];
+    if (!segs) return false;
+    for (const seg of segs) {
       if (x >= seg.minX && x <= seg.maxX && z >= seg.minZ && z <= seg.maxZ) return true;
     }
     return false;
@@ -2853,9 +5603,28 @@ export function mount(el, ctx) {
   // the battle dome's own center whenever a battle is active near
   // Glophics, so a wall covering part of the force field fades the same
   // way — see the two call sites in frame()'s own camera block.
-  function updateTownWallFade(dt, targetX = local.x, targetY = PAN_TARGET_Y, targetZ = local.z) {
+  //
+  // Checks EVERY floor's own wall segments, not just whichever one the
+  // target (usually the player) currently happens to be on — this used to
+  // key off local.currentFloor (before that, it was hardcoded to the
+  // ground floor outright), on the assumption the ONLY wall that could
+  // ever occlude the camera-to-target line was one belonging to the same
+  // floor the target was standing on. That's false the moment the target
+  // is OUTSIDE the tower on the ground floor and the camera/target line
+  // happens to pass through floor 2's own (taller, and further away
+  // vertically) walls anyway — a real, reported case, not a hypothetical
+  // one. segmentIntersectsWallBox already reads each segment's own
+  // baseY/wallHeight and does a real 3D segment/AABB test, so there's
+  // nothing floor-specific about the actual math — restricting *which*
+  // segments it's allowed to even look at was the only bug. A wall
+  // belonging to a floor that's currently hidden entirely (see
+  // applyGlophicsFloorCutaway/setGroupHidden) fading under the hood is
+  // harmless — an invisible parent's own child mesh never renders
+  // regardless of its own material.opacity.
+  function updateTownWallFade(dt, targetX = local.x, targetY = local.y + PAN_TARGET_Y, targetZ = local.z) {
     const ease = Math.min(1, TOWN_WALL_FADE_RATE * dt);
-    for (const seg of townWallSegments) {
+    const segs = Object.values(townWallSegmentsByFloor).flat();
+    for (const seg of segs) {
       const occluding = segmentIntersectsWallBox(
         camera.position.x,
         camera.position.y,
@@ -2902,12 +5671,21 @@ export function mount(el, ctx) {
   // "Blacking out" — trainer HP hit 0 mid-battle. No permanent loss, same
   // as the real games: a free heal, but at the cost of a trip back to
   // Glophics (its exact center, matching the api's own DEFAULT_SPAWN)
-  // rather than staying wherever the fight happened to be.
+  // rather than staying wherever the fight happened to be. Also drops the
+  // player back to the ground floor — wild battles only ever happen
+  // outdoors (nothing spawns inside the tower), so this should never
+  // actually fire while currentFloor is non-zero, but it's a one-line
+  // safety net rather than an assumption worth leaving unenforced.
   function handlePlayerBlackout() {
     setPlayerHp(PLAYER_MAX_HP);
     local.x = 0;
     local.z = 0;
     local.facingAngle = 0;
+    if (local.currentFloor !== 0) {
+      local.currentFloor = 0;
+      local.y = 0;
+      applyGlophicsFloorCutaway(0);
+    }
   }
 
   const localColors = {
@@ -2917,11 +5695,24 @@ export function mount(el, ctx) {
     leg: character.leg_color,
   };
   const localRig = buildBlockyCharacter(localColors, character.display_name);
+  // character.floor is this account's own persisted floor (see the api's
+  // own GlophimonCharacter.floor/CharacterOut.floor) — a freshly-connecting
+  // client resumes on whatever floor it last left the tower on, the same
+  // "pick up exactly where you left off" treatment x/z/facing already get.
+  const initialFloor = character.floor ?? 0;
   const local = {
     x: character.x,
-    y: 0,
+    y: entityGroundY(initialFloor, character.x, character.z),
     z: character.z,
     facingAngle: character.facing,
+    // currentFloor is the FIRST piece of real vertical state in this whole
+    // codebase — 0 is the ground floor (identical to how every peer/NPC/
+    // wild spawn/battle rig has always implicitly lived), a positive index
+    // matches one of GLOPHICS_FLOORS' own `index` values. Everything that
+    // needs to know "what floor is the player on" (movement collision,
+    // the camera's own Y offset, cutaway transparency, the stairs, and the
+    // network position broadcast) reads this one field.
+    currentFloor: initialFloor,
     rig: localRig,
     isMoving: false,
     chatBubble: null,
@@ -2930,10 +5721,91 @@ export function mount(el, ctx) {
   local.rig.group.position.set(local.x, local.y, local.z);
   local.rig.group.rotation.y = local.facingAngle;
   scene.add(local.rig.group);
+  // Establishes the correct initial transparency state for a client that
+  // connects already partway up the tower (see initialFloor above) —
+  // every other call site only runs on a subsequent floor CHANGE via the
+  // stairs, so without this a client resuming on floor 1 would see it (and
+  // the roof) rendered fully opaque until the next time they used the
+  // stairs.
+  applyGlophicsFloorCutaway(local.currentFloor);
 
   // Sprinting stamina — see SPRINT_SPEED_MULTIPLIER/STAMINA_* above.
   let stamina = STAMINA_MAX;
   let staminaExhausted = false;
+
+  // Per-account pose overrides (see the api's own CharacterOut.pose_overrides
+  // and the Pose Designer dev panel's "Save to Game") — {} until something's
+  // actually been saved. Only ever applied to the LOCAL player's own rig
+  // (see tryPlayOverride below); NPCs and wild Glophimon have no account to
+  // key an override by, so they always keep the built-in poses. Reassigned
+  // wholesale (not mutated) by saves/resets below, same reasoning the api's
+  // own PUT/DELETE handlers already use for their own copy.
+  let poseOverrides = { ...(ctx.poseOverrides || {}) };
+  // Per-account camera overrides (see the api's own
+  // CharacterOut.camera_overrides and the Camera Designer dev panel's "Save
+  // to Game") — {} until something's actually been saved. Keyed by battle
+  // type ("wild"/"team"/"pvp"), read every frame by the per-battle reset/
+  // orbit camera blocks below, falling back to the same hardcoded defaults
+  // as always whenever a given slot has no override. Reassigned wholesale
+  // (not mutated) by saves/resets, same reasoning as poseOverrides above.
+  let cameraOverrides = { ...(ctx.cameraOverrides || {}) };
+  // elapsedMs per pose slot — reset to 0 whenever the local player switches
+  // which slot is currently playing, so a keyframe loop always restarts
+  // cleanly from its own beginning rather than resuming mid-cycle.
+  const poseOverrideElapsedMs = {};
+  let activePoseOverrideName = null;
+
+  function tryPlayLocalOverride(poseName, dt) {
+    const override = poseOverrides[poseName];
+    if (!override || !override.keyframes || override.keyframes.length === 0) return false;
+    if (activePoseOverrideName !== poseName) {
+      activePoseOverrideName = poseName;
+      poseOverrideElapsedMs[poseName] = 0;
+    }
+    poseOverrideElapsedMs[poseName] += dt * 1000;
+    return playPoseKeyframes(local.rig, override.keyframes, poseOverrideElapsedMs[poseName]);
+  }
+
+  // Battle-creature counterpart to tryPlayLocalOverride above — plays a
+  // saved Ready/Attack/Defend/Cast override on an arbitrary rig, whether
+  // it's one of the local player's own Glophimon or the wild/opponent side
+  // (see updateBattleRigAnim) — a purely local rendering choice, same as
+  // any other pose override. `hold` clamps playback just short of the
+  // recorded keyframes' own total length instead of letting
+  // playPoseKeyframes wrap it, so a one-shot attack/defend/cast pose
+  // freezes on its last frame the same way the built-in applyAttackPose/
+  // applyDefendPose/applyCastPose do, rather than looping mid-swing.
+  function poseOverrideTotalMs(keyframes) {
+    return keyframes.reduce((sum, kf) => sum + Math.max(1, kf.transitionMs), 0);
+  }
+
+  function tryPlayBattlePoseOverride(rig, poseName, elapsedMs, hold) {
+    const override = poseOverrides[poseName];
+    if (!override || !override.keyframes || override.keyframes.length === 0) return false;
+    let playElapsed = elapsedMs;
+    if (hold) {
+      playElapsed = Math.min(elapsedMs, poseOverrideTotalMs(override.keyframes) - 1);
+    }
+    return playPoseKeyframes(rig, override.keyframes, playElapsed);
+  }
+
+  // How long a given battle-creature pose slot will ACTUALLY play for, from
+  // this local viewer's own perspective — mirrors updateBattleRigAnim's own
+  // duration calc exactly (a saved override plays out over its own recorded
+  // length; only the built-in poses use the fixed ATTACK_ANIM_MS/CAST_ANIM_MS/
+  // DEFEND_ANIM_MS). Used to size the wild battle's own round-advance timers
+  // (see resolvePlayerAttack/resolveWildAttack) so the round can't advance —
+  // and the camera can't re-aim/reset away from the current shot — before
+  // whatever's actually playing has actually finished, which the old fixed
+  // ANIM_SETTLE_MS couldn't guarantee once a saved pose could run longer
+  // than any of the built-in durations it was originally sized around.
+  function effectivePoseDurationMs(type) {
+    const override = poseOverrides[type];
+    if (override && override.keyframes && override.keyframes.length > 0) {
+      return poseOverrideTotalMs(override.keyframes);
+    }
+    return type === "attack" ? ATTACK_ANIM_MS : type === "cast" ? CAST_ANIM_MS : DEFEND_ANIM_MS;
+  }
 
   // A persistent, always-there, clickable NPC (see onCanvasClick below) —
   // full scale like a real player, standing at a fixed spot regardless of
@@ -2962,6 +5834,15 @@ export function mount(el, ctx) {
   const bossRickRig = buildBlockyCharacter(BOSS_RICK_COLORS, BOSS_RICK_NAME);
   bossRickRig.group.position.set(BOSS_RICK_X, 0, BOSS_RICK_Z);
   scene.add(bossRickRig.group);
+
+  // Stockfish — just a standing decoration facing back toward its own
+  // table, unlike Rodz/Carrin/Jared/Boss Rick above: the battle itself is
+  // started by clicking the BOARD (see onCanvasClick's board3 branch), not
+  // by clicking this rig, so it gets no menu/highlight-on-hover of its own.
+  const stockfishRig = buildBlockyCharacter(STOCKFISH_COLORS, STOCKFISH_NAME);
+  stockfishRig.group.position.set(STOCKFISH_X, 0, STOCKFISH_Z);
+  stockfishRig.group.rotation.y = Math.PI;
+  scene.add(stockfishRig.group);
 
   // Rodz's ambient shout loop — see RODZ_SHOUT_TEXT/updateRodzShout.
   // rodzShoutBubble is the currently-visible sprite, or null while in the
@@ -3002,7 +5883,16 @@ export function mount(el, ctx) {
       }
       return;
     }
-    rodzShoutBubble.visible = Math.hypot(local.x - RODZ_X, local.z - RODZ_Z) <= LABEL_VISIBLE_DISTANCE;
+    // Rodz stands on the Glophics ground floor (see his own group.position.set
+    // above, y=0) — gated on being inside Town on floor 0 (see getAreaKey's
+    // own comment), same as a peer's chat bubble's sameArea/entityFloor
+    // checks, so this bubble doesn't show through the floor to someone up
+    // in the cinema, or through Town's own wall to someone in a different
+    // building entirely.
+    rodzShoutBubble.visible =
+      getAreaKey(local.x, local.z) === "town" &&
+      local.currentFloor === 0 &&
+      Math.hypot(local.x - RODZ_X, local.z - RODZ_Z) <= LABEL_VISIBLE_DISTANCE;
     if (rodzShoutBubble.visible) {
       const anchor = computeBubbleAnchorWorld({ x: RODZ_X, y: 0, z: RODZ_Z, rig: rodzRig });
       scaleChatBubble(anchor, rodzShoutBubble, camera, lastHeight || canvas.height);
@@ -3064,6 +5954,7 @@ export function mount(el, ctx) {
   const updateCarrinHighlight = createNpcHighlightUpdater(karraRig, () => [KARRA_X, KARRA_Z]);
   const updateJaredHighlight = createNpcHighlightUpdater(jaredRig, () => [JARED_X, JARED_Z]);
   const updateBossRickHighlight = createNpcHighlightUpdater(bossRickRig, () => [BOSS_RICK_X, BOSS_RICK_Z]);
+  const updateUsherHighlight = createNpcHighlightUpdater(usherRig, () => [USHER_X, USHER_Z]);
 
   // Mirrors the last chess_state received per board (see onSocketMessage's
   // own chess_state branch) — {status, hostId, hostDisplayName,
@@ -3074,6 +5965,7 @@ export function mount(el, ctx) {
   const chessBoards = {
     1: { status: "empty" },
     2: { status: "empty" },
+    3: { status: "empty" },
   };
   // setRigEmissiveIntensity expects {group}, same shape a real rig has —
   // these tables aren't rigs, just wrap the raw THREE.Group.
@@ -3087,11 +5979,35 @@ export function mount(el, ctx) {
     () => [CHESS_BOARD_2_X, CHESS_BOARD_2_Z],
     () => chessBoards[2].status === "in_progress" && isInsideTambayan(local.x, local.z),
   );
+  const updateChessBoard3Highlight = createNpcHighlightUpdater(
+    { group: chessBoard3Group },
+    () => [CHESS_BOARD_3_X, CHESS_BOARD_3_Z],
+    () => chessBoards[3].status === "in_progress" && isInsideTambayan(local.x, local.z),
+  );
+  const CHESS_BOARD_SIGNS = { 1: chessBoard1StatusSign, 2: chessBoard2StatusSign, 3: chessBoard3StatusSign };
 
   // user_id -> peer state, for everyone *else* currently connected.
   const peers = new Map();
 
-  function ensurePeer(userId, displayName, appearance, x, z, facing) {
+  // Full spectator mode for OTHER players' wild battles — user_id (the
+  // battling player, not this client's own) -> that battle's render state.
+  // Populated/updated by applySpectatorBattleSnapshot (see onSocketMessage's
+  // own wild_battle_state/wild_battle_roster handling) and torn down by
+  // teardownSpectatorBattleEntry (wild_battle_end). Wild battles are still
+  // entirely client-side/non-authoritative — the battling player's own
+  // client is the only thing that ever actually simulates the fight (see
+  // startWildBattle/resolvePlayerAttack/resolveWildAttack below); this map
+  // is purely a *render* of whatever that client's own buildBattleSnapshot
+  // last narrated to the server, the same "server just relays, this client
+  // just renders" relationship `peers` and `wildSpawns` themselves already
+  // have with position/wild_tick broadcasts. Never has an entry for this
+  // client's own battle (that's `battle` below, rendered completely
+  // differently — full intro animation, interactive UI, etc.) or for the
+  // dev-only "Simulate Wild Battle" shortcut (never sent to the server at
+  // all, see startWildBattle's own wildId guard).
+  const peerBattles = new Map();
+
+  function ensurePeer(userId, displayName, appearance, x, z, facing, floor = 0) {
     let peer = peers.get(userId);
     if (!peer) {
       const rig = buildBlockyCharacter(
@@ -3103,12 +6019,20 @@ export function mount(el, ctx) {
         rig,
         displayName,
         x,
-        y: 0,
+        y: entityGroundY(floor, x, z),
         z,
         facingAngle: facing,
         targetX: x,
         targetZ: z,
         targetFacing: facing,
+        // Which Glophics floor this peer is currently on (see the api's
+        // own CharacterOut/position-message "floor" field) — defaults to 0
+        // defensively for a message predating this field, though every
+        // client should send it from here on. Kept up to date by
+        // onSocketMessage's own "position" handling below; used every
+        // frame (see the peers render loop in frame()) to hide this peer
+        // outright whenever it differs from local.currentFloor.
+        floor,
         isMoving: false,
         chatBubble: null,
         chatBubbleExpiresAt: 0,
@@ -3119,7 +6043,7 @@ export function mount(el, ctx) {
       // would freeze at this moment of arrival) is what makes the
       // highlight actually track a moving player.
       peer.updateHighlight = createNpcHighlightUpdater(rig, () => [peer.x, peer.z]);
-      peer.rig.group.position.set(x, 0, z);
+      peer.rig.group.position.set(x, peer.y, z);
       peer.rig.group.rotation.y = facing;
       peers.set(userId, peer);
     }
@@ -3147,22 +6071,111 @@ export function mount(el, ctx) {
   // through) and, separately, for whichever Glophimon the camera is
   // currently focused directly behind (see TEAM_FOCUS_CAM_* above). Only
   // meshes (not the name-label sprite) are touched, same as disposeRig's
-  // own mesh-only traversal.
+  // own mesh-only traversal. Just a thin wrapper over setGroupTransparent
+  // (a rig's own .group) — see that function for the actual mechanics,
+  // generalized so applyGlophicsFloorCutaway can reuse the exact same
+  // opacity/transparent/needsUpdate dance on a plain scenery THREE.Group
+  // that was never built via buildBlockyCharacter.
   function setRigTransparent(rig, on) {
-    rig.group.traverse((obj) => {
-      if (obj.isMesh) {
-        obj.material.transparent = true;
-        obj.material.opacity = on ? 0.3 : 1;
-        // Confirmed the hard way (see updateTownWallFade's own comment) —
-        // three.js doesn't pick up a `transparent` flip on an
-        // already-rendered material without this.
-        obj.material.needsUpdate = true;
-      }
-    });
+    setGroupTransparent(rig.group, on);
   }
 
   function setLocalTransparent(on) {
     setRigTransparent(local.rig, on);
+  }
+
+  // Real vertical cutaway, Pokémon Center/Gym style — every above-ground
+  // Glophics floor group (each entry in glophicsFloorGroups, built once by
+  // buildTown: every floor in GLOPHICS_FLOORS plus the roof at
+  // GLOPHICS_ROOF_INDEX) goes translucent once the player is standing on
+  // or above it, opaque again once they're not. "index > currentFloor"
+  // is the whole rule and generalizes to any number of floors without
+  // change: on the ground floor (currentFloor=0) every above-ground group
+  // is transparent (floor 1 AND the roof); once up on floor 1
+  // (currentFloor=1) only the roof (index 2 > 1) stays transparent, floor
+  // 1's own group (index 1) is no longer > 1 so it turns back opaque — and
+  // the ground floor is never in this list at all, so it's simply never
+  // touched, matching "the ground floor never fades."
+  //
+  // This is a DISCRETE state change, called only when local.currentFloor
+  // actually changes (see checkStairsContact/handlePlayerBlackout and the
+  // one-time initial call right after `local` itself is built) — unlike
+  // updateTownWallFade's continuous per-frame ease, there's nothing to
+  // animate here, just an on/off flip the moment the floor changes.
+  function applyGlophicsFloorCutaway(currentFloor) {
+    for (const { index, group } of glophicsFloorGroups) {
+      setGroupHidden(group, index > currentFloor);
+    }
+  }
+
+  // Simple X/Z footprint test against Glophics' own outer wall line —
+  // deliberately NOT isInsideTownWalls (that tests the shared per-floor
+  // wallSegments array, which lumps Glophics' ground floor in with Karirs'
+  // and Luba's own ground-floor walls too, since they've always shared one
+  // array). This only needs to answer "is the player standing anywhere
+  // within Glophics' own tower footprint," regardless of which floor.
+  function isInsideGlophicsFootprint(x, z) {
+    return isInsideAreaFootprint(x, z, 0, 0, TOWN_HALF_X);
+  }
+
+  // Re-evaluated every frame (unlike applyGlophicsFloorCutaway's other call
+  // sites, which only fire on a discrete floor CHANGE via the stairs) —
+  // walking in or out of Glophics' own footprint changes what should be
+  // see-through even though local.currentFloor itself hasn't changed. From
+  // outside, the whole building should read as solid/whole (matching real
+  // Pokémon Center/Gym exteriors) — the cutaway is only ever a "so the
+  // camera isn't blocked while you're inside" trick, not a permanent X-ray.
+  // Modeled as "pretend you're standing on a floor above the roof" rather
+  // than a separate on/off flag, so it reuses applyGlophicsFloorCutaway's
+  // own ">" comparison unchanged and still generalizes to future floors.
+  // lastCutawayFloor caches the last value actually applied so this doesn't
+  // re-run setGroupTransparent's full mesh traversal/needsUpdate flip on
+  // every single frame — only when the effective floor actually changes.
+  let lastCutawayFloor = local.currentFloor;
+  function updateGlophicsExteriorCutaway() {
+    const effectiveFloor = isInsideGlophicsFootprint(local.x, local.z) ? local.currentFloor : GLOPHICS_ROOF_INDEX;
+    if (effectiveFloor === lastCutawayFloor) return;
+    lastCutawayFloor = effectiveFloor;
+    applyGlophicsFloorCutaway(effectiveFloor);
+  }
+
+  const AREA_LABEL_SIGN_FADE_RATE = 1.5; // per-second opacity ease — "slowly" fades the floating sign, not an instant pop
+  let lastAreaLabelName = "Plains";
+  function updateAreaLabels(dt) {
+    const current = AREA_LABELS.find((a) => isInsideAreaFootprint(local.x, local.z, a.x, a.z, a.half));
+    const ease = Math.min(1, AREA_LABEL_SIGN_FADE_RATE * dt);
+    for (const a of AREA_LABELS) {
+      if (!a.sign) continue; // Karirs has no floating sign to fade — nothing to do for it here
+      const targetOpacity = a === current ? 0 : 1;
+      a.sign.material.opacity += (targetOpacity - a.sign.material.opacity) * ease;
+    }
+    const currentName = current?.name ?? "Plains";
+    if (currentName !== lastAreaLabelName) {
+      lastAreaLabelName = currentName;
+      minimapAreaLabelEl.textContent = currentName;
+    }
+    // Every floating shop/board sign uses the same depthTest:false
+    // SpriteMaterial as the building name signs above (see buildTownSign/
+    // buildKarirsBoardSign), so none of them are ever occluded by wall/floor
+    // geometry the normal WebGL way — only explicit area(+floor) gating
+    // (see getAreaKey's own comment) keeps them from bleeding through into
+    // a building the player isn't actually standing in.
+    const signAreaKey = getAreaKey(local.x, local.z);
+    // Jared's stall sits inside the same Glophics footprint the cinema
+    // floor sits directly above (see buildJaredShop's own "it's inside
+    // Glophics, not a second walled area" comment), so it needs both the
+    // area check and the floor check.
+    jaredSign.visible = signAreaKey === "town" && local.currentFloor === 0;
+    karirsBoard.sprite.visible = signAreaKey === "karirs";
+    for (const boardId of [1, 2, 3]) {
+      const sign = CHESS_BOARD_SIGNS[boardId];
+      // hasHost is set by updateChessBoardSign whenever that table's own
+      // chess_state changes (event-driven, matches updateKarirsBoardText's
+      // own on-demand-redraw convention) — re-applied every frame here
+      // alongside the area gate since the player's own position (unlike a
+      // table's host state) changes constantly.
+      sign.sprite.visible = !!sign.hasHost && signAreaKey === "tambayan";
+    }
   }
 
   // Roaming wild Glophimon — genuinely shared/server-owned now (see
@@ -3289,12 +6302,16 @@ export function mount(el, ctx) {
       spawn.facingAngle = spawn.targetFacing;
       if (spawn.isMoving) updateWalkCycle(spawn.rig, dt);
       else applyIdlePose(spawn.rig, dt);
-      spawn.rig.group.position.set(spawn.x, 0, spawn.z);
+      // Wild Glophimon are always outdoors (floor 0 — nothing spawns
+      // inside the tower), so this is always real terrain height, no
+      // entityGroundY floor check needed.
+      const spawnGroundY = terrainHeight(spawn.x, spawn.z);
+      spawn.rig.group.position.set(spawn.x, spawnGroundY, spawn.z);
       spawn.rig.group.rotation.y = spawn.facingAngle;
       syncNameLabel(spawn.rig);
       scaleNameLabel(spawn.rig, camera, lastHeight || canvas.height, Math.hypot(local.x - spawn.x, local.z - spawn.z) <= LABEL_VISIBLE_DISTANCE);
 
-      spawn.visionWedge.position.set(spawn.x, 0.02, spawn.z);
+      spawn.visionWedge.position.set(spawn.x, spawnGroundY + 0.02, spawn.z);
       spawn.visionWedge.rotation.y = spawn.facingAngle;
       spawn.visionWedge.visible = showWildVisionRange;
 
@@ -3351,6 +6368,45 @@ export function mount(el, ctx) {
           }
         });
         return;
+      }
+    }
+  }
+
+  // Stairs — same per-frame proximity idiom as checkWildContact above (a
+  // plain distance check against fixed coordinates, not a click/raycast),
+  // just driving a floor change instead of a battle. Iterates
+  // GLOPHICS_STAIR_TRANSITIONS so a future floor 3 needs no new code here
+  // at all — only another entry in GLOPHICS_FLOORS.
+  let stairsCooldownUntil = 0;
+
+  // Shared by both directions checkStairsContact can trigger — sets the
+  // floor/y, re-applies the cutaway, nudges the player off the tile (see
+  // STAIRS_STEP_AWAY) so they don't instantly re-trigger it, and starts a
+  // short cooldown as a second safety net against flicker/re-trigger
+  // (mirrors POST_BATTLE_COOLDOWN_MS's own reasoning above, just much
+  // shorter — this is a floor change, not a fight).
+  function goToGlophicsFloor(floorIndex, y, nudgedZ) {
+    local.currentFloor = floorIndex;
+    local.y = y;
+    local.z = nudgedZ;
+    applyGlophicsFloorCutaway(floorIndex);
+    stairsCooldownUntil = performance.now() + STAIRS_COOLDOWN_MS;
+  }
+
+  function checkStairsContact() {
+    if (battle || teamBattle || pvpBattle) return;
+    if (performance.now() < stairsCooldownUntil) return;
+    for (const t of GLOPHICS_STAIR_TRANSITIONS) {
+      if (local.currentFloor === t.belowFloor) {
+        if (Math.hypot(local.x - t.x, local.z - t.z) <= STAIRS_CONTACT_RADIUS) {
+          goToGlophicsFloor(t.aboveFloor, t.aboveY, t.z - STAIRS_STEP_AWAY);
+          return;
+        }
+      } else if (local.currentFloor === t.aboveFloor) {
+        if (Math.hypot(local.x - t.x, local.z - t.z) <= STAIRS_CONTACT_RADIUS) {
+          goToGlophicsFloor(t.belowFloor, t.belowY, t.z - STAIRS_STEP_AWAY);
+          return;
+        }
       }
     }
   }
@@ -3435,11 +6491,189 @@ export function mount(el, ctx) {
   // started_at, which the live view replays against instead).
   let karirsTvShowingPreview = false;
   let karirsPreviewStartedAt = 0;
+  // Own free-running clock for the gait's tremble/breath sine terms (see
+  // updateKarirsTrackVisual) — matches render3d.js's own local `crowdTime`
+  // accumulator rather than feeding Date.now()/performance.now() directly
+  // into Math.sin (those are fine numerically, this just mirrors the
+  // source exactly and starts at a sane 0 instead of a huge epoch value).
+  let karirsGaitTime = 0;
+
+  // Practice races — a fully LOCAL, client-only sandbox (see
+  // simulateKarirsPracticeRace/onKarraPracticeClick below): nothing here is
+  // ever sent to the server or broadcast, so this never touches the real
+  // karirsRace/betting state, and only the requesting player's own client
+  // ever sees it (every other nearby player keeps rendering the real
+  // shared race, exactly as before). null when no practice is active or
+  // counting down; otherwise { phase: "countdown", countdownEndsAt,
+  // racerNames } while waiting to start, or { phase: "racing", race,
+  // revertAt } once it has (revertAt is null until the practice race
+  // actually finishes, then sets when to switch back to showing the real
+  // race — see updateKarirsPracticeState).
+  let karirsPracticeState = null;
+
+  // Advances karirsPracticeState's own little state machine — countdown ->
+  // racing -> (once finished) held for KARIRS_PRACTICE_RESULT_HOLD_MS ->
+  // back to null (reverting the track to whatever the real karirsRace is
+  // doing). Called once per frame; each transition only actually does
+  // anything the one frame it crosses its own deadline.
+  function updateKarirsPracticeState() {
+    if (!karirsPracticeState) return;
+    const now = Date.now();
+    if (karirsPracticeState.phase === "countdown") {
+      if (now < karirsPracticeState.countdownEndsAt) return;
+      const { steps, winner } = simulateKarirsPracticeRace(karirsPracticeState.racerNames);
+      karirsPracticeState = {
+        phase: "racing",
+        race: {
+          racer_names: karirsPracticeState.racerNames,
+          steps,
+          winning_name: winner,
+          status: "racing",
+          // Matches the "${race.started_at}Z" parsing convention every
+          // real race's own started_at already relies on (a naive UTC
+          // string with no timezone suffix of its own) — toISOString()
+          // already ends in "Z", so that has to come off first or the
+          // parse would see a bogus trailing "ZZ".
+          started_at: new Date().toISOString().replace(/Z$/, ""),
+        },
+        revertAt: null,
+      };
+      return;
+    }
+    // phase === "racing"
+    const finished = now - new Date(`${karirsPracticeState.race.started_at}Z`).getTime() >= karirsPracticeState.race.steps.length * KARIRS_STEP_DELAY_MS;
+    if (finished && karirsPracticeState.revertAt === null) {
+      karirsPracticeState.revertAt = now + KARIRS_PRACTICE_RESULT_HOLD_MS;
+    }
+    if (karirsPracticeState.revertAt !== null && now >= karirsPracticeState.revertAt) {
+      karirsPracticeState = null;
+      refreshKarraMenu(); // re-enables the practice button if Karra's menu happens to still be open
+    }
+  }
+
+  // Drives the racetrack's own live rendering (see buildKarirsTrack/
+  // buildKarirsRacerRig) — a *second* view of the exact same karirsRace/
+  // steps data renderKarirsTvContent already replays against started_at,
+  // not a separate simulation, with the gait itself ported from
+  // games/karirs/client/src/render3d.js's own update() (see
+  // buildKarirsRacerRig's own comment for what was intentionally left out).
+  // Called once per frame regardless of where the local player is standing
+  // (cheap: 4 small rigs) — same "always-on ambient world state, let
+  // frustum culling handle whether it's actually on screen" approach the
+  // wild Glophimon roster and every NPC already use, so anyone who simply
+  // walks near the track sees the race in progress without needing to have
+  // opened the TV at all.
+  //
+  // race is whichever of karirsPracticeState's own local race and the real
+  // karirsRace should currently be shown — practice, being purely local,
+  // completely overrides the real one on THIS client's own screen for its
+  // duration (see karirsPracticeState's own comment: nobody else's client
+  // is affected, they keep rendering the real race the whole time).
+  function updateKarirsTrackVisual(dt) {
+    updateKarirsPracticeState();
+    const race =
+      karirsPracticeState?.phase === "racing"
+        ? karirsPracticeState.race
+        : karirsPracticeState?.phase === "countdown"
+          ? { racer_names: karirsPracticeState.racerNames, steps: null, status: "betting_open" }
+          : karirsRace;
+    karirsGaitTime += dt;
+    const isResolved = race?.status === "resolved";
+    let startedAt = null;
+    if (race && race.status !== "betting_open" && race.steps && race.steps.length > 0) {
+      startedAt = new Date(`${race.started_at}Z`).getTime();
+    }
+    for (let i = 0; i < karirsRacerMarkers.length; i++) {
+      const marker = karirsRacerMarkers[i];
+      const name = race?.racer_names?.[i];
+      marker.group.visible = !!name;
+      if (!name) continue;
+      if (marker.currentName !== name) {
+        marker.currentName = name;
+        updateKarirsRacerLabel(marker, name);
+        marker.prevPos = NaN; // a different racer now owns this lane — don't derive a speed off the previous one's last position
+        marker.gaitPhase = i; // reseeded, not 0 — see buildRacerRig's own gaitSeed comment, so a fresh field of racers doesn't all step in unison
+      }
+
+      // Same interpolated-between-steps position games/karirs' own
+      // currentStepInfo() computes (see that function's own comment) — a
+      // raw stepped value only actually changes every KARIRS_STEP_DELAY_MS
+      // (300ms); without smoothing it, the gait's own finite-difference
+      // speed below would read as "stopped" almost every frame and
+      // "sprinting" for one frame every 300ms, instead of a continuous
+      // cadence.
+      let pos = 0;
+      if (startedAt !== null) {
+        const elapsedMs = Math.max(0, Date.now() - startedAt);
+        const raw = elapsedMs / KARIRS_STEP_DELAY_MS;
+        const idx = Math.floor(raw);
+        if (idx >= race.steps.length) {
+          pos = race.steps[race.steps.length - 1].positions[name] ?? 0;
+        } else {
+          const frac = raw - idx;
+          const prevPositions = idx === 0 ? null : race.steps[idx - 1].positions;
+          const prevVal = prevPositions ? prevPositions[name] ?? 0 : 0;
+          const curVal = race.steps[idx].positions[name] ?? 0;
+          pos = prevVal + (curVal - prevVal) * frac;
+        }
+      }
+      pos = Math.max(0, Math.min(100, pos));
+
+      // --- Gait, ported from render3d.js's own update() — see that
+      // file's own comments for the reasoning behind each term; only the
+      // "shouting"/ninja-pose blend is omitted (see buildKarirsRacerRig's
+      // own comment on why there's no data here to drive it).
+      const speed = isResolved || Number.isNaN(marker.prevPos) ? 0 : Math.max(0, (pos - marker.prevPos) / dt);
+      marker.prevPos = pos;
+      const isMoving = speed > KARIRS_GAIT_STOP_SPEED_THRESHOLD;
+      const speedRatio = Math.min(1, speed / KARIRS_GAIT_SPRINT_SPEED);
+      const isExhausted = isMoving && speed < KARIRS_GAIT_EXHAUSTED_SPEED_THRESHOLD;
+
+      const easeStep = Math.min(1, dt * KARIRS_GAIT_POSE_EASE_RATE);
+      marker.exhaustedBlend += ((isExhausted ? 1 : 0) - marker.exhaustedBlend) * easeStep;
+      const eb = marker.exhaustedBlend;
+
+      if (isMoving) {
+        const frequency =
+          (KARIRS_GAIT_WALK_FREQUENCY + (KARIRS_GAIT_SPRINT_FREQUENCY - KARIRS_GAIT_WALK_FREQUENCY) * speedRatio) * (1 - 0.5 * eb);
+        marker.gaitPhase += dt * frequency;
+      }
+      const strideScale = (isMoving ? Math.max(0.35, speedRatio) : 0) * (1 - 0.5 * eb);
+      const gait = Math.sin(marker.gaitPhase) * KARIRS_GAIT_SPRINT_STRIDE * strideScale;
+      marker.leftLeg.rotation.x = gait;
+      marker.rightLeg.rotation.x = -gait;
+
+      const exhaustedArmL = KARIRS_GAIT_EXHAUSTED_ARM_FORWARD + Math.sin(karirsGaitTime * 9) * KARIRS_GAIT_EXHAUSTED_TREMBLE;
+      const exhaustedArmR = KARIRS_GAIT_EXHAUSTED_ARM_FORWARD + Math.sin(karirsGaitTime * 9 + 1) * KARIRS_GAIT_EXHAUSTED_TREMBLE;
+      marker.leftArm.rotation.x = -gait + (exhaustedArmL - -gait) * eb;
+      marker.rightArm.rotation.x = gait + (exhaustedArmR - gait) * eb;
+
+      marker.torso.rotation.x = KARIRS_GAIT_EXHAUSTED_LEAN * eb;
+      marker.head.rotation.x = KARIRS_GAIT_EXHAUSTED_HEAD_DROOP * eb;
+      marker.torso.scale.y = 1 + Math.sin(karirsGaitTime * KARIRS_GAIT_EXHAUSTED_BREATH_FREQUENCY) * KARIRS_GAIT_EXHAUSTED_BREATH_AMPLITUDE * eb;
+
+      const bodyBounce = Math.abs(Math.sin(marker.gaitPhase)) * KARIRS_GAIT_SPRINT_BOUNCE * strideScale;
+      marker.z = KARIRS_TRACK_START_Z + (KARIRS_TRACK_FINISH_Z - KARIRS_TRACK_START_Z) * (pos / 100);
+      marker.group.position.set(KARIRS_FIELD_X + KARIRS_TRACK_LANE_OFFSETS[i], bodyBounce, marker.z);
+      // Same phase as the body bounce above (peaks on every footfall), on
+      // top of it rather than instead of it — head.position.y is in the
+      // torso's own local space (see buildKarirsRacerRig), so this adds a
+      // little extra bob beyond what the whole body already gets from
+      // group.position.y just above.
+      marker.head.position.y = marker.headBaseY + Math.abs(Math.sin(marker.gaitPhase)) * KARIRS_GAIT_HEAD_BOB * strideScale;
+
+      // Same LABEL_VISIBLE_DISTANCE fade every other NPC's own name label
+      // already uses — the runner's body still renders at any distance
+      // (matching how NPCs/wild Glophimon themselves are never distance-
+      // culled), only the floating name sprite is gated.
+      marker.label.visible = Math.hypot(local.x - marker.group.position.x, local.z - marker.z) <= LABEL_VISIBLE_DISTANCE;
+    }
+  }
   let statsModalGlophimon = null; // the owned-Glophimon row the stats modal is currently showing, if any
   let releasingId = null; // owned-Glophimon id currently showing "Confirm Release?" in place of its normal row actions
   let actionsForId = null; // owned-Glophimon id currently showing its expanded action list (see makeGlophimonRow)
   let localUserId = null; // this account's own user_id — learned once from the server's own "self" message, needed to tell "me" apart from other Luba lobby members
-  let bossRickStep = "closed"; // "closed" | "host_confirm" | "mode_confirm" | "duration_select" — see renderBossRickMenu
+  let bossRickStep = "closed"; // "closed" | "choose_mode" | "mode_confirm" | "duration_select" — see renderBossRickMenu
   let lubaLobby = null; // the last luba_lobby_state payload received, or null while not in one — see renderLubaLobbyModal
   let playerOptionsMenuUserId = null; // whose popup is currently open, or null — see showPlayerOptionsMenu
   let outgoingPvpInvite = null; // {inviteId, toUserId, toDisplayName} — an invite this player just sent, awaiting response
@@ -3461,6 +6695,14 @@ export function mount(el, ctx) {
   let myHostedChessBoardId = null; // the board I'm currently hosting/waiting on, or null
   let activeChessMatch = null; // {boardId, isSpectator, selectedSquare} while the match/spectate modal is open, else null
   let chessLeaveWarningIntervalId = null; // the setInterval driving the local countdown display, or null while hidden
+
+  // Dama Phase 2 — mirrors chessBoards/etc.'s own shape exactly, kept as
+  // fully separate state (see the DOM block above's own comment on why).
+  const damaBoards = { 1: { status: "empty" }, 2: { status: "empty" }, 3: { status: "empty" } };
+  let boardHostChoiceTargetBoardId = null; // which empty table's Chess/Dama picker is open, or null (never board 3)
+  let damaJoinTargetBoardId = null;
+  let myHostedDamaBoardId = null;
+  let activeDamaMatch = null; // {boardId, isSpectator, selectedSquare, midChain} while the match/spectate modal is open, else null
 
 
   // The real active lineup (up to WILD_TEAM_MAX_SIZE, in slot order) —
@@ -3841,6 +7083,95 @@ export function mount(el, ctx) {
     }
   });
 
+  // Full spectator mode's own outbound half — narrates the currently-
+  // running LOCAL wild battle's already-computed state into the flat shape
+  // the api's own _handle_wild_battle_message/active_wild_battles expect
+  // (see that function's own field-by-field comment on why it isn't just
+  // `msg` wholesale — the two sides of this shape must match exactly, so
+  // change one, change the other). Always a full snapshot, never a delta —
+  // sent wholesale on every call, so a spectating client can always render
+  // correctly from just the latest message with no history to reconcile,
+  // the same "full snapshot, not deltas" shape wild_tick's own per-tick
+  // broadcast already uses for ambient wild movement. Only ever called for
+  // a real, server-tracked battle — see startWildBattle's own wildId guard
+  // and endBattle's own mirror-image guard on the way out.
+  // Ranks a battle anim slot by how much it deserves to be the ONE thing
+  // reported this snapshot — resolvePlayerAttack/resolveWildAttack both set
+  // the ACTOR's anim (attack/cast) and, in the same call, may also set the
+  // REACTOR's anim (defend) if the move actually hit — see either
+  // function's own body. Without this ranking, buildBattleSnapshot's old
+  // "whichever slot is non-null, checking player before wild" logic could
+  // end up reporting a defender's "defend" flinch while silently dropping
+  // the attacker's own "attack" swing that caused it (e.g. resolveWildAttack
+  // sets battle.wildAnim = attack, then defenderMember.anim = defend — the
+  // old player-first check would report ONLY the defend, leaving a
+  // spectator watching a random Glophimon flinch for no visible reason).
+  // "ready" outranks "defend" too, since a held ready pose is the single
+  // active thing happening whenever no attack/cast is in flight.
+  function battleAnimRank(anim) {
+    if (!anim) return 0;
+    if (anim.type === "attack" || anim.type === "cast") return 3;
+    if (anim.type === "ready") return 2;
+    return 1; // "defend"
+  }
+
+  function buildBattleSnapshot() {
+    // "What's animating right now," collapsed to a single {side, type,
+    // member_index} slot — mirrors the two anim slots updateBattleRigAnim
+    // itself already dispatches on (member.anim per player-team member,
+    // battle.wildAnim for the wild side), picked by battleAnimRank above
+    // rather than "whichever's non-null" so the actual actor always wins
+    // over a simultaneous reactor (see that function's own comment). Pose
+    // overrides are deliberately NOT part of this payload at all — see the
+    // peerBattles/applySpectatorBattleSnapshot comment on why every
+    // spectating client applies its own local poseOverrides to whatever
+    // `type` says, exactly like it already does for this same client's own
+    // battle rigs. In the rare case more than one player-team member is
+    // mid-"cast" at once (a declared heal/buff round can resolve several
+    // teammates back-to-back in the same tick — see the declare-confirm
+    // handler's own healOrBuffSteps loop), this just reports the first one
+    // found rather than trying to represent several simultaneous anims — a
+    // deliberate simplification, not a bug: spectators still see accurate
+    // HP and at least one real cast play out per snapshot, just not
+    // literally every teammate's at once.
+    let activeAnim = null;
+    const animatingIndex = battle.playerTeam.findIndex((m) => m.anim);
+    const playerAnim = animatingIndex !== -1 ? battle.playerTeam[animatingIndex].anim : null;
+    if (battleAnimRank(playerAnim) >= battleAnimRank(battle.wildAnim) && playerAnim) {
+      activeAnim = { side: "player", type: playerAnim.type, member_index: animatingIndex };
+    } else if (battle.wildAnim) {
+      activeAnim = { side: "wild", type: battle.wildAnim.type, member_index: null };
+    }
+    return {
+      wild_id: battle.wildId,
+      wild_species_key: battle.wildSpecies.key,
+      wild_level: battle.wildLevel,
+      wild_hp: battle.wild.hp,
+      wild_max_hp: battle.wild.maxHp,
+      x: battle.centerX,
+      z: battle.centerZ,
+      // The battling player's own facing at the moment of this snapshot —
+      // movement is disabled entirely while `battle` is active (see
+      // frame()'s own movement gate), so in practice this is set once at
+      // battle start and never actually changes; sent on every call anyway
+      // rather than carved out as a one-time-only field, since a
+      // full-snapshot shape shouldn't need separate bookkeeping for
+      // "did this already go out." Lets a spectating client's own
+      // buildSpectatorBattleEntry lay its rigs out with the exact same
+      // forwardX/rightX math startWildBattle itself uses, just driven off
+      // this instead of that client's own `local`.
+      facing_angle: local.facingAngle,
+      player_team: battle.playerTeam.map((m) => ({
+        species_key: m.species.key,
+        name: m.combatant.name,
+        level: m.owned?.level ?? 1,
+        hp: m.combatant.hp,
+        max_hp: m.combatant.maxHp,
+      })),
+      active_anim: activeAnim,
+    };
+  }
+
   // speciesOverride/levelOverride: passed by checkWildContact when a real
   // roaming wild Glophimon is what triggered this (contact, chase catching
   // you, or walking into a fleeing/wandering one) — otherwise (the Dev
@@ -3960,11 +7291,27 @@ export function mount(el, ctx) {
       // engaged with the server at all. endBattle/finishCatchSequence
       // both guard on this before calling ctx.onReleaseWild/onWildCaught.
       wildId,
+      // Snapshot of "was this battle ever actually narrated to the server"
+      // (see startWildBattle's own sendWildBattleStart call, guarded the
+      // exact same way), captured once and never mutated — unlike wildId
+      // itself, which finishCatchSequence deliberately NULLS OUT on a
+      // successful catch (see its own comment) so endBattle's *other*
+      // wildId-guarded cleanup (release-back-to-the-world) doesn't
+      // double-fire for an already-caught wild. endBattle's own
+      // sendWildBattleEnd call needs to fire in EVERY outcome including a
+      // catch, so it can't reuse that same now-nulled field — this is the
+      // stable one it checks instead.
+      spectatable: wildId != null,
       centerX,
       centerZ,
       midX: (playerMonX + wildX) / 2,
       midZ: (playerMonZ + wildZ) / 2,
-      camAngle: local.facingAngle + BATTLE_CAM_ANGLE_OFFSET, // fallback wide framing only — see frame()'s own comment
+      // A saved Camera Designer "Starting Angle" for this slot takes effect
+      // from the very first frame this battle renders, not just after
+      // frame()'s own reset-camera block has had a chance to increment it —
+      // see cameraOverrides.wild below. Falls back to the exact same
+      // facing-relative wide framing as always when nothing's been saved.
+      camAngle: cameraOverrides.wild?.angle ?? (local.facingAngle + BATTLE_CAM_ANGLE_OFFSET), // fallback wide framing only — see frame()'s own comment
       focus: null, // set every round by beginRound/showWildDeclareStep (see focusWildCameraOnRig) — same camera-follow behavior as the 3v3 battle
       focusedRig: null,
       playerTeam,
@@ -4013,6 +7360,17 @@ export function mount(el, ctx) {
     updateHpBars();
     updateGlophiballCount();
     logBattle(`A wild ${wild.name} appeared!`);
+
+    // Full spectator mode — only for a real, server-tracked wild (wildId
+    // set). The Dev menu's own "Simulate Wild Battle" shortcut passes no
+    // wildId at all and was never engaged with the server in the first
+    // place (see this function's own wildId param comment), so there's
+    // nothing server-side for it to narrate to — sending this anyway would
+    // register a battle keyed by this user_id that release_wild/wild_caught
+    // never expect to exist, and that endBattle's own mirror-image
+    // wildId-guarded sendWildBattleEnd would then never clean up either
+    // (it has the exact same guard, so the two must agree).
+    if (wildId != null) socket.sendWildBattleStart(buildBattleSnapshot());
   }
 
   // Per-frame driver for battle.introAnim — see startWildBattle's own
@@ -4061,8 +7419,6 @@ export function mount(el, ctx) {
         // target — so by the time beginRound sets battle.focus for real,
         // the camera has already eased to that exact spot.
         const representative = getPlayerRepresentative();
-        const fx = Math.sin(local.facingAngle);
-        const fz = Math.cos(local.facingAngle);
         const pos = representative.rig.group.position;
         anim.startCamX = camera.position.x;
         anim.startCamY = camera.position.y;
@@ -4070,17 +7426,25 @@ export function mount(el, ctx) {
         anim.startLookX = battle.midX;
         anim.startLookY = PAN_TARGET_Y;
         anim.startLookZ = battle.midZ;
-        // beginRound aims at the wild itself when the wild opens first,
-        // and ahead of your own representative otherwise — match whichever
-        // this battle actually rolled so there's no re-snap once it hands
-        // off (see beginRound's own two focusWildCameraOnRig call sites).
+        // beginRound aims at the wild itself (tagged "wild_decide_defend")
+        // when the wild opens first, and ahead of your own representative
+        // (untagged/default) otherwise — match whichever this battle
+        // actually rolled, INCLUDING which Camera Designer slot it'll use,
+        // so there's no re-snap once it hands off (see beginRound's own two
+        // focusWildCameraOnRig call sites and computeFocusCameraFrame/
+        // resolveWildFocusParams above, the same math/lookup both of those
+        // ultimately call through).
         const wildPos = battle.wildRig.group.position;
-        anim.targetCamX = pos.x - fx * TEAM_FOCUS_CAM_BEHIND;
-        anim.targetCamY = TEAM_FOCUS_CAM_HEIGHT;
-        anim.targetCamZ = pos.z - fz * TEAM_FOCUS_CAM_BEHIND;
-        anim.targetLookX = battle.turnSide === "wild" ? wildPos.x : pos.x + fx * TEAM_FOCUS_CAM_LOOK_AHEAD;
-        anim.targetLookY = TEAM_FOCUS_CAM_LOOK_Y;
-        anim.targetLookZ = battle.turnSide === "wild" ? wildPos.z : pos.z + fz * TEAM_FOCUS_CAM_LOOK_AHEAD;
+        const introFocusSlot = battle.turnSide === "wild" ? "wild_decide_defend" : null;
+        const introLookAtPos = battle.turnSide === "wild" ? wildPos : null;
+        const introParams = resolveWildFocusParams(introFocusSlot);
+        const introFrame = computeFocusCameraFrame(pos, local.facingAngle, introLookAtPos, introParams, introParams.angle);
+        anim.targetCamX = introFrame.camX;
+        anim.targetCamY = introFrame.camY;
+        anim.targetCamZ = introFrame.camZ;
+        anim.targetLookX = introFrame.lookX;
+        anim.targetLookY = introFrame.lookY;
+        anim.targetLookZ = introFrame.lookZ;
       }
       return;
     }
@@ -4121,6 +7485,13 @@ export function mount(el, ctx) {
   // their turn" cue with no fixed duration — it's cleared out by being
   // overwritten with a real "attack" anim the instant the exchange actually
   // resolves, not by elapsed time.
+  // Pose overrides here are a personal, LOCAL-ONLY rendering preference —
+  // not networked, not tied to who "owns" the rig. Whatever Ready/Attack/
+  // Defend/Cast pose the local account has saved is what this client draws
+  // for that action on every rig in the fight (the player's own team AND
+  // the wild/opponent side), the same way a saved Idle/Walk override
+  // reskins the local player's own overworld avatar — it never changes
+  // what any other connected player's own client renders.
   function updateBattleRigAnim(battleState, key, rig, dt) {
     const anim = battleState[key];
     if (!anim) {
@@ -4128,14 +7499,26 @@ export function mount(el, ctx) {
       return;
     }
     if (anim.type === "ready") {
-      applyReadyPose(rig, dt);
+      if (!tryPlayBattlePoseOverride(rig, "ready", (anim.readyElapsedMs = (anim.readyElapsedMs || 0) + dt * 1000), false)) {
+        applyReadyPose(rig, dt);
+      }
       return;
     }
     anim.elapsedMs += dt * 1000;
-    const duration = anim.type === "attack" ? ATTACK_ANIM_MS : anim.type === "cast" ? CAST_ANIM_MS : DEFEND_ANIM_MS;
-    if (anim.type === "attack") applyAttackPose(rig, anim.elapsedMs, duration);
-    else if (anim.type === "cast") applyCastPose(rig, anim.elapsedMs, duration);
-    else applyDefendPose(rig, anim.elapsedMs, duration);
+    const override = poseOverrides[anim.type];
+    const hasOverride = !!(override && override.keyframes && override.keyframes.length > 0);
+    // A saved override plays out over its OWN recorded length, not the
+    // built-in pose's fixed envelope — otherwise a custom animation longer
+    // than ATTACK_ANIM_MS/etc. would get cut off before its last keyframe.
+    const duration = hasOverride
+      ? poseOverrideTotalMs(override.keyframes)
+      : anim.type === "attack" ? ATTACK_ANIM_MS : anim.type === "cast" ? CAST_ANIM_MS : DEFEND_ANIM_MS;
+    const usedOverride = hasOverride && tryPlayBattlePoseOverride(rig, anim.type, anim.elapsedMs, true);
+    if (!usedOverride) {
+      if (anim.type === "attack") applyAttackPose(rig, anim.elapsedMs, duration);
+      else if (anim.type === "cast") applyCastPose(rig, anim.elapsedMs, duration);
+      else applyDefendPose(rig, anim.elapsedMs, duration);
+    }
     if (anim.elapsedMs >= duration) battleState[key] = null;
   }
 
@@ -4154,16 +7537,68 @@ export function mount(el, ctx) {
     if (rig) setRigTransparent(rig, true);
   }
 
-  function focusWildCameraOnRig(rig, facingAngle, lookAtPos) {
+  // Resolves one of the wild battle's 4 focus-camera slots' own tunable
+  // {behind, height, lookY, lookAhead} from a saved Camera Designer
+  // override (see cameraOverrides above), falling back field-by-field to
+  // the original shared TEAM_FOCUS_CAM_* constants for anything not saved
+  // (or when overrideSlotId itself is falsy — the 2 call sites that were
+  // never given their own slot, which keep today's exact shared behavior
+  // untagged and unconfigurable). Shared by focusWildCameraOnRig and
+  // updateIntroAnim's own first-round easing target below, so both compute
+  // the exact same shot for a given slot.
+  function resolveWildFocusParams(overrideSlotId) {
+    const o = overrideSlotId ? cameraOverrides[overrideSlotId] : null;
+    return {
+      behind: o?.behind ?? TEAM_FOCUS_CAM_BEHIND,
+      height: o?.height ?? TEAM_FOCUS_CAM_HEIGHT,
+      lookY: o?.lookY ?? TEAM_FOCUS_CAM_LOOK_Y,
+      lookAhead: o?.lookAhead ?? TEAM_FOCUS_CAM_LOOK_AHEAD,
+      // Orbit support for a focus shot (new — see CAMERA_FOCUS_FIELDS and
+      // advanceFocusOrbit below). angle is the static "start here" offset
+      // (0 = today's exact "directly behind" shot); rotateSpeed/
+      // heightRotateSpeed both default to 0 ("off"), unlike the 3 orbit
+      // slots' own rotateSpeed (which defaults to RESET_CAM_ORBIT_SPEED,
+      // on) — a focus shot never rotated at all before this, so "off until
+      // customized" is the byte-identical baseline here.
+      angle: o?.angle ?? 0,
+      autoRotate: o?.autoRotate !== false,
+      rotateSpeed: o?.rotateSpeed ?? 0,
+      heightRotateSpeed: o?.heightRotateSpeed ?? 0,
+    };
+  }
+
+  // overrideSlotId (new) — one of "wild_decide_defend"/"wild_declare"/
+  // "wild_attack_scene"/"wild_defend_scene", or omitted for the 2 original
+  // call sites that never got their own slot (see resolveWildFocusParams
+  // above) — lets each of this camera's distinct re-aim moments carry its
+  // own independently-tunable behind/height/lookY/lookAhead instead of all
+  // 4 sharing one hardcoded formula. battle.focus now carries its own
+  // resolved camY/lookY too (not just camX/Z and lookX/Z), so the per-frame
+  // render block (frame()'s own `else if (battle.focus)` branch) never
+  // needs to know which slot was active — it just reads the object.
+  //
+  // battle.focus also now stashes anchorRig/facingAngle/lookAtPos/params/
+  // slotId alongside the resolved camX/Y/Z — NOT just for documentation,
+  // but because advanceFocusOrbit (called every frame from the render
+  // block, not from here) needs them to keep recomputing the shot as the
+  // orbit angle/height advance. A re-aim like this one only fires once per
+  // game event (declaring, an attack landing, ...), not every frame, so
+  // ticking rotation here would only advance once per re-aim instead of
+  // continuously for as long as the shot stays on screen — the per-frame
+  // render block is the only place that runs often enough for a smooth
+  // orbit, so that's where the actual advancing happens (see
+  // advanceFocusOrbit's own comment for the full reasoning).
+  function focusWildCameraOnRig(rig, facingAngle, lookAtPos, overrideSlotId) {
     setWildFocusedRig(rig);
-    const fx = Math.sin(facingAngle);
-    const fz = Math.cos(facingAngle);
-    const pos = rig.group.position;
+    const params = resolveWildFocusParams(overrideSlotId);
+    const frame = computeFocusCameraFrame(rig.group.position, facingAngle, lookAtPos, params, params.angle);
     battle.focus = {
-      camX: pos.x - fx * TEAM_FOCUS_CAM_BEHIND,
-      camZ: pos.z - fz * TEAM_FOCUS_CAM_BEHIND,
-      lookX: lookAtPos ? lookAtPos.x : pos.x + fx * TEAM_FOCUS_CAM_LOOK_AHEAD,
-      lookZ: lookAtPos ? lookAtPos.z : pos.z + fz * TEAM_FOCUS_CAM_LOOK_AHEAD,
+      ...frame,
+      anchorRig: rig,
+      facingAngle,
+      lookAtPos,
+      params,
+      slotId: overrideSlotId || null,
     };
   }
 
@@ -4207,11 +7642,18 @@ export function mount(el, ctx) {
       // Anchored on your own leftmost living Glophimon, aimed at the wild
       // attacker — same as the 3v3 battle's own defend-phase camera — plus
       // the wild's "it's my turn" ready pose (steps forward, left arm up)
-      // while your team decides.
+      // while your team decides. Tagged "wild_decide_defend" — one of the 4
+      // independently-tunable Camera Designer focus slots (see
+      // resolveWildFocusParams).
       const representative = getPlayerRepresentative();
-      if (representative) focusWildCameraOnRig(representative.rig, local.facingAngle, battle.wildRig.group.position);
+      if (representative) focusWildCameraOnRig(representative.rig, local.facingAngle, battle.wildRig.group.position, "wild_decide_defend");
       else unfocusWildCamera();
       battle.wildAnim = { type: "ready", elapsedMs: 0 };
+      // Narrate the "it's my turn" cue too, not just the actual swings —
+      // otherwise a spectator would see the wild snap straight from idle
+      // into a mid-attack pose with no windup, since the next update
+      // wouldn't otherwise fire until resolveWildAttack's own updateHpBars.
+      if (battle.wildId != null) socket.sendWildBattleUpdate(buildBattleSnapshot());
       showPlayerDefenderSelectionWild();
     }
   }
@@ -4262,7 +7704,9 @@ export function mount(el, ctx) {
       return;
     }
 
-    focusWildCameraOnRig(member.rig, local.facingAngle);
+    // Tagged "wild_declare" — the "about to attack" (declaring a move)
+    // camera moment, independently tunable in the Camera Designer.
+    focusWildCameraOnRig(member.rig, local.facingAngle, null, "wild_declare");
     logBattle(`${member.combatant.name}, what will you do?`);
     dynamicActionsEl.innerHTML = "";
     dynamicActionsEl.style.display = "flex";
@@ -4403,6 +7847,7 @@ export function mount(el, ctx) {
       battle.pendingSteps = attackSteps; // {member, choice} pairs, already left-to-right — living was built in row order
       if (acting.length === 0) logBattle("You declare no attacks this round.");
       updateHpBars();
+      if (battle.wildId != null) socket.sendWildBattleUpdate(buildBattleSnapshot());
       battle.tickTimer = setTimeout(processNextStep, TEAM_STEP_MS);
     });
     dynamicActionsEl.appendChild(confirmBtn);
@@ -4501,7 +7946,15 @@ export function mount(el, ctx) {
 
   function resolvePlayerAttack(attackerMember, move, wildDefends) {
     const attacker = attackerMember.combatant;
-    attackerMember.anim = { type: move.kind === "debuff" ? "cast" : "attack", elapsedMs: 0 };
+    const attackPoseType = move.kind === "debuff" ? "cast" : "attack";
+    attackerMember.anim = { type: attackPoseType, elapsedMs: 0 };
+    // Genuine re-aim onto the attacker for this swing — "wild_attack_scene"
+    // means "an attack is playing," regardless of which side is throwing it
+    // (see resolveWildAttack's own matching call below), not a
+    // player-specific shot. Mirrors the decide-defend call's own
+    // lookAt-the-other-side pattern (aimed at the wild, which has no
+    // position of its own to react from yet at this instant).
+    focusWildCameraOnRig(attackerMember.rig, local.facingAngle, battle.wildRig.group.position, "wild_attack_scene");
     // Always the wild — your team only ever has one possible target here.
     battle.wildRig.targetAnim = { elapsedMs: 0 };
 
@@ -4512,8 +7965,29 @@ export function mount(el, ctx) {
       defends: wildDefends,
       ctx: { log: logBattle, onUndefendedDamage: () => {} },
     });
-    if (wildDefends && result?.hit && move.kind === "damage") battle.wildAnim = { type: "defend", elapsedMs: 0 };
+    if (wildDefends && result?.hit && move.kind === "damage") {
+      battle.wildAnim = { type: "defend", elapsedMs: 0 };
+      // Re-aim onto the wild — it's the one defending now — using its OWN
+      // facing (rotation.y), not local.facingAngle, since the wild faces
+      // the opposite way (see startWildBattle's own wildRig.group.rotation.y
+      // setup). "wild_defend_scene" is shared with resolveWildAttack's own
+      // matching call below — "whoever's defending," either side.
+      focusWildCameraOnRig(battle.wildRig, battle.wildRig.group.rotation.y, attackerMember.rig.group.position, "wild_defend_scene");
+    }
     updateHpBars();
+    if (battle.wildId != null) socket.sendWildBattleUpdate(buildBattleSnapshot());
+
+    // Sized to whichever of this exchange's 1-2 concurrent poses (the
+    // attacker's own swing, plus the wild's defend if it defended) actually
+    // takes longest to play — see effectivePoseDurationMs. A fixed
+    // ANIM_SETTLE_MS would cut the round (and re-aim/reset the camera) out
+    // from under a saved pose override longer than the built-in poses it
+    // was sized around.
+    let settleMs = effectivePoseDurationMs(attackPoseType);
+    if (wildDefends && result?.hit && move.kind === "damage") {
+      settleMs = Math.max(settleMs, effectivePoseDurationMs("defend"));
+    }
+    settleMs += ANIM_SETTLE_BUFFER_MS;
 
     battle.tickTimer = setTimeout(() => {
       if (!battle || battle.ended) return; // torn down (e.g. Leave) while the animation was playing
@@ -4524,7 +7998,7 @@ export function mount(el, ctx) {
         return;
       }
       processNextStep();
-    }, ANIM_SETTLE_MS);
+    }, settleMs);
   }
 
   function finishPlayerAttackRound() {
@@ -4579,6 +8053,13 @@ export function mount(el, ctx) {
   function resolveWildAttack(defenderMember) {
     dynamicActionsEl.style.display = "none";
     battle.wildAnim = { type: "attack", elapsedMs: 0 };
+    // Re-aim onto the wild — it's attacking now — using its own facing
+    // (rotation.y), looking at whoever's defending, or the representative's
+    // own position when defenderMember is null (nobody chose to defend) —
+    // same "wild_attack_scene" slot as resolvePlayerAttack's own matching
+    // call above.
+    const attackLookAtRig = defenderMember ? defenderMember.rig : getPlayerRepresentative()?.rig;
+    if (attackLookAtRig) focusWildCameraOnRig(battle.wildRig, battle.wildRig.group.rotation.y, attackLookAtRig.group.position, "wild_attack_scene");
     const attacker = battle.wild;
 
     // Wild Glophimon only ever use the generic Attack today — their own
@@ -4598,13 +8079,27 @@ export function mount(el, ctx) {
     if (result?.hit && defenderMember) {
       defenderMember.rig.targetAnim = { elapsedMs: 0 };
       defenderMember.anim = { type: "defend", elapsedMs: 0 };
+      // Re-aim onto whoever's actually defending — same "wild_defend_scene"
+      // slot as resolvePlayerAttack's own matching call, "whoever's
+      // defending, either side."
+      focusWildCameraOnRig(defenderMember.rig, local.facingAngle, battle.wildRig.group.position, "wild_defend_scene");
       if (defenderMember.combatant.hp <= 0) {
         defenderMember.combatant.fainted = true;
         logBattle(`Your ${defenderMember.combatant.name} fainted!`);
       }
     }
     updateHpBars();
-    battle.tickTimer = setTimeout(advanceAfterWildAttack, ANIM_SETTLE_MS);
+    if (battle.wildId != null) socket.sendWildBattleUpdate(buildBattleSnapshot());
+    // Same reasoning as resolvePlayerAttack's own settleMs — wait for
+    // whichever of the wild's own swing / the defender's reaction actually
+    // takes longer to play, not a fixed duration sized around the built-in
+    // poses alone.
+    let settleMs = effectivePoseDurationMs("attack");
+    if (result?.hit && defenderMember) {
+      settleMs = Math.max(settleMs, effectivePoseDurationMs("defend"));
+    }
+    settleMs += ANIM_SETTLE_BUFFER_MS;
+    battle.tickTimer = setTimeout(advanceAfterWildAttack, settleMs);
   }
 
   function advanceAfterWildAttack() {
@@ -4830,6 +8325,19 @@ export function mount(el, ctx) {
   function endBattle() {
     if (!battle) return;
     battle.ended = true;
+    // Full spectator mode's own teardown notice — checked against
+    // battle.spectatable (captured once at battle-start), NOT battle.wildId
+    // directly, since finishCatchSequence deliberately nulls battle.wildId
+    // out on a successful catch (see its own comment) before this ever
+    // runs; wild_battle_end still needs to fire for that outcome exactly
+    // like every other one (loss/flee/escape), or a caught wild's fight
+    // would stay stuck visible on every spectating client forever with no
+    // wild_despawn-equivalent of its own to clean it up. Sent up front,
+    // before any of the rig/dome teardown below — socket.send is
+    // fire-and-forget, so order doesn't matter functionally, but this way
+    // every early-return-shaped edit to this function later still passes
+    // through it first.
+    if (battle.spectatable) socket.sendWildBattleEnd();
     syncOwnedGlophimonHp(battle.playerTeam);
     // A few moments before the player can be pulled into another battle —
     // see POST_BATTLE_COOLDOWN_MS's own comment — regardless of how this
@@ -4885,7 +8393,15 @@ export function mount(el, ctx) {
     battle.domeMesh.geometry.dispose();
     battle.domeMesh.material.dispose();
     setLocalTransparent(false);
-    for (const peer of peers.values()) setPeerHidden(peer, false);
+    // Not an unconditional unhide any more — a peer who's mid-battle
+    // THEMSELVES (rendered here as a peerBattles entry, not because they
+    // simply wandered inside MY dome) needs to stay hidden even after my
+    // own battle ends, since their own fight hasn't necessarily ended too.
+    // Before full spectator mode existed this was always safe to blanket-
+    // unhide (nothing else ever hid a peer's avatar for a reason unrelated
+    // to distance-from-my-dome); now it isn't, so this re-checks
+    // peerBattles per peer instead of assuming false for everyone.
+    for (const [peerUserId, peer] of peers.entries()) setPeerHidden(peer, peerBattles.has(peerUserId));
     setActionButtons({ attack: false, escape: false, catchable: false });
     postCatchContinueBtn.style.display = "none";
     dynamicActionsEl.style.display = "none";
@@ -4894,6 +8410,168 @@ export function mount(el, ctx) {
     battleHudWildEl.style.display = "none";
     setBattleButtonsDisabled(false);
     battle = null;
+  }
+
+  // --- Full spectator mode: rendering OTHER players' wild battles ---------
+  // Everything below drives peerBattles (declared alongside `peers` above).
+  // The inbound half of the same trust relationship buildBattleSnapshot's
+  // own comment describes: this client never simulates any of these fights
+  // itself, it only ever renders whatever the battling client's own
+  // wild_battle_start/_update last narrated to the server (see the api's
+  // own active_wild_battles/_handle_wild_battle_message).
+
+  // Builds (once, on first sight of a given battling peer) the dome + wild
+  // rig + player-team rig(s) a spectator sees, positioned by the exact same
+  // forwardX/rightX-along-facing math startWildBattle itself uses for the
+  // LOCAL battle — just driven off the broadcast snapshot's own x/z/
+  // facing_angle instead of `local`'s own position/facingAngle. No intro
+  // animation (dome rise / Glophiball pop) — same "cosmetic-only
+  // simplification, not a functional one" call startPvpBattleScene already
+  // made for the opponent's side of a PVP match: a spectator only ever
+  // finds out about a fight already in progress anyway (whether from a live
+  // wild_battle_state push or the late-join wild_battle_roster catch-up),
+  // so there's no "the instant it started" moment to actually animate into
+  // for anyone but the battler themselves. Returns null (and builds
+  // nothing) if the species key isn't recognized — defensive only, since a
+  // client on a stale build could in principle receive a species key it
+  // doesn't have combat_data.json entries for.
+  function buildSpectatorBattleEntry(byUserId, snapshot) {
+    const wildSpecies = SPECIES_BY_KEY[snapshot.wild_species_key];
+    if (!wildSpecies) return null;
+    const facingAngle = snapshot.facing_angle || 0;
+    const forwardX = Math.sin(facingAngle);
+    const forwardZ = Math.cos(facingAngle);
+    const rightX = Math.cos(facingAngle);
+    const rightZ = -Math.sin(facingAngle);
+    const centerX = snapshot.x;
+    const centerZ = snapshot.z;
+    const playerMonX = centerX + forwardX * BATTLE_PLAYER_MON_OFFSET;
+    const playerMonZ = centerZ + forwardZ * BATTLE_PLAYER_MON_OFFSET;
+    const wildX = centerX + forwardX * BATTLE_WILD_OFFSET;
+    const wildZ = centerZ + forwardZ * BATTLE_WILD_OFFSET;
+
+    const roster = snapshot.player_team || [];
+    const memberCount = Math.max(1, roster.length);
+    const memberRigs = roster.map((member, i) => {
+      const species = SPECIES_BY_KEY[member.species_key];
+      // Unknown species key on an individual teammate degrades to a flat
+      // gray rig rather than skipping it entirely (unlike the wild species
+      // check above, which bails on the whole entry) — a spectator missing
+      // one teammate's correct colors is a minor cosmetic gap, not worth
+      // losing the rest of a perfectly renderable battle over.
+      const colors = species
+        ? { head: species.head_color, body: species.body_color, arm: species.arm_color, leg: species.leg_color }
+        : { head: "#888888", body: "#888888", arm: "#888888", leg: "#888888" };
+      const rig = buildBlockyCharacter(colors, member.name);
+      rig.group.scale.setScalar(CREATURE_SCALE);
+      const lateralOffset = (i - (memberCount - 1) / 2) * WILD_TEAM_MEMBER_SPACING;
+      rig.group.position.set(playerMonX + rightX * lateralOffset, 0, playerMonZ + rightZ * lateralOffset);
+      rig.group.rotation.y = facingAngle;
+      scene.add(rig.group);
+      return { rig, anim: null };
+    });
+
+    const wildRig = buildBlockyCharacter(
+      { head: wildSpecies.head_color, body: wildSpecies.body_color, arm: wildSpecies.arm_color, leg: wildSpecies.leg_color },
+      wildSpecies.name,
+    );
+    wildRig.group.scale.setScalar(CREATURE_SCALE);
+    wildRig.group.position.set(wildX, 0, wildZ);
+    wildRig.group.rotation.y = facingAngle + Math.PI;
+    scene.add(wildRig.group);
+
+    const domeGeometry = new THREE.SphereGeometry(BATTLE_DOME_RADIUS, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2);
+    const domeMaterial = new THREE.MeshBasicMaterial({
+      color: "#bfe3ff", transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false,
+    });
+    const domeMesh = new THREE.Mesh(domeGeometry, domeMaterial);
+    domeMesh.position.set(centerX, 0, centerZ);
+    scene.add(domeMesh);
+
+    // Same "don't render their own human avatar mid-fight" idea
+    // startPvpBattleScene already applies to a PVP opponent's peer entry —
+    // what a spectator should see is this player's dome + Glophimon rigs,
+    // not their overworld avatar standing frozen on top of/near it.
+    // Restored by teardownSpectatorBattleEntry below.
+    const peer = peers.get(byUserId);
+    if (peer) setPeerHidden(peer, true);
+
+    return { memberRigs, wildRig, domeMesh, wildAnim: null };
+  }
+
+  // Applies one wild_battle_state broadcast — a live push, or one entry out
+  // of the late-join wild_battle_roster array, both handled identically by
+  // onSocketMessage below — to this spectator's own render state: builds
+  // the scene on first sight of `byUserId`, then just refreshes HP and
+  // "what's animating" on every subsequent call. Always a full snapshot,
+  // never a delta (see buildBattleSnapshot's own comment on the sending
+  // side), so there's nothing to reconcile against a previous message that
+  // might have been missed — this simply overwrites the relevant fields
+  // outright every time.
+  function applySpectatorBattleSnapshot(byUserId, snapshot) {
+    // Defensive only — broadcast()'s own exclude=conn.websocket already
+    // keeps the server from ever echoing this back to the same user_id that
+    // sent it, so this should never actually be reached with byUserId ===
+    // localUserId. Guarded anyway since misrendering "my own battle" as a
+    // SECOND, spectator-shaped copy of itself would be a confusing enough
+    // bug to be worth the one-line insurance.
+    if (byUserId === localUserId) return;
+    let entry = peerBattles.get(byUserId);
+    if (!entry) {
+      entry = buildSpectatorBattleEntry(byUserId, snapshot);
+      if (!entry) return;
+      peerBattles.set(byUserId, entry);
+    }
+    entry.wildHp = snapshot.wild_hp;
+    entry.wildMaxHp = snapshot.wild_max_hp;
+    const roster = snapshot.player_team || [];
+    for (let i = 0; i < entry.memberRigs.length; i++) {
+      const member = roster[i];
+      if (member) {
+        entry.memberRigs[i].hp = member.hp;
+        entry.memberRigs[i].maxHp = member.max_hp;
+      }
+    }
+    // Maps the broadcast's flat {side, type, member_index} back into the
+    // {type, elapsedMs}-shaped slot updateBattleRigAnim itself already
+    // expects for battleState[key] (see that function's own signature) —
+    // reused directly, unmodified, for these spectator rigs below (see
+    // frame()'s own peerBattles loop). Cleared on every snapshot first
+    // (rather than only ever set) so an anim that already finished
+    // server-side (the sender's own battleState[key] = null once its
+    // duration elapses — see updateBattleRigAnim's own tail) actually
+    // clears here too, instead of a spectator's copy playing it out
+    // indefinitely long after the real one already ended.
+    for (const memberRig of entry.memberRigs) memberRig.anim = null;
+    entry.wildAnim = null;
+    const anim = snapshot.active_anim;
+    if (anim && anim.side === "player" && entry.memberRigs[anim.member_index]) {
+      entry.memberRigs[anim.member_index].anim = { type: anim.type, elapsedMs: 0 };
+    } else if (anim && anim.side === "wild") {
+      entry.wildAnim = { type: anim.type, elapsedMs: 0 };
+    }
+  }
+
+  // Tears down one spectated battle's dome/rig(s) — same disposeRig/
+  // scene.remove teardown shape endBattle/endPvpBattle already use for
+  // their own rigs and dome — and restores the battling peer's normal
+  // overworld avatar visibility (see setPeerHidden(peer, true) inside
+  // buildSpectatorBattleEntry above).
+  function teardownSpectatorBattleEntry(byUserId) {
+    const entry = peerBattles.get(byUserId);
+    if (!entry) return;
+    for (const memberRig of entry.memberRigs) {
+      scene.remove(memberRig.rig.group);
+      disposeRig(memberRig.rig);
+    }
+    scene.remove(entry.wildRig.group);
+    disposeRig(entry.wildRig);
+    scene.remove(entry.domeMesh);
+    entry.domeMesh.geometry.dispose();
+    entry.domeMesh.material.dispose();
+    peerBattles.delete(byUserId);
+    const peer = peers.get(byUserId);
+    if (peer) setPeerHidden(peer, false);
   }
 
   // teamBattle is null whenever no 3v3 simulation is active — every
@@ -5037,7 +8715,9 @@ export function mount(el, ctx) {
     teamBattle = {
       centerX,
       centerZ,
-      camAngle: local.facingAngle + BATTLE_CAM_ANGLE_OFFSET,
+      // Same "saved Starting Angle takes effect immediately" reasoning as
+      // the wild battle's own camAngle init above — see cameraOverrides.team.
+      camAngle: cameraOverrides.team?.angle ?? (local.facingAngle + BATTLE_CAM_ANGLE_OFFSET),
       domeMesh,
       npcTrainerRig,
       teams: [yourTeam, npcTeam], // index 0 is always the player, index 1 always the opponent — only the attacker/defender *role* (turnSide) alternates
@@ -5581,7 +9261,11 @@ export function mount(el, ctx) {
     teamBattle.domeMesh.geometry.dispose();
     teamBattle.domeMesh.material.dispose();
     setLocalTransparent(false);
-    for (const peer of peers.values()) setPeerHidden(peer, false);
+    // See endBattle()'s own comment on why this isn't an unconditional
+    // unhide any more now that full spectator mode exists — a peer who's
+    // mid-battle THEMSELVES needs to stay hidden even after MY team battle
+    // ends.
+    for (const [peerUserId, peer] of peers.entries()) setPeerHidden(peer, peerBattles.has(peerUserId));
     teamBattlePanel.style.display = "none";
     setBattleButtonsDisabled(false);
     teamBattle = null;
@@ -5603,6 +9287,14 @@ export function mount(el, ctx) {
   let zoomRadius = CAMERA_RADIUS;
   let followX = local.x;
   let followZ = local.z;
+  // Eases toward local.y exactly like followX/followZ ease toward
+  // local.x/z below — see the overworld camera branch in frame() for how
+  // this gets added on top of PAN_TARGET_Y (which stays a fixed "look
+  // slightly above the ground" fine-tune, unchanged). Starts at local.y
+  // (not always 0 — see initialFloor above, a reconnecting client can
+  // mount already on an upper floor) so there's no visible snap on the
+  // very first frame.
+  let followY = local.y;
   let isDragging = false;
   let lastMouseX = 0;
   let lastMouseY = 0;
@@ -5779,7 +9471,7 @@ export function mount(el, ctx) {
     bossRickMenuEl.style.left = `${clientX - wrapRect.left}px`;
     bossRickMenuEl.style.top = `${clientY - wrapRect.top}px`;
     bossRickMenuEl.style.display = "block";
-    bossRickStep = "host_confirm";
+    bossRickStep = "choose_mode";
     renderBossRickMenu();
   }
 
@@ -5803,13 +9495,23 @@ export function mount(el, ctx) {
       bossRickMenuBodyEl.appendChild(p);
     }
 
-    if (bossRickStep === "host_confirm") {
-      addLabel("Host a Luba deathmatch?");
-      addBtn("Yes", () => {
+    if (bossRickStep === "choose_mode") {
+      addLabel("What'll it be?");
+      addBtn("Host a Luba deathmatch", () => {
         bossRickStep = "mode_confirm";
         renderBossRickMenu();
       });
-      addBtn("No", () => hideBossRickMenu());
+      // Practice mode is a fully local sandbox (see game.js's own
+      // mountPractice — no lobby, no WebSocket, just the dummy), so this
+      // skips the host/mode/duration flow entirely and hands off to it
+      // directly, the same "hide Glophimon, mount Luba" handoff
+      // onLubaMatchReady already does for a real match (see
+      // ctx.onLubaPracticeRequested's own call site in chat.js).
+      addBtn("Practice Mode", () => {
+        hideBossRickMenu();
+        ctx.onLubaPracticeRequested?.();
+      });
+      addBtn("Cancel", () => hideBossRickMenu());
     } else if (bossRickStep === "mode_confirm") {
       addLabel("Mode: Deathmatch");
       addBtn("Confirm", () => {
@@ -5817,7 +9519,7 @@ export function mount(el, ctx) {
         renderBossRickMenu();
       });
       addBtn("Back", () => {
-        bossRickStep = "host_confirm";
+        bossRickStep = "choose_mode";
         renderBossRickMenu();
       });
     } else if (bossRickStep === "duration_select") {
@@ -5835,6 +9537,97 @@ export function mount(el, ctx) {
     }
   }
 
+  // The Usher — floor 2 cinema's own greeter (see USHER_NAME's own
+  // comment). Same shell/hide convention as every NPC popup above; its
+  // body is entirely re-derived from the shared cinemaProjectionist value
+  // on every render, the same "state-driven, not step-driven" shape
+  // renderPlayerOptionsMenu already uses, since there's no local multi-step
+  // flow here at all — just three mutually exclusive states (vacant / held
+  // by someone else / held by me).
+  function hideUsherMenu() {
+    usherMenuEl.style.display = "none";
+  }
+
+  function showUsherMenu(clientX, clientY) {
+    const wrapRect = wrap.getBoundingClientRect();
+    usherMenuEl.style.left = `${clientX - wrapRect.left}px`;
+    usherMenuEl.style.top = `${clientY - wrapRect.top}px`;
+    usherMenuEl.style.display = "block";
+    renderUsherMenu();
+  }
+
+  // Same shape as showLubaError/showPvpError above, just anchored to the
+  // Usher's own popup — surfaces a cinema_error response (already_taken/
+  // invalid_url/not_in_cinema/not_projectionist) right where the player
+  // just clicked a button, rather than silently failing.
+  function showUsherError(reason) {
+    const p = document.createElement("p");
+    p.style.fontSize = "10px";
+    p.style.color = "#ef4444";
+    p.style.margin = "4px 0 0 0";
+    p.textContent = `Error: ${reason}`;
+    if (usherMenuEl.style.display !== "none") usherMenuBodyEl.appendChild(p);
+    else console.warn("[cinema]", reason);
+  }
+
+  function renderUsherMenu() {
+    usherMenuBodyEl.innerHTML = "";
+
+    function addBtn(label, onClick) {
+      const btn = document.createElement("button");
+      btn.textContent = label;
+      btn.style.fontSize = "11px";
+      btn.style.display = "block";
+      btn.style.width = "100%";
+      btn.style.margin = "2px 0";
+      btn.addEventListener("click", onClick);
+      usherMenuBodyEl.appendChild(btn);
+    }
+    function addLabel(text) {
+      const p = document.createElement("p");
+      p.style.margin = "0 0 4px 0";
+      p.textContent = text;
+      usherMenuBodyEl.appendChild(p);
+    }
+
+    if (cinemaProjectionist && cinemaProjectionist.user_id === localUserId) {
+      // I hold the role myself — the only place in this whole game a
+      // player can actually change the cinema's screen content, gated
+      // entirely by actually holding it (the server re-checks this too,
+      // see main.py's own cinema_set_url handler — this button being
+      // visible at all is just this client's own reflection of that, not
+      // what actually authorizes the change).
+      addLabel("You're our projectionist! What should we play?");
+      const urlInput = document.createElement("input");
+      urlInput.type = "text";
+      urlInput.placeholder = "https://...";
+      urlInput.style.width = "100%";
+      urlInput.style.marginBottom = "4px";
+      usherMenuBodyEl.appendChild(urlInput);
+      addBtn("Change what's playing", () => {
+        // Basic client-side sanity check only — non-empty, looks like it
+        // starts with http. The server does the real validation (scheme +
+        // length, see _is_valid_cinema_url) and answers with cinema_error
+        // if this slips something bad past this check anyway.
+        const url = urlInput.value.trim();
+        if (!url || !url.startsWith("http")) {
+          showUsherError("invalid_url");
+          return;
+        }
+        socket.sendCinemaSetUrl(url);
+      });
+    } else if (cinemaProjectionist) {
+      // Someone else already holds it — no claim button, nothing to do
+      // here but let them know who's currently running the show.
+      addLabel(`Sorry, ${cinemaProjectionist.display_name} is already our projectionist.`);
+    } else {
+      // Vacant — anyone standing in the cinema (server re-checks this,
+      // see main.py's own cinema_claim_projectionist handler) can claim it.
+      addLabel("We're hiring! Want to be our projectionist?");
+      addBtn("I'll do it!", () => socket.sendCinemaClaimProjectionist());
+    }
+  }
+
   // --- Chessdom -----------------------------------------------------------
   // Server-authoritative, same shape as PVP Stage 2 — this client never
   // runs chess rules itself, it only renders whatever the latest chess_state
@@ -5849,6 +9642,17 @@ export function mount(el, ctx) {
     if (chessHostMenuEl.style.display !== "none") chessHostMenuBodyEl.appendChild(p);
     else if (chessJoinMenuEl.style.display !== "none") chessJoinMenuBodyEl.appendChild(p);
     else console.warn("[chess]", reason);
+  }
+
+  function showDamaError(reason) {
+    const p = document.createElement("p");
+    p.style.fontSize = "10px";
+    p.style.color = "#ef4444";
+    p.style.margin = "4px 0 0 0";
+    p.textContent = `Error: ${reason}`;
+    if (boardHostChoiceMenuEl.style.display !== "none") boardHostChoiceBodyEl.appendChild(p);
+    else if (damaJoinMenuEl.style.display !== "none") damaJoinMenuBodyEl.appendChild(p);
+    else console.warn("[dama]", reason);
   }
 
   // The server is sole authority on the actual 30s timeout (see
@@ -5882,12 +9686,12 @@ export function mount(el, ctx) {
   // board's chess_state actually changes, not every frame (matches
   // updateKarirsBoardText's own on-demand-redraw convention).
   function updateChessBoardSign(boardId, board) {
-    const sign = boardId === 1 ? chessBoard1StatusSign : chessBoard2StatusSign;
-    if (board.status === "empty") {
-      sign.sprite.visible = false;
-      return;
-    }
-    sign.sprite.visible = true;
+    const sign = CHESS_BOARD_SIGNS[boardId];
+    // sign.sprite.visible itself is re-applied every frame in
+    // updateAreaLabels (ANDed with the Tambayan area gate) — this only
+    // records whether there's actually a host to show at all.
+    sign.hasHost = board.status !== "empty";
+    if (!sign.hasHost) return;
     if (board.status === "waiting") {
       updateKarirsBoardText(sign, `Hosted by ${board.hostDisplayName} — waiting for opponent`);
     } else {
@@ -5925,6 +9729,12 @@ export function mount(el, ctx) {
     renderChessHostMenu();
   }
 
+  // Only ever shown for board 3 (the AI table) — boards 1/2 route their own
+  // empty-table click through onSharedBoardClick/boardHostChoiceMenuEl
+  // instead (see that function's own comment). Dual-purpose as of Dama
+  // Phase 3: an empty AI table now offers a choice of opponent, same shape
+  // as boardHostChoiceMenuEl's own Chess/Dama choice for tables 1/2, just
+  // against an AI instead of a human either way.
   function renderChessHostMenu() {
     if (chessHostTargetBoardId == null) return;
     chessHostMenuBodyEl.innerHTML = "";
@@ -5940,10 +9750,17 @@ export function mount(el, ctx) {
     }
     const p = document.createElement("p");
     p.style.margin = "0 0 4px 0";
-    p.textContent = "Host a game of chess here?";
+    p.textContent = "Battle the AI — pick a game:";
     chessHostMenuBodyEl.appendChild(p);
-    addBtn("Yes", () => socket.sendChessHostRequest(chessHostTargetBoardId));
-    addBtn("No", () => hideChessHostMenu());
+    addBtn(`Chess (${STOCKFISH_NAME})`, () => {
+      socket.sendChessAiStart(chessHostTargetBoardId);
+      hideChessHostMenu();
+    });
+    addBtn(`Dama (${DAMA_AI_NAME})`, () => {
+      socket.sendDamaAiStart(chessHostTargetBoardId);
+      hideChessHostMenu();
+    });
+    addBtn("Cancel", () => hideChessHostMenu());
   }
 
   function hideChessJoinMenu() {
@@ -6096,17 +9913,36 @@ export function mount(el, ctx) {
         sq.style.justifyContent = "center";
         sq.style.fontSize = "22px";
         sq.style.cursor = activeChessMatch.isSpectator ? "default" : "pointer";
-        sq.style.background = activeChessMatch.selectedSquare === square ? "#4ade80" : light ? "#e8d3a2" : "#6b4423";
+        // Last-move highlight (a tint, so it never fights the selection
+        // ring below) drawn first so the ring can still show through on
+        // top of it if a square happens to be both.
+        const isLastMove = board.lastMove && (square === board.lastMove.from || square === board.lastMove.to);
+        sq.style.background = isLastMove ? TAMBAYAN_LAST_MOVE_TINT : (light ? TAMBAYAN_BOARD_LIGHT : TAMBAYAN_BOARD_DARK);
+        // Same technique as the real standalone Cheddar Chess client (see
+        // games/chess/client/src/game.js's own render()): a selection ring
+        // instead of a solid fill, so the square's own theme color stays
+        // visible underneath.
+        sq.style.boxShadow = activeChessMatch.selectedSquare === square ? "inset 0 0 0 2px orange" : "none";
         if (pieceChar) {
-          const isWhitePiece = pieceChar === pieceChar.toUpperCase();
           sq.textContent = CHESS_UNICODE[pieceChar] || "";
-          sq.style.color = isWhitePiece ? "#f8fafc" : "#111827";
-          // Outlined opposite its own fill — white pieces in black, black
-          // pieces in white — so a glyph never blends into a same-toned
-          // square. Chromium-only (-webkit-text-stroke), which is fine:
-          // this only ever renders inside this game's own webview.
-          sq.style.webkitTextStrokeWidth = "1px";
-          sq.style.webkitTextStrokeColor = isWhitePiece ? "#111827" : "#f8fafc";
+          // Also lifted from games/chess/client/src/game.js: the Unicode
+          // chess glyphs (♔ vs ♚) are a single ink color with no fill/
+          // outline of their own, so plain text color barely contrasted
+          // against the square — and a stroke (tried first here too) ate
+          // into the thinner glyphs (the pawn especially), making a WHITE
+          // piece's mostly-hollow outline read as visually darker/heavier
+          // than its own black-filled counterpart. This is what was making
+          // White and Black pieces hard to tell apart at a glance. A
+          // 4-direction pixel-offset text-shadow halo fixes it without
+          // touching the glyph's own antialiasing.
+          const isWhitePiece = pieceChar === pieceChar.toUpperCase();
+          if (isWhitePiece) {
+            sq.style.color = "#f5f5f5";
+            sq.style.textShadow = "1px 0 0 #151515, -1px 0 0 #151515, 0 1px 0 #151515, 0 -1px 0 #151515";
+          } else {
+            sq.style.color = "#151515";
+            sq.style.textShadow = "1px 0 0 #e8e8e8, -1px 0 0 #e8e8e8, 0 1px 0 #e8e8e8, 0 -1px 0 #e8e8e8";
+          }
         }
         if (!activeChessMatch.isSpectator) {
           sq.addEventListener("click", () => onChessSquareClick(activeChessMatch.boardId, square, pieceChar));
@@ -6126,7 +9962,8 @@ export function mount(el, ctx) {
     if (board.outcome) {
       const reasonText = {
         checkmate: "Checkmate", stalemate: "Stalemate", draw: "Draw",
-        resignation: "Resignation", disconnect: "Opponent disconnected",
+        draw_agreed: "Draw by agreement", resignation: "Resignation",
+        disconnect: "Opponent disconnected",
         auto_resign_away: "Auto resignation (left Tambayan)",
       }[board.outcome.reason] || board.outcome.reason;
       const outcomeEl = document.createElement("p");
@@ -6143,20 +9980,558 @@ export function mount(el, ctx) {
         outcomeEl.textContent = `${winnerName} won — ${reasonText}.`;
       }
       chessMatchBodyEl.appendChild(outcomeEl);
+      if (!activeChessMatch.isSpectator) {
+        // The server now lets either just-finished participant restart THIS
+        // SAME board immediately (see _board_finished_for_user) instead of
+        // waiting out BOARD_RESET_DELAY_S — the AI table re-sends
+        // chess_ai_start (fresh coin-flip side), a human table re-sends
+        // chess_host_request (clicker becomes the new host; the other
+        // player needs to Join again, same as hosting fresh).
+        const newGameBtn = document.createElement("button");
+        newGameBtn.textContent = "New Game";
+        newGameBtn.style.fontSize = "11px";
+        newGameBtn.style.marginTop = "4px";
+        newGameBtn.addEventListener("click", () => {
+          if (activeChessMatch.boardId === AI_BOARD_ID) socket.sendChessAiStart(activeChessMatch.boardId);
+          else socket.sendChessHostRequest(activeChessMatch.boardId);
+        });
+        chessMatchBodyEl.appendChild(newGameBtn);
+      }
     } else if (!activeChessMatch.isSpectator) {
       const turnEl = document.createElement("p");
       turnEl.style.fontSize = "11px";
       turnEl.style.color = "#a3a3a3";
-      turnEl.textContent = board.turn === myColor ? "Your move." : "Waiting for opponent…";
+      turnEl.textContent = board.turn === myColor
+        ? "Your move."
+        : activeChessMatch.boardId === AI_BOARD_ID ? `${STOCKFISH_NAME} is thinking…` : "Waiting for opponent…";
       chessMatchBodyEl.appendChild(turnEl);
     }
 
     if (!activeChessMatch.isSpectator && !board.outcome) {
+      // Offer Draw / Request Undo — human-vs-human boards only (never
+      // offered against the AI table at all, see AI_BOARD_ID); at most one
+      // of a draw offer or undo request is ever pending at a time (see the
+      // api's own chess_draw_offer/chess_undo_request).
+      if (board.undoRequestedBy != null) {
+        const p = document.createElement("p");
+        p.style.fontSize = "11px";
+        p.style.margin = "0 0 4px 0";
+        p.textContent = board.undoRequestedBy === localUserId
+          ? "Undo request sent — waiting for response…"
+          : "Opponent requests to undo their last move.";
+        chessMatchBodyEl.appendChild(p);
+        if (board.undoRequestedBy !== localUserId) {
+          addRespondButtons(chessMatchBodyEl, (accept) => socket.sendChessUndoRespond(activeChessMatch.boardId, accept));
+        }
+      } else if (board.drawOfferedBy != null) {
+        const p = document.createElement("p");
+        p.style.fontSize = "11px";
+        p.style.margin = "0 0 4px 0";
+        p.textContent = board.drawOfferedBy === localUserId
+          ? "Draw offer sent — waiting for response…"
+          : "Opponent offers a draw.";
+        chessMatchBodyEl.appendChild(p);
+        if (board.drawOfferedBy !== localUserId) {
+          addRespondButtons(chessMatchBodyEl, (accept) => socket.sendChessDrawRespond(activeChessMatch.boardId, accept));
+        }
+      } else if (activeChessMatch.boardId !== AI_BOARD_ID) {
+        const drawBtn = document.createElement("button");
+        drawBtn.textContent = "Offer Draw";
+        drawBtn.style.fontSize = "11px";
+        drawBtn.style.marginRight = "4px";
+        drawBtn.addEventListener("click", () => socket.sendChessDrawOffer(activeChessMatch.boardId));
+        chessMatchBodyEl.appendChild(drawBtn);
+
+        if (board.turn !== myColor && board.moveHistory && board.moveHistory.length > 0) {
+          const undoBtn = document.createElement("button");
+          undoBtn.textContent = "Request Undo";
+          undoBtn.style.fontSize = "11px";
+          undoBtn.style.marginRight = "4px";
+          undoBtn.addEventListener("click", () => socket.sendChessUndoRequest(activeChessMatch.boardId));
+          chessMatchBodyEl.appendChild(undoBtn);
+        }
+      }
+
       const resignBtn = document.createElement("button");
       resignBtn.textContent = "Resign";
       resignBtn.style.fontSize = "11px";
       resignBtn.addEventListener("click", () => socket.sendChessResign(activeChessMatch.boardId));
       chessMatchBodyEl.appendChild(resignBtn);
+    }
+  }
+
+  // Shared Accept/Decline pair for an incoming draw offer or undo request —
+  // used by both Chess's and Dama's own match modals.
+  function addRespondButtons(container, onRespond) {
+    const acceptBtn = document.createElement("button");
+    acceptBtn.textContent = "Accept";
+    acceptBtn.style.fontSize = "11px";
+    acceptBtn.style.marginRight = "4px";
+    acceptBtn.addEventListener("click", () => onRespond(true));
+    container.appendChild(acceptBtn);
+    const declineBtn = document.createElement("button");
+    declineBtn.textContent = "Decline";
+    declineBtn.style.fontSize = "11px";
+    declineBtn.addEventListener("click", () => onRespond(false));
+    container.appendChild(declineBtn);
+  }
+
+  // === Dama Phase 2 — networked, sharing tables 1/2 with Chess =============
+
+  // Same physical sign sprite CHESS_BOARD_SIGNS already maps board 1/2/3
+  // to — one prop per table regardless of which game is currently hosted
+  // there, so this reuses that same lookup rather than a separate one.
+  function updateDamaBoardSign(boardId, board) {
+    const sign = CHESS_BOARD_SIGNS[boardId];
+    sign.hasHost = board.status !== "empty";
+    if (!sign.hasHost) return;
+    if (board.status === "waiting") {
+      updateKarirsBoardText(sign, `Hosted by ${board.hostDisplayName} — waiting for opponent (Dama)`);
+    } else {
+      updateKarirsBoardText(sign, `${board.whiteDisplayName} vs ${board.blackDisplayName} — Dama In Progress`);
+    }
+  }
+
+  // The dispatcher for tables 1/2 (board 3, the Stockfish table, keeps
+  // using onChessBoardClick directly — always chess, never offered a
+  // choice). Which game (if either) currently owns this physical table is
+  // never ambiguous: the api's own _physical_board_free guarantees at most
+  // one of chessBoards[id]/damaBoards[id] is ever non-"empty" at a time.
+  function onSharedBoardClick(boardId, clientX, clientY) {
+    if (chessBoards[boardId].status !== "empty") {
+      onChessBoardClick(boardId, clientX, clientY);
+      return;
+    }
+    if (damaBoards[boardId].status !== "empty") {
+      onDamaBoardClick(boardId, clientX, clientY);
+      return;
+    }
+    showBoardHostChoiceMenu(boardId, clientX, clientY);
+  }
+
+  // The dispatcher for board 3 specifically (the standing AI table) — same
+  // "check chess, then dama, then offer a fresh choice" shape as
+  // onSharedBoardClick above, just landing on chessHostMenuEl's own
+  // Chess/Dama-vs-AI choice (see renderChessHostMenu) instead of
+  // boardHostChoiceMenuEl's host-vs-human one when the table is empty.
+  function onAiBoardClick(boardId, clientX, clientY) {
+    if (chessBoards[boardId].status !== "empty") {
+      onChessBoardClick(boardId, clientX, clientY);
+      return;
+    }
+    if (damaBoards[boardId].status !== "empty") {
+      onDamaBoardClick(boardId, clientX, clientY);
+      return;
+    }
+    showChessHostMenu(boardId, clientX, clientY);
+  }
+
+  function hideBoardHostChoiceMenu() {
+    boardHostChoiceMenuEl.style.display = "none";
+    boardHostChoiceTargetBoardId = null;
+  }
+
+  function showBoardHostChoiceMenu(boardId, clientX, clientY) {
+    boardHostChoiceTargetBoardId = boardId;
+    const wrapRect = wrap.getBoundingClientRect();
+    boardHostChoiceMenuEl.style.left = `${clientX - wrapRect.left}px`;
+    boardHostChoiceMenuEl.style.top = `${clientY - wrapRect.top}px`;
+    boardHostChoiceMenuEl.style.display = "block";
+    renderBoardHostChoiceMenu();
+  }
+
+  function renderBoardHostChoiceMenu() {
+    if (boardHostChoiceTargetBoardId == null) return;
+    boardHostChoiceBodyEl.innerHTML = "";
+    function addBtn(label, onClick) {
+      const btn = document.createElement("button");
+      btn.textContent = label;
+      btn.style.fontSize = "11px";
+      btn.style.display = "block";
+      btn.style.width = "100%";
+      btn.style.margin = "2px 0";
+      btn.addEventListener("click", onClick);
+      boardHostChoiceBodyEl.appendChild(btn);
+    }
+    addBtn("Host Chess", () => {
+      socket.sendChessHostRequest(boardHostChoiceTargetBoardId);
+      hideBoardHostChoiceMenu();
+    });
+    addBtn("Host Dama", () => {
+      socket.sendDamaHostRequest(boardHostChoiceTargetBoardId);
+      hideBoardHostChoiceMenu();
+    });
+    addBtn("Cancel", () => hideBoardHostChoiceMenu());
+  }
+
+  function onDamaBoardClick(boardId, clientX, clientY) {
+    const board = damaBoards[boardId];
+    if (board.status === "waiting") {
+      if (board.hostId === localUserId) {
+        showDamaWaitingModal(boardId);
+      } else {
+        showDamaJoinMenu(boardId, clientX, clientY);
+      }
+    } else if (board.status === "in_progress") {
+      const isPlayer = board.whiteUserId === localUserId || board.blackUserId === localUserId;
+      showDamaMatchModal(boardId, !isPlayer);
+    }
+  }
+
+  function hideDamaJoinMenu() {
+    damaJoinMenuEl.style.display = "none";
+    damaJoinTargetBoardId = null;
+  }
+
+  function showDamaJoinMenu(boardId, clientX, clientY) {
+    damaJoinTargetBoardId = boardId;
+    const wrapRect = wrap.getBoundingClientRect();
+    damaJoinMenuEl.style.left = `${clientX - wrapRect.left}px`;
+    damaJoinMenuEl.style.top = `${clientY - wrapRect.top}px`;
+    damaJoinMenuEl.style.display = "block";
+    renderDamaJoinMenu();
+  }
+
+  function renderDamaJoinMenu() {
+    if (damaJoinTargetBoardId == null) return;
+    damaJoinMenuBodyEl.innerHTML = "";
+    function addBtn(label, onClick) {
+      const btn = document.createElement("button");
+      btn.textContent = label;
+      btn.style.fontSize = "11px";
+      btn.style.display = "block";
+      btn.style.width = "100%";
+      btn.style.margin = "2px 0";
+      btn.addEventListener("click", onClick);
+      damaJoinMenuBodyEl.appendChild(btn);
+    }
+    const board = damaBoards[damaJoinTargetBoardId];
+    const p = document.createElement("p");
+    p.style.margin = "0 0 4px 0";
+    p.textContent = `Play Dama with ${board.hostDisplayName}?`;
+    damaJoinMenuBodyEl.appendChild(p);
+    addBtn("Yes", () => socket.sendDamaJoinRequest(damaJoinTargetBoardId));
+    addBtn("No", () => hideDamaJoinMenu());
+  }
+
+  function showDamaWaitingModal(boardId) {
+    myHostedDamaBoardId = boardId;
+    damaWaitingModalEl.style.display = "flex";
+    renderDamaWaitingModal();
+  }
+
+  function hideDamaWaitingModal() {
+    damaWaitingModalEl.style.display = "none";
+  }
+
+  function renderDamaWaitingModal() {
+    if (myHostedDamaBoardId == null) return;
+    damaWaitingBodyEl.innerHTML = "";
+    const p = document.createElement("p");
+    p.style.margin = "0";
+    p.style.fontSize = "12px";
+    p.textContent = "Waiting for a player to join…";
+    damaWaitingBodyEl.appendChild(p);
+  }
+
+  function showDamaMatchModal(boardId, isSpectator) {
+    hideBoardHostChoiceMenu();
+    hideDamaJoinMenu();
+    // lastTurnSnapshot/turnStartSquare exist purely for the undo flow (see
+    // onDamaMatchSquareClick) and the last-move highlight — set fresh at
+    // the start of each of MY OWN turns, null otherwise/for a spectator.
+    activeDamaMatch = { boardId, isSpectator, selectedSquare: null, midChain: false, lastTurnSnapshot: null, turnStartSquare: null };
+    damaMatchModalEl.style.display = "flex";
+    renderDamaMatchModal();
+  }
+
+  function hideDamaMatchModal() {
+    damaMatchModalEl.style.display = "none";
+    activeDamaMatch = null;
+  }
+
+  // The acting player's own click always runs the real dama.js engine
+  // locally first (same rules already proven in Phase 1's self-play test)
+  // — mandatory capture, chain captures, promotion, flying kings all just
+  // work here for free. The resulting board is applied optimistically
+  // right away (not just on the server's own echo, unlike Chess) because a
+  // mid-chain capture needs the player to see the intermediate jump and
+  // pick the next one before any round trip could complete; the server
+  // trusts this exact board back once it arrives, so the two can never
+  // actually disagree (see the api's own dama_move handler).
+  function onDamaMatchSquareClick(boardId, row, col) {
+    if (!activeDamaMatch || activeDamaMatch.boardId !== boardId || activeDamaMatch.isSpectator) return;
+    const board = damaBoards[boardId];
+    if (board.status !== "in_progress" || board.outcome) return;
+    const myColor = board.whiteUserId === localUserId ? "white" : board.blackUserId === localUserId ? "black" : null;
+    if (myColor == null || board.turn !== myColor) return;
+
+    const legalMoves = getAllLegalMoves(board.grid, myColor, activeDamaMatch.midChain ? activeDamaMatch.selectedSquare : undefined);
+    if (activeDamaMatch.selectedSquare == null) {
+      const piece = board.grid[row][col];
+      if (piece && piece.side === myColor && legalMoves.some((m) => m.from.row === row && m.from.col === col)) {
+        activeDamaMatch.selectedSquare = { row, col };
+        renderDamaMatchModal();
+      }
+      return;
+    }
+
+    const move = legalMoves.find(
+      (m) => m.from.row === activeDamaMatch.selectedSquare.row && m.from.col === activeDamaMatch.selectedSquare.col
+        && m.to.row === row && m.to.col === col,
+    );
+    if (move) {
+      // This turn's very first hop — snapshot the board/side exactly as
+      // they are right now, before the move is applied, purely so a later
+      // "Request Undo" (see renderDamaMatchModal) has something to send
+      // back (see dama_undo_commit's own comment on why it has to be THIS
+      // client, not the server, that holds it). Untouched by every
+      // subsequent hop of the same turn — only the first one matters.
+      if (!activeDamaMatch.midChain) {
+        activeDamaMatch.lastTurnSnapshot = { board: board.grid, sideToMove: board.turn };
+        activeDamaMatch.turnStartSquare = { row: activeDamaMatch.selectedSquare.row, col: activeDamaMatch.selectedSquare.col };
+      }
+      const result = applyDamaMove(board.grid, move);
+      const continued = !!result.continuedCaptureFrom;
+      let outcome = null;
+      if (continued) {
+        activeDamaMatch.selectedSquare = result.continuedCaptureFrom;
+        activeDamaMatch.midChain = true;
+      } else {
+        activeDamaMatch.selectedSquare = null;
+        activeDamaMatch.midChain = false;
+        const otherSide = myColor === "white" ? "black" : "white";
+        if (hasNoLegalMoves(result.board, otherSide)) outcome = { winner_side: myColor, reason: "no_moves" };
+      }
+      board.grid = result.board;
+      board.turn = continued ? myColor : (myColor === "white" ? "black" : "white");
+      board.lastMove = { from: [activeDamaMatch.turnStartSquare.row, activeDamaMatch.turnStartSquare.col], to: [row, col], by: myColor };
+      if (outcome) board.outcome = { winnerUserId: outcome.winner_side === "white" ? board.whiteUserId : board.blackUserId, reason: outcome.reason };
+      renderDamaMatchModal();
+      socket.sendDamaMove(boardId, result.board, { continued, outcome, lastMove: board.lastMove });
+      return;
+    }
+
+    if (activeDamaMatch.midChain) return; // must keep capturing with the same piece — ignore anything else
+    const piece = board.grid[row][col];
+    if (piece && piece.side === myColor && legalMoves.some((m) => m.from.row === row && m.from.col === col)) {
+      activeDamaMatch.selectedSquare = { row, col };
+    } else {
+      activeDamaMatch.selectedSquare = null;
+    }
+    renderDamaMatchModal();
+  }
+
+  function renderDamaMatchModal() {
+    if (!activeDamaMatch) return;
+    const board = damaBoards[activeDamaMatch.boardId];
+    damaMatchBodyEl.innerHTML = "";
+
+    const myColor = board.whiteUserId === localUserId ? "white" : board.blackUserId === localUserId ? "black" : null;
+    const whiteName = board.whiteDisplayName || "?";
+    const blackName = board.blackDisplayName || "?";
+    const info = document.createElement("p");
+    info.style.margin = "0 0 6px 0";
+    info.style.fontSize = "11px";
+    info.textContent = activeDamaMatch.isSpectator
+      ? `Spectating: ${whiteName} (White) vs ${blackName} (Black)`
+      : `You are ${myColor === "white" ? "White" : "Black"} — vs ${myColor === "white" ? blackName : whiteName}`;
+    damaMatchBodyEl.appendChild(info);
+
+    // A one-time legend for the two last-move tints (see
+    // TAMBAYAN_LAST_MOVE_TINT/_OPPONENT_TINT above) — only meaningful once
+    // there's actually a last move to show, and only for the two real
+    // players (a spectator has no "mine" to tell the opponent's apart
+    // from).
+    if (board.lastMove && myColor != null) {
+      const legend = document.createElement("p");
+      legend.style.margin = "0 0 6px 0";
+      legend.style.fontSize = "10px";
+      legend.style.display = "flex";
+      legend.style.gap = "10px";
+      const swatch = (color) => `<span style="display:inline-block;width:9px;height:9px;background:${color};border-radius:2px;margin-right:3px;vertical-align:middle;"></span>`;
+      legend.innerHTML = `<span>${swatch(TAMBAYAN_LAST_MOVE_TINT)}Your last move</span><span>${swatch(TAMBAYAN_LAST_MOVE_OPPONENT_TINT)}Opponent's last move</span>`;
+      damaMatchBodyEl.appendChild(legend);
+    }
+
+    // White always sits at the bottom for White/spectators; Black's own
+    // view flips (screen row/col reversed) so Black sits at the bottom of
+    // their own board too — same convention Chess's board already uses.
+    const flip = !activeDamaMatch.isSpectator && myColor === "black";
+    const legalMoves = !activeDamaMatch.isSpectator && !board.outcome && board.turn === myColor
+      ? getAllLegalMoves(board.grid, myColor, activeDamaMatch.midChain ? activeDamaMatch.selectedSquare : undefined)
+      : [];
+    const destinations = activeDamaMatch.selectedSquare
+      ? legalMoves.filter((m) => m.from.row === activeDamaMatch.selectedSquare.row && m.from.col === activeDamaMatch.selectedSquare.col).map((m) => m.to)
+      : [];
+
+    const gridEl = document.createElement("div");
+    gridEl.style.display = "grid";
+    gridEl.style.gridTemplateColumns = "repeat(8, 32px)";
+    gridEl.style.gridTemplateRows = "repeat(8, 32px)";
+    gridEl.style.margin = "0 0 6px 0";
+    for (let screenRow = 0; screenRow < 8; screenRow++) {
+      for (let screenCol = 0; screenCol < 8; screenCol++) {
+        const row = flip ? 7 - screenRow : screenRow;
+        const col = flip ? 7 - screenCol : screenCol;
+        const sq = document.createElement("div");
+        sq.style.width = "32px";
+        sq.style.height = "32px";
+        sq.style.display = "flex";
+        sq.style.alignItems = "center";
+        sq.style.justifyContent = "center";
+        sq.style.position = "relative";
+        sq.style.cursor = activeDamaMatch.isSpectator ? "default" : "pointer";
+        const light = (row + col) % 2 === 0;
+        const isLastMove = board.lastMove && (
+          (board.lastMove.from[0] === row && board.lastMove.from[1] === col) ||
+          (board.lastMove.to[0] === row && board.lastMove.to[1] === col)
+        );
+        // Distinct tint for "the opponent's (or the AI's) last move" vs
+        // "my own last move" — see board.lastMove.by's own comment
+        // (_play_dama_ai_move/dama_move, both api-side). Spectators have
+        // no myColor at all (null), so their own view always falls back to
+        // the plain "mine" tint — there's no "opponent" to distinguish
+        // from when you're not actually one of the two players.
+        const lastMoveTint = board.lastMove && myColor != null && board.lastMove.by !== myColor
+          ? TAMBAYAN_LAST_MOVE_OPPONENT_TINT
+          : TAMBAYAN_LAST_MOVE_TINT;
+        sq.style.background = isLastMove ? lastMoveTint : (light ? TAMBAYAN_BOARD_LIGHT : TAMBAYAN_BOARD_DARK);
+        const isSelected = activeDamaMatch.selectedSquare && activeDamaMatch.selectedSquare.row === row && activeDamaMatch.selectedSquare.col === col;
+        sq.style.boxShadow = isSelected ? "inset 0 0 0 2px orange" : "none";
+        const piece = board.grid[row][col];
+        if (piece) {
+          const disc = document.createElement("div");
+          disc.style.width = "24px";
+          disc.style.height = "24px";
+          disc.style.borderRadius = "50%";
+          disc.style.display = "flex";
+          disc.style.alignItems = "center";
+          disc.style.justifyContent = "center";
+          disc.style.fontSize = "12px";
+          disc.style.background = piece.side === "white" ? "#f5f5f5" : "#1f2937";
+          disc.style.border = piece.side === "white" ? "2px solid #1f2937" : "2px solid #f5f5f5";
+          if (piece.king) {
+            disc.textContent = "★";
+            disc.style.color = piece.side === "white" ? "#1f2937" : "#f5f5f5";
+          }
+          sq.appendChild(disc);
+        }
+        if (destinations.some((d) => d.row === row && d.col === col)) {
+          const dot = document.createElement("div");
+          dot.style.position = "absolute";
+          dot.style.width = "9px";
+          dot.style.height = "9px";
+          dot.style.borderRadius = "50%";
+          dot.style.background = "#4ade8099";
+          sq.appendChild(dot);
+        }
+        if (!activeDamaMatch.isSpectator) {
+          sq.addEventListener("click", () => onDamaMatchSquareClick(activeDamaMatch.boardId, row, col));
+        }
+        gridEl.appendChild(sq);
+      }
+    }
+    damaMatchBodyEl.appendChild(gridEl);
+
+    if (board.outcome) {
+      const reasonText = {
+        resignation: "Resignation", disconnect: "Opponent disconnected",
+        no_moves: "No legal moves left", draw_agreed: "Draw by agreement",
+      }[board.outcome.reason] || board.outcome.reason;
+      const outcomeEl = document.createElement("p");
+      outcomeEl.style.fontWeight = "bold";
+      outcomeEl.style.fontSize = "12px";
+      if (board.outcome.winnerUserId == null) {
+        outcomeEl.textContent = `Game over — ${reasonText}.`;
+      } else if (board.outcome.winnerUserId === localUserId) {
+        outcomeEl.textContent = `You won — ${reasonText}!`;
+      } else if (!activeDamaMatch.isSpectator) {
+        outcomeEl.textContent = `You lost — ${reasonText}.`;
+      } else {
+        const winnerName = board.outcome.winnerUserId === board.whiteUserId ? whiteName : blackName;
+        outcomeEl.textContent = `${winnerName} won — ${reasonText}.`;
+      }
+      damaMatchBodyEl.appendChild(outcomeEl);
+      if (!activeDamaMatch.isSpectator) {
+        // Same immediate-restart bypass as Chess's own (see
+        // renderChessMatchModal's own New Game button / the api's
+        // _board_finished_for_user).
+        const newGameBtn = document.createElement("button");
+        newGameBtn.textContent = "New Game";
+        newGameBtn.style.fontSize = "11px";
+        newGameBtn.style.marginTop = "4px";
+        newGameBtn.addEventListener("click", () => {
+          if (activeDamaMatch.boardId === AI_BOARD_ID) socket.sendDamaAiStart(activeDamaMatch.boardId);
+          else socket.sendDamaHostRequest(activeDamaMatch.boardId);
+        });
+        damaMatchBodyEl.appendChild(newGameBtn);
+      }
+    } else if (!activeDamaMatch.isSpectator) {
+      const turnEl = document.createElement("p");
+      turnEl.style.fontSize = "11px";
+      turnEl.style.color = "#a3a3a3";
+      turnEl.textContent = activeDamaMatch.midChain
+        ? "Continue capturing with the same piece."
+        : board.turn === myColor ? "Your move."
+        : activeDamaMatch.boardId === AI_BOARD_ID ? `${DAMA_AI_NAME} is thinking…` : "Waiting for opponent…";
+      damaMatchBodyEl.appendChild(turnEl);
+    }
+
+    if (!activeDamaMatch.isSpectator && !board.outcome) {
+      // Offer Draw / Request Undo — same shape as Chess's own (see
+      // renderChessMatchModal), human-vs-human boards only.
+      if (board.undoRequestedBy != null) {
+        const p = document.createElement("p");
+        p.style.fontSize = "11px";
+        p.style.margin = "0 0 4px 0";
+        p.textContent = board.undoRequestedBy === localUserId
+          ? "Undo request sent — waiting for response…"
+          : "Opponent requests to undo their last move.";
+        damaMatchBodyEl.appendChild(p);
+        if (board.undoRequestedBy !== localUserId) {
+          addRespondButtons(damaMatchBodyEl, (accept) => socket.sendDamaUndoRespond(activeDamaMatch.boardId, accept));
+        }
+      } else if (board.drawOfferedBy != null) {
+        const p = document.createElement("p");
+        p.style.fontSize = "11px";
+        p.style.margin = "0 0 4px 0";
+        p.textContent = board.drawOfferedBy === localUserId
+          ? "Draw offer sent — waiting for response…"
+          : "Opponent offers a draw.";
+        damaMatchBodyEl.appendChild(p);
+        if (board.drawOfferedBy !== localUserId) {
+          addRespondButtons(damaMatchBodyEl, (accept) => socket.sendDamaDrawRespond(activeDamaMatch.boardId, accept));
+        }
+      } else if (activeDamaMatch.boardId !== AI_BOARD_ID) {
+        const drawBtn = document.createElement("button");
+        drawBtn.textContent = "Offer Draw";
+        drawBtn.style.fontSize = "11px";
+        drawBtn.style.marginRight = "4px";
+        drawBtn.addEventListener("click", () => socket.sendDamaDrawOffer(activeDamaMatch.boardId));
+        damaMatchBodyEl.appendChild(drawBtn);
+
+        // board.moveHistory isn't a reliable "has anyone moved yet" signal
+        // for Dama the way it is for Chess (see sendDamaMove — this client
+        // never actually sends move_text, so the server's own move_history
+        // never grows past its own dama_move handler's own no-op default)
+        // — board.lastMove is set on every real move sent though, so use
+        // that instead as "at least one turn has actually completed."
+        if (board.turn !== myColor && board.lastMove != null) {
+          const undoBtn = document.createElement("button");
+          undoBtn.textContent = "Request Undo";
+          undoBtn.style.fontSize = "11px";
+          undoBtn.style.marginRight = "4px";
+          undoBtn.addEventListener("click", () => socket.sendDamaUndoRequest(activeDamaMatch.boardId));
+          damaMatchBodyEl.appendChild(undoBtn);
+        }
+      }
+
+      const resignBtn = document.createElement("button");
+      resignBtn.textContent = "Resign";
+      resignBtn.style.fontSize = "11px";
+      resignBtn.addEventListener("click", () => socket.sendDamaResign(activeDamaMatch.boardId));
+      damaMatchBodyEl.appendChild(resignBtn);
     }
   }
 
@@ -6347,7 +10722,9 @@ export function mount(el, ctx) {
       centerZ,
       midX: (selfMonX + opponentMonX) / 2,
       midZ: (selfMonZ + opponentMonZ) / 2,
-      camAngle: local.facingAngle + BATTLE_CAM_ANGLE_OFFSET,
+      // Same "saved Starting Angle takes effect immediately" reasoning as
+      // the wild/team battles' own camAngle init above — see cameraOverrides.pvp.
+      camAngle: cameraOverrides.pvp?.angle ?? (local.facingAngle + BATTLE_CAM_ANGLE_OFFSET),
       hasSubmitted: false,
       opponentReady: false,
       ended: false,
@@ -6594,6 +10971,12 @@ export function mount(el, ctx) {
     const canClaim = karirsUnclaimedTotal > 0;
     karraClaimSectionEl.style.display = canClaim ? "block" : "none";
     if (canClaim) karraClaimTextEl.textContent = `Claim ${karirsUnclaimedTotal} G?`;
+
+    // Disabled (not hidden) while a practice is already counting down or
+    // running — the button staying visible but inert reads more clearly
+    // as "one's already going" than the whole section vanishing would.
+    karraPracticeBtn.disabled = !!karirsPracticeState;
+    karraPracticeBtn.textContent = karirsPracticeState ? "Practice already running" : "Practice Race";
   }
 
   function showKarraMenu(clientX, clientY) {
@@ -6605,6 +10988,7 @@ export function mount(el, ctx) {
     karraBetSectionEl.style.display = "none";
     karraMyBetTextEl.style.display = "none";
     karraClaimSectionEl.style.display = "none";
+    karraPracticeMsgEl.style.display = "none";
     // Fetched fresh every open, same convention the glophimon menu panel
     // already follows — my_bet/unclaimed_total are per-user and never
     // ride along on the shared broadcast every player receives.
@@ -6802,6 +11186,14 @@ export function mount(el, ctx) {
     }
     hideBossRickMenu();
 
+    const usherHits = raycaster.intersectObject(usherRig.group, true);
+    const usherInRange = Math.hypot(local.x - USHER_X, local.z - USHER_Z) <= INTERACTION_RANGE;
+    if (usherHits.length > 0 && usherInRange) {
+      showUsherMenu(event.clientX, event.clientY);
+      return;
+    }
+    hideUsherMenu();
+
     // The two chess tables — same raycast shape as every NPC/prop above,
     // but the range gate itself depends on that board's own state: a plain
     // proximity check for an empty/waiting board (must walk right up to
@@ -6809,23 +11201,36 @@ export function mount(el, ctx) {
     // in_progress (so a spectator can click it from across the yard) —
     // mirrors the exact same OR'd-in condition the highlight updaters use.
     const board1Hits = raycaster.intersectObject(chessBoard1Group, true);
-    const board1Clickable = chessBoards[1].status === "in_progress"
+    const board1AnyInProgress = chessBoards[1].status === "in_progress" || damaBoards[1].status === "in_progress";
+    const board1Clickable = board1AnyInProgress
       ? isInsideTambayan(local.x, local.z)
       : Math.hypot(local.x - CHESS_BOARD_1_X, local.z - CHESS_BOARD_1_Z) <= INTERACTION_RANGE;
     if (board1Hits.length > 0 && board1Clickable) {
-      onChessBoardClick(1, event.clientX, event.clientY);
+      onSharedBoardClick(1, event.clientX, event.clientY);
       return;
     }
     const board2Hits = raycaster.intersectObject(chessBoard2Group, true);
-    const board2Clickable = chessBoards[2].status === "in_progress"
+    const board2AnyInProgress = chessBoards[2].status === "in_progress" || damaBoards[2].status === "in_progress";
+    const board2Clickable = board2AnyInProgress
       ? isInsideTambayan(local.x, local.z)
       : Math.hypot(local.x - CHESS_BOARD_2_X, local.z - CHESS_BOARD_2_Z) <= INTERACTION_RANGE;
     if (board2Hits.length > 0 && board2Clickable) {
-      onChessBoardClick(2, event.clientX, event.clientY);
+      onSharedBoardClick(2, event.clientX, event.clientY);
+      return;
+    }
+    const board3Hits = raycaster.intersectObject(chessBoard3Group, true);
+    const board3AnyInProgress = chessBoards[3].status === "in_progress" || damaBoards[3].status === "in_progress";
+    const board3Clickable = board3AnyInProgress
+      ? isInsideTambayan(local.x, local.z)
+      : Math.hypot(local.x - CHESS_BOARD_3_X, local.z - CHESS_BOARD_3_Z) <= INTERACTION_RANGE;
+    if (board3Hits.length > 0 && board3Clickable) {
+      onAiBoardClick(3, event.clientX, event.clientY);
       return;
     }
     hideChessHostMenu();
     hideChessJoinMenu();
+    hideBoardHostChoiceMenu();
+    hideDamaJoinMenu();
 
     // Other connected players — same raycast+proximity shape as every NPC
     // above, just iterated over whoever's currently nearby instead of one
@@ -6874,7 +11279,14 @@ export function mount(el, ctx) {
     // the normal glophimon.menu round-trip.
     menuData.inventory.glophiballs += DAILY_CLAIM_GLOPHIBALLS;
     menuData.inventory.daily_claim_available = false;
-    hideRodzMenu();
+    // A friendly send-off instead of the menu just vanishing — same
+    // "leave the text up, let the player close it themselves" UX the
+    // already-claimed scolding message above already uses, rather than
+    // calling hideRodzMenu() immediately (which used to close the popup
+    // before there was ever anything to read).
+    const sendOff = RODZ_CLAIM_SEND_OFFS[Math.floor(Math.random() * RODZ_CLAIM_SEND_OFFS.length)];
+    rodzClaimTextEl.textContent = `Here's ${DAILY_CLAIM_GLOPHIBALLS} Glophiballs. ${sendOff}`;
+    rodzClaimTextEl.style.display = "block";
     ctx.onClaimDaily?.();
   });
 
@@ -6904,6 +11316,25 @@ export function mount(el, ctx) {
       if (karirsMyBet) karirsMyBet.claimed = true;
       refreshKarraMenu();
     });
+  });
+  // Fully local — no server round-trip, no await, unlike the two handlers
+  // above. See KARIRS_PRACTICE_BLOCK_WINDOW_MS's own comment for why the
+  // real race's own state can still veto it even though nothing here talks
+  // to the server about it.
+  karraPracticeBtn.addEventListener("click", () => {
+    const race = karirsRace;
+    const now = Date.now();
+    const closesAt = race?.status === "betting_open" ? new Date(`${race.betting_closes_at}Z`).getTime() : null;
+    const raceImminent = race?.status === "racing" || (closesAt !== null && closesAt - now < KARIRS_PRACTICE_BLOCK_WINDOW_MS);
+    karraPracticeMsgEl.style.display = "block";
+    if (raceImminent) {
+      karraPracticeMsgEl.textContent = "The next race will run shortly, so I can't let you use the field right now.";
+      return;
+    }
+    const racerNames = race?.racer_names?.length ? race.racer_names : KARIRS_PRACTICE_FALLBACK_NAMES;
+    karirsPracticeState = { phase: "countdown", countdownEndsAt: now + KARIRS_PRACTICE_COUNTDOWN_MS, racerNames };
+    karraPracticeMsgEl.textContent = "Clear the track — the race will begin in a 10 second countdown!";
+    refreshKarraMenu();
   });
   karraCancelBtn.addEventListener("click", hideKarraMenu);
   karirsTvCloseBtn.addEventListener("click", hideKarirsTvMenu);
@@ -6973,10 +11404,10 @@ export function mount(el, ctx) {
     if (msg.type === "self") {
       localUserId = msg.user_id;
     } else if (msg.type === "roster") {
-      for (const p of msg.players) ensurePeer(p.user_id, p.display_name, p, p.x, p.z, p.facing);
+      for (const p of msg.players) ensurePeer(p.user_id, p.display_name, p, p.x, p.z, p.facing, p.floor ?? 0);
       status.textContent = `Connected as ${character.display_name}`;
     } else if (msg.type === "joined") {
-      ensurePeer(msg.user_id, msg.display_name, msg, msg.x, msg.z, msg.facing);
+      ensurePeer(msg.user_id, msg.display_name, msg, msg.x, msg.z, msg.facing, msg.floor ?? 0);
     } else if (msg.type === "position") {
       const peer = peers.get(msg.user_id);
       if (!peer) return;
@@ -6984,6 +11415,14 @@ export function mount(el, ctx) {
       peer.targetZ = msg.z;
       peer.targetFacing = msg.facing;
       peer.isMoving = Math.hypot(msg.x - peer.x, msg.z - peer.z) > 0.01;
+      // Floor changes are a discrete snap, not something to ease like x/z
+      // above (matches how the LOCAL player's own currentFloor changes on
+      // the stairs, see checkStairsContact) — updates peer.y immediately
+      // too, so this peer renders at the correct height the instant it's
+      // no longer hidden by the floor-mismatch check in the render loop
+      // below (see frame()'s own peers loop).
+      peer.floor = msg.floor ?? 0;
+      peer.y = glophicsFloorY(peer.floor);
     } else if (msg.type === "left") {
       removePeer(msg.user_id);
     } else if (msg.type === "chat") {
@@ -7026,6 +11465,21 @@ export function mount(el, ctx) {
         spawn.engagedByOther = false;
         setRigTransparent(spawn.rig, false);
       }
+    } else if (msg.type === "wild_battle_state") {
+      // A live push — someone's fight just started or changed. `msg` here
+      // is by_user_id plus the exact same snapshot fields
+      // wild_battle_roster's own array entries carry (see the api's own
+      // world_ws send below), so both are handed to the identical handler.
+      applySpectatorBattleSnapshot(msg.by_user_id, msg);
+    } else if (msg.type === "wild_battle_roster") {
+      // Late-join/just-mounted catch-up — one entry per battle already in
+      // progress at the moment this client connected (see the api's own
+      // world_ws, right alongside its wild_roster send). Without this, a
+      // client that joins mid-fight would see nothing about it at all until
+      // that battler's next wild_battle_update happened to fire.
+      for (const entry of msg.battles) applySpectatorBattleSnapshot(entry.by_user_id, entry);
+    } else if (msg.type === "wild_battle_end") {
+      teardownSpectatorBattleEntry(msg.by_user_id);
     } else if (msg.type === "karirs_state") {
       karirsRace = msg.race;
       karirsPreviousRace = msg.previous_race ?? null;
@@ -7125,6 +11579,9 @@ export function mount(el, ctx) {
         turn: msg.turn,
         moveHistory: msg.move_history,
         outcome: msg.outcome ? { winnerUserId: msg.outcome.winner_user_id, reason: msg.outcome.reason } : null,
+        drawOfferedBy: msg.draw_offered_by,
+        undoRequestedBy: msg.undo_requested_by,
+        lastMove: msg.last_move,
       };
       chessBoards[msg.board_id] = board;
       updateChessBoardSign(msg.board_id, board);
@@ -7159,11 +11616,17 @@ export function mount(el, ctx) {
         // themselves, it just appears once the server confirms the match.
         showChessMatchModal(msg.board_id, false);
       } else if (activeChessMatch && activeChessMatch.boardId === msg.board_id) {
-        if (board.status === "empty") {
-          // The table auto-clears itself a while after a finished game (see
-          // main.py's own CHESS_BOARD_RESET_DELAY_S) — if this modal is
-          // still open at that point, just close it rather than re-render
-          // into a half-empty "board reset mid-view" state.
+        if (board.status === "empty" || board.status === "waiting") {
+          // "empty": the table auto-clears itself a while after a finished
+          // game (see main.py's own CHESS_BOARD_RESET_DELAY_S) — if this
+          // modal is still open at that point, just close it rather than
+          // re-render into a half-empty "board reset mid-view" state.
+          // "waiting": the New Game button (see renderChessMatchModal) on a
+          // human board (1/2) re-hosts via chess_host_request, which drops
+          // the board straight to "waiting" with no white/black assigned
+          // yet — the chessWaitingModalEl branch above already shows the
+          // right UI for that, so just close this now-stale match view
+          // instead of rendering a broken "You are ??" state underneath it.
           hideChessMatchModal();
         } else {
           activeChessMatch.selectedSquare = null;
@@ -7176,6 +11639,118 @@ export function mount(el, ctx) {
       showChessLeaveWarning(msg.seconds);
     } else if (msg.type === "chess_leave_cancelled") {
       hideChessLeaveWarning();
+    } else if (msg.type === "dama_state") {
+      // While I'm mid-chain as the piece's own acting mover, my local
+      // grid/turn are always at least as fresh as anything this broadcast
+      // can say — I'm the only one who can still be capturing with this
+      // board's pieces right now (see onDamaMatchSquareClick: every hop is
+      // sent as its own dama_move, optimistically applied locally first).
+      // A network-delayed echo of an EARLIER hop in this same chain must
+      // never roll the board back underneath a selection that's already
+      // moved further along — that's exactly the "highlight sitting on an
+      // empty square, stuck saying continue capturing" bug this guards
+      // against: rapid clicks through a multi-hop capture can easily
+      // outrun the round trip of an earlier hop's own echo. Every other
+      // field (status/outcome/etc) still always takes the broadcast's own
+      // value regardless — those can change for reasons this optimistic
+      // path doesn't cover at all (the opponent resigning mid-chain is
+      // legal at any time, and must still end the game immediately).
+      const amMidChainActor = activeDamaMatch && activeDamaMatch.boardId === msg.board_id && activeDamaMatch.midChain && !activeDamaMatch.isSpectator;
+      const prevBoard = damaBoards[msg.board_id];
+      const board = {
+        status: msg.status,
+        hostId: msg.host_id,
+        hostDisplayName: msg.host_display_name,
+        whiteUserId: msg.white_user_id,
+        whiteDisplayName: msg.white_display_name,
+        blackUserId: msg.black_user_id,
+        blackDisplayName: msg.black_display_name,
+        grid: amMidChainActor && prevBoard ? prevBoard.grid : msg.board,
+        turn: amMidChainActor && prevBoard ? prevBoard.turn : msg.turn,
+        moveHistory: msg.move_history,
+        outcome: msg.outcome ? { winnerUserId: msg.outcome.winner_user_id, reason: msg.outcome.reason } : null,
+        drawOfferedBy: msg.draw_offered_by,
+        undoRequestedBy: msg.undo_requested_by,
+        undoAcceptPendingFor: msg.undo_accept_pending_for,
+        // Same "keep my own further-along local value" guard as grid/turn
+        // above — purely cosmetic here (unlike grid/turn, a stale value
+        // can't wedge the render), but there's no reason to let a
+        // network-delayed echo flicker the highlight backward mid-chain
+        // either.
+        lastMove: amMidChainActor && prevBoard ? prevBoard.lastMove : msg.last_move,
+      };
+      damaBoards[msg.board_id] = board;
+      updateDamaBoardSign(msg.board_id, board);
+
+      // My own undo request was just accepted — I'm the only client that
+      // still has the pre-move board in memory (see
+      // activeDamaMatch.lastTurnSnapshot, set right when I started that
+      // move), so I'm the one who has to send it back. One-shot: clear the
+      // snapshot immediately so a later, unrelated dama_state broadcast
+      // (still carrying the same now-stale undo_accept_pending_for right
+      // up until this commit's own echo arrives) can't fire it twice.
+      if (
+        board.undoAcceptPendingFor === localUserId
+        && activeDamaMatch && activeDamaMatch.boardId === msg.board_id
+        && activeDamaMatch.lastTurnSnapshot
+      ) {
+        const snap = activeDamaMatch.lastTurnSnapshot;
+        activeDamaMatch.lastTurnSnapshot = null;
+        socket.sendDamaUndoCommit(msg.board_id, snap.board, snap.sideToMove);
+      }
+
+      if (board.status === "waiting" && board.hostId === localUserId) {
+        myHostedDamaBoardId = msg.board_id;
+        damaWaitingModalEl.style.display = "flex";
+        renderDamaWaitingModal();
+      } else if (myHostedDamaBoardId === msg.board_id) {
+        myHostedDamaBoardId = null;
+        hideDamaWaitingModal();
+      }
+
+      const isNewActiveGameIAmIn = board.status === "in_progress" && !board.outcome &&
+        (board.whiteUserId === localUserId || board.blackUserId === localUserId);
+      if (isNewActiveGameIAmIn && (!activeDamaMatch || activeDamaMatch.boardId !== msg.board_id)) {
+        showDamaMatchModal(msg.board_id, false);
+      } else if (activeDamaMatch && activeDamaMatch.boardId === msg.board_id) {
+        if (board.status === "empty" || board.status === "waiting") {
+          // "waiting": the New Game button (see renderDamaMatchModal) on a
+          // human board re-hosts via dama_host_request, same
+          // "waitingModalEl already covers this, close the now-stale match
+          // view instead" reasoning as renderChessMatchModal's own
+          // chess_state handling above.
+          hideDamaMatchModal();
+        } else {
+          // Authoritative echo of a move this same client likely already
+          // applied optimistically (see onDamaMatchSquareClick) — keeps
+          // selectedSquare/midChain exactly as they are instead of
+          // clearing them, so a chain-capture already mid-flight from this
+          // client's own optimistic update doesn't get its selection
+          // wiped out by the server simply confirming what it already knew.
+          renderDamaMatchModal();
+        }
+      }
+    } else if (msg.type === "dama_error") {
+      showDamaError(msg.reason);
+    } else if (msg.type === "cinema_projectionist_state") {
+      // Sent both as a live push (someone just claimed or vacated the
+      // role) and as this client's own late-join catch-up (see the api's
+      // own world_ws, right where it sends wild_battle_roster/karirs_state)
+      // — both arrive as the exact same shape, so there's nothing to
+      // distinguish here, just take whatever the server says as current.
+      cinemaProjectionist = msg.projectionist ?? null;
+      if (usherMenuEl.style.display !== "none") renderUsherMenu();
+    } else if (msg.type === "cinema_screen_state") {
+      // Same "live push or late-join catch-up, identical shape" story as
+      // cinema_projectionist_state above. Updating cinemaScreenUrl (not
+      // just the iframe's own src) matters — it's what the frame() loop's
+      // isYoutubeEmbedUrl check reads to decide whether the YouTube-only
+      // play/pause postMessage command is even worth sending on the next
+      // floor/battle visibility change.
+      cinemaScreenUrl = msg.url;
+      cinemaScreen.iframe.src = cinemaScreenUrl;
+    } else if (msg.type === "cinema_error") {
+      showUsherError(msg.reason);
     } else if (msg.type === "rejected") {
       const reasons = {
         no_character: "No character found — create one first.",
@@ -7206,7 +11781,7 @@ export function mount(el, ctx) {
     // isn't a real collision wall: this is simpler and sufficient).
     if (battle || teamBattle || pvpBattle) {
       local.isMoving = false;
-      applyIdlePose(local.rig, dt);
+      if (!tryPlayLocalOverride("idle", dt)) applyIdlePose(local.rig, dt);
     } else {
       const forwardX = -Math.sin(camAngle);
       const forwardZ = -Math.cos(camAngle);
@@ -7233,12 +11808,12 @@ export function mount(el, ctx) {
         // Resolved per axis rather than as one combined point, so brushing
         // a wall at an angle slides you along it instead of freezing
         // movement outright — same idea real 2D/3D collision sliding uses.
-        if (!isInsideTownWalls(nextX, local.z) && !isInsideTambayanWalls(nextX, local.z)) local.x = nextX;
-        if (!isInsideTownWalls(local.x, nextZ) && !isInsideTambayanWalls(local.x, nextZ)) local.z = nextZ;
+        if (!isInsideTownWalls(nextX, local.z, local.currentFloor) && !isInsideTambayanWalls(nextX, local.z) && !isInsideChessTables(nextX, local.z)) local.x = nextX;
+        if (!isInsideTownWalls(local.x, nextZ, local.currentFloor) && !isInsideTambayanWalls(local.x, nextZ) && !isInsideChessTables(local.x, nextZ)) local.z = nextZ;
         local.facingAngle = Math.atan2(moveX, moveZ);
-        updateWalkCycle(local.rig, dt, speedMult);
+        if (!tryPlayLocalOverride("walk", dt)) updateWalkCycle(local.rig, dt, speedMult);
       } else {
-        applyIdlePose(local.rig, dt);
+        if (!tryPlayLocalOverride("idle", dt)) applyIdlePose(local.rig, dt);
       }
       if (wantsSprint) {
         stamina = Math.max(0, stamina - STAMINA_DRAIN_PER_SEC * dt);
@@ -7250,6 +11825,12 @@ export function mount(el, ctx) {
     }
     updateStaminaBar();
     updateGCoinsHud();
+    // Recomputed every frame regardless of movement (not just while
+    // actually walking) so standing still after a teleport/area change
+    // still lands at the correct height, and so the camera's own
+    // follow/pan targets (which read local.y) stay right too. A no-op for
+    // floor >0 (entityGroundY just returns that floor's own fixed Y again).
+    local.y = entityGroundY(local.currentFloor, local.x, local.z);
     local.rig.group.position.set(local.x, local.y, local.z);
     local.rig.group.rotation.y = local.facingAngle;
     syncNameLabel(local.rig);
@@ -7275,37 +11856,96 @@ export function mount(el, ctx) {
     applyIdlePose(bossRickRig, dt);
     syncNameLabel(bossRickRig);
     updateBossRickHighlight(dt);
+
+    applyIdlePose(usherRig, dt);
+    syncNameLabel(usherRig);
+    updateUsherHighlight(dt);
+
     updateLubaLobbyLive(dt);
     updateChessBoard1Highlight(dt);
     updateChessBoard2Highlight(dt);
+    updateChessBoard3Highlight(dt);
 
-    for (const peer of peers.values()) {
+    applyIdlePose(stockfishRig, dt);
+    syncNameLabel(stockfishRig);
+
+    for (const [peerUserId, peer] of peers.entries()) {
       const ease = Math.min(1, 12 * dt);
       peer.x += (peer.targetX - peer.x) * ease;
       peer.z += (peer.targetZ - peer.z) * ease;
       peer.facingAngle = peer.targetFacing;
       if (peer.isMoving) updateWalkCycle(peer.rig, dt);
       else applyIdlePose(peer.rig, dt);
+      // Recomputed every frame from this peer's own (eased) x/z, same as
+      // the local player's own y above — keeps them riding the terrain
+      // smoothly as they walk instead of snapping.
+      peer.y = entityGroundY(peer.floor, peer.x, peer.z);
       peer.rig.group.position.set(peer.x, peer.y, peer.z);
       peer.rig.group.rotation.y = peer.facingAngle;
       syncNameLabel(peer.rig);
       updateChatBubble(peer);
       peer.updateHighlight(dt);
+      // A peer on a different Glophics floor than the local player is
+      // hidden outright — the simplest correct behavior given floor 1
+      // reuses the exact same X/Z footprint as the ground floor, which
+      // would otherwise put two peers on different floors visually on top
+      // of each other at the same spot. Computed every frame from
+      // peer.floor (kept fresh by onSocketMessage's own "position"
+      // handling — see ensurePeer/glophicsFloorY) vs. local.currentFloor,
+      // same "hide the whole rig" mechanism (setPeerHidden) the battle-dome
+      // hiding below already uses — this is just one more reason to hide,
+      // combined with (not replacing) those.
+      const floorMismatch = peer.floor !== local.currentFloor;
       // "Anyone who tries to enter this field will not be seen inside" —
       // a purely local rendering filter on this client only, not a
       // networked exclusion (see startWildBattle's own comment).
       if (battle) {
         const dist = Math.hypot(peer.x - battle.centerX, peer.z - battle.centerZ);
-        setPeerHidden(peer, dist <= BATTLE_DOME_RADIUS);
+        setPeerHidden(peer, floorMismatch || dist <= BATTLE_DOME_RADIUS);
       } else if (teamBattle) {
         const dist = Math.hypot(peer.x - teamBattle.centerX, peer.z - teamBattle.centerZ);
-        setPeerHidden(peer, dist <= TEAM_DOME_RADIUS);
+        setPeerHidden(peer, floorMismatch || dist <= TEAM_DOME_RADIUS);
+      } else if (peerBattles.has(peerUserId)) {
+        // This peer is mid-battle THEMSELVES (full spectator mode) — stays
+        // hidden regardless of distance from anything of mine, since
+        // there's no "my dome" involved at all here. Already set once by
+        // buildSpectatorBattleEntry when this entry was first built, and
+        // restored once by teardownSpectatorBattleEntry when it ends;
+        // re-asserted here every frame too, same defensive belt-and-braces
+        // reasoning the battle/teamBattle branches above already apply to
+        // their own dome-radius hide.
+        setPeerHidden(peer, true);
+      } else {
+        setPeerHidden(peer, floorMismatch);
       }
     }
 
     updateWildSpawns(dt);
     checkWildContact();
+    checkStairsContact();
+    updateGlophicsExteriorCutaway();
+    updateAreaLabels(dt);
+    updateKarirsTrackVisual(dt);
     renderMinimap();
+
+    // Other players' wild battles this client is spectating — see
+    // peerBattles/applySpectatorBattleSnapshot/onSocketMessage's own
+    // wild_battle_state handling above. Each entry drives its own rigs
+    // through the exact same updateBattleRigAnim dispatch `battle`'s own
+    // block below uses, so whatever Ready/Attack/Defend/Cast pose THIS
+    // account has saved locally applies here too — pose overrides are a
+    // purely local, per-viewer rendering preference (see
+    // updateBattleRigAnim's own comment), never networked, so nothing about
+    // this loop needs to know or care what pose the battling player (or any
+    // other spectator) actually sees for the same action.
+    for (const entry of peerBattles.values()) {
+      for (const memberRig of entry.memberRigs) {
+        updateBattleRigAnim(memberRig, "anim", memberRig.rig, dt);
+        syncNameLabel(memberRig.rig);
+      }
+      updateBattleRigAnim(entry, "wildAnim", entry.wildRig, dt);
+      syncNameLabel(entry.wildRig);
+    }
 
     if (battle) {
       // Every one of your team's members can independently be attacking,
@@ -7340,7 +11980,7 @@ export function mount(el, ctx) {
 
     if (now - lastNetworkTickAt >= NETWORK_TICK_MS) {
       lastNetworkTickAt = now;
-      socket.sendPosition(local.x, local.z, local.facingAngle);
+      socket.sendPosition(local.x, local.z, local.facingAngle, local.currentFloor);
     }
 
     const width = canvas.clientWidth || canvas.getBoundingClientRect().width;
@@ -7349,6 +11989,10 @@ export function mount(el, ctx) {
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      // Kept in lockstep with the WebGL canvas's own size/aspect — see the
+      // cssRenderer's own construction comment above for why this second
+      // render layer needs to always match it exactly.
+      cssRenderer.setSize(width, height);
       lastWidth = width;
       lastHeight = height;
     }
@@ -7368,20 +12012,43 @@ export function mount(el, ctx) {
         camera.lookAt(battle.catchAnim.lookX, battle.catchAnim.lookY, battle.catchAnim.lookZ);
       } else if (battle.focus) {
         // Close behind your own Glophimon — see focusWildCameraOnRig,
-        // called every round by beginRound. Same raised, angled-down
-        // framing as the 3v3 battle's own focus camera.
-        camera.position.set(battle.focus.camX, TEAM_FOCUS_CAM_HEIGHT, battle.focus.camZ);
-        camera.lookAt(battle.focus.lookX, TEAM_FOCUS_CAM_LOOK_Y, battle.focus.lookZ);
+        // called every round by beginRound (and now also by
+        // resolvePlayerAttack/resolveWildAttack's own "attack scene"/
+        // "defend scene" re-aims). camY/lookY are read straight off
+        // battle.focus itself now (resolved per-call by
+        // resolveWildFocusParams from whichever Camera Designer slot was
+        // active) rather than the old shared TEAM_FOCUS_CAM_HEIGHT/LOOK_Y
+        // constants, so this render block never needs to know which of the
+        // 4 focus slots produced the current shot. advanceFocusOrbit runs
+        // first every frame so an active slot's own angle/heightRotateSpeed
+        // (if any) keeps advancing camX/camY/camZ/lookX/lookY/lookZ in
+        // place — see that function's own comment for why the advancing
+        // happens here rather than inside focusWildCameraOnRig itself.
+        advanceFocusOrbit(battle, battle.focus, dt);
+        camera.position.set(battle.focus.camX, battle.focus.camY, battle.focus.camZ);
+        camera.lookAt(battle.focus.lookX, battle.focus.lookY, battle.focus.lookZ);
       } else {
         // Fallback wide framing — not normally reached (beginRound always
         // sets a focus before the first frame renders), kept as a safe
         // default only. Drifts slowly like a satellite rather than sitting
         // at a fixed angle, same as teamBattle's own reset framing below.
-        battle.camAngle += RESET_CAM_ORBIT_SPEED * dt;
+        // See cameraOverrides.wild (the Camera Designer dev panel's "Save to
+        // Game" for the Wild Battle slot) — radius/elevation/rotation speed
+        // all fall back to the exact same hardcoded constants as before
+        // whenever nothing's been saved, so this is byte-identical to the
+        // original behavior until a player actually customizes it.
+        const wildCamOverride = cameraOverrides.wild;
+        const wildCamRadius = wildCamOverride?.radius ?? BATTLE_CAM_RADIUS;
+        const wildCamBaseElevation = wildCamOverride?.elevation ?? BATTLE_CAM_ELEVATION;
+        const wildCamAutoRotate = wildCamOverride?.autoRotate !== false;
+        const wildCamRotateSpeed = wildCamAutoRotate ? (wildCamOverride?.rotateSpeed ?? RESET_CAM_ORBIT_SPEED) : 0;
+        const wildCamElevationRotateSpeed = wildCamAutoRotate ? (wildCamOverride?.elevationRotateSpeed ?? 0) : 0;
+        battle.camAngle += wildCamRotateSpeed * dt;
+        const wildCamElevation = advanceOrbitElevation(battle, wildCamBaseElevation, wildCamElevationRotateSpeed, dt, MIN_ELEVATION, MAX_ELEVATION);
         camera.position.set(
-          battle.midX + Math.sin(battle.camAngle) * Math.cos(BATTLE_CAM_ELEVATION) * BATTLE_CAM_RADIUS,
-          PAN_TARGET_Y + Math.sin(BATTLE_CAM_ELEVATION) * BATTLE_CAM_RADIUS,
-          battle.midZ + Math.cos(battle.camAngle) * Math.cos(BATTLE_CAM_ELEVATION) * BATTLE_CAM_RADIUS,
+          battle.midX + Math.sin(battle.camAngle) * Math.cos(wildCamElevation) * wildCamRadius,
+          PAN_TARGET_Y + Math.sin(wildCamElevation) * wildCamRadius,
+          battle.midZ + Math.cos(battle.camAngle) * Math.cos(wildCamElevation) * wildCamRadius,
         );
         camera.lookAt(battle.midX, PAN_TARGET_Y, battle.midZ);
       }
@@ -7405,12 +12072,23 @@ export function mount(el, ctx) {
         // battle's camera override, centered on the player's own position
         // with a radius wide enough to fit both rows and both trainers.
         // Drifts slowly like a satellite instead of sitting at a fixed
-        // angle, so the "everyone visible" shot doesn't read as frozen.
-        teamBattle.camAngle += RESET_CAM_ORBIT_SPEED * dt;
+        // angle, so the "everyone visible" shot doesn't read as frozen. See
+        // cameraOverrides.team — same override/fallback shape as the wild
+        // battle above, just defaulting to TEAM_CAM_RADIUS instead of
+        // BATTLE_CAM_RADIUS (this battle type's own wider "everyone
+        // visible" framing).
+        const teamCamOverride = cameraOverrides.team;
+        const teamCamRadius = teamCamOverride?.radius ?? TEAM_CAM_RADIUS;
+        const teamCamBaseElevation = teamCamOverride?.elevation ?? BATTLE_CAM_ELEVATION;
+        const teamCamAutoRotate = teamCamOverride?.autoRotate !== false;
+        const teamCamRotateSpeed = teamCamAutoRotate ? (teamCamOverride?.rotateSpeed ?? RESET_CAM_ORBIT_SPEED) : 0;
+        const teamCamElevationRotateSpeed = teamCamAutoRotate ? (teamCamOverride?.elevationRotateSpeed ?? 0) : 0;
+        teamBattle.camAngle += teamCamRotateSpeed * dt;
+        const teamCamElevation = advanceOrbitElevation(teamBattle, teamCamBaseElevation, teamCamElevationRotateSpeed, dt, MIN_ELEVATION, MAX_ELEVATION);
         camera.position.set(
-          teamBattle.centerX + Math.sin(teamBattle.camAngle) * Math.cos(BATTLE_CAM_ELEVATION) * TEAM_CAM_RADIUS,
-          PAN_TARGET_Y + Math.sin(BATTLE_CAM_ELEVATION) * TEAM_CAM_RADIUS,
-          teamBattle.centerZ + Math.cos(teamBattle.camAngle) * Math.cos(BATTLE_CAM_ELEVATION) * TEAM_CAM_RADIUS,
+          teamBattle.centerX + Math.sin(teamBattle.camAngle) * Math.cos(teamCamElevation) * teamCamRadius,
+          PAN_TARGET_Y + Math.sin(teamCamElevation) * teamCamRadius,
+          teamBattle.centerZ + Math.cos(teamBattle.camAngle) * Math.cos(teamCamElevation) * teamCamRadius,
         );
         camera.lookAt(teamBattle.centerX, PAN_TARGET_Y, teamBattle.centerZ);
       }
@@ -7419,12 +12097,20 @@ export function mount(el, ctx) {
       // uses when it has no per-turn focus target (see battle.camAngle
       // above) — PVP has no "camera follows whoever's declaring" concept
       // since both sides act simultaneously, so this is the only framing
-      // it needs.
-      pvpBattle.camAngle += RESET_CAM_ORBIT_SPEED * dt;
+      // it needs. See cameraOverrides.pvp — same override/fallback shape as
+      // the wild/team battles above.
+      const pvpCamOverride = cameraOverrides.pvp;
+      const pvpCamRadius = pvpCamOverride?.radius ?? BATTLE_CAM_RADIUS;
+      const pvpCamBaseElevation = pvpCamOverride?.elevation ?? BATTLE_CAM_ELEVATION;
+      const pvpCamAutoRotate = pvpCamOverride?.autoRotate !== false;
+      const pvpCamRotateSpeed = pvpCamAutoRotate ? (pvpCamOverride?.rotateSpeed ?? RESET_CAM_ORBIT_SPEED) : 0;
+      const pvpCamElevationRotateSpeed = pvpCamAutoRotate ? (pvpCamOverride?.elevationRotateSpeed ?? 0) : 0;
+      pvpBattle.camAngle += pvpCamRotateSpeed * dt;
+      const pvpCamElevation = advanceOrbitElevation(pvpBattle, pvpCamBaseElevation, pvpCamElevationRotateSpeed, dt, MIN_ELEVATION, MAX_ELEVATION);
       camera.position.set(
-        pvpBattle.midX + Math.sin(pvpBattle.camAngle) * Math.cos(BATTLE_CAM_ELEVATION) * BATTLE_CAM_RADIUS,
-        PAN_TARGET_Y + Math.sin(BATTLE_CAM_ELEVATION) * BATTLE_CAM_RADIUS,
-        pvpBattle.midZ + Math.cos(pvpBattle.camAngle) * Math.cos(BATTLE_CAM_ELEVATION) * BATTLE_CAM_RADIUS,
+        pvpBattle.midX + Math.sin(pvpBattle.camAngle) * Math.cos(pvpCamElevation) * pvpCamRadius,
+        PAN_TARGET_Y + Math.sin(pvpCamElevation) * pvpCamRadius,
+        pvpBattle.midZ + Math.cos(pvpBattle.camAngle) * Math.cos(pvpCamElevation) * pvpCamRadius,
       );
       camera.lookAt(pvpBattle.midX, PAN_TARGET_Y, pvpBattle.midZ);
       updateTownWallFade(dt, pvpBattle.centerX, PAN_TARGET_Y, pvpBattle.centerZ);
@@ -7432,22 +12118,59 @@ export function mount(el, ctx) {
       const followEase = Math.min(1, CAMERA_FOLLOW_LERP_SPEED * dt);
       followX += (local.x - followX) * followEase;
       followZ += (local.z - followZ) * followEase;
+      // Eases toward whatever floor's Y the player is currently on, same
+      // rate as followX/followZ above — 0 on the ground floor, so
+      // followY + PAN_TARGET_Y === PAN_TARGET_Y and every line below is
+      // byte-identical to this code's pre-tower behavior. PAN_TARGET_Y
+      // itself stays a fixed "look slightly above the ground" fine-tune;
+      // followY is purely the floor's own additive offset on top of it.
+      followY += (local.y - followY) * followEase;
       camera.position.set(
         followX + Math.sin(camAngle) * Math.cos(camElevation) * zoomRadius,
-        PAN_TARGET_Y + Math.sin(camElevation) * zoomRadius,
+        followY + PAN_TARGET_Y + Math.sin(camElevation) * zoomRadius,
         followZ + Math.cos(camAngle) * Math.cos(camElevation) * zoomRadius,
       );
-      camera.lookAt(followX, PAN_TARGET_Y, followZ);
+      camera.lookAt(followX, followY + PAN_TARGET_Y, followZ);
       updateTownWallFade(dt);
     }
 
     scaleNameLabel(local.rig, camera, lastHeight || canvas.height, true);
-    scaleNameLabel(rodzRig, camera, lastHeight || canvas.height, Math.hypot(local.x - RODZ_X, local.z - RODZ_Z) <= LABEL_VISIBLE_DISTANCE);
-    scaleNameLabel(karraRig, camera, lastHeight || canvas.height, Math.hypot(local.x - KARRA_X, local.z - KARRA_Z) <= LABEL_VISIBLE_DISTANCE);
-    scaleNameLabel(jaredRig, camera, lastHeight || canvas.height, Math.hypot(local.x - JARED_X, local.z - JARED_Z) <= LABEL_VISIBLE_DISTANCE);
-    scaleNameLabel(bossRickRig, camera, lastHeight || canvas.height, Math.hypot(local.x - BOSS_RICK_X, local.z - BOSS_RICK_Z) <= LABEL_VISIBLE_DISTANCE);
+    // Every stationary NPC/peer name label (and Rodz's own shout bubble,
+    // Jared's shop sign — see updateAreaLabels) is gated on BOTH being in
+    // the same walled area (getAreaKey) AND, for Town specifically, the
+    // same floor — without the area half of this, standing right outside
+    // e.g. Karirs Field's wall (a totally different building, but still
+    // within LABEL_VISIBLE_DISTANCE of Karra) still showed her label
+    // straight through the wall, since every label/sign sprite in this file
+    // is depthTest:false (see getAreaKey's own comment) and so is never
+    // occluded by wall/floor geometry the normal way. Rodz/Karra/Jared/
+    // Boss Rick/Stockfish all stand at ground level (y=0 — see their own
+    // group.position.set calls above); Usher alone stands up on the cinema
+    // floor itself (see cinemaUsherRig's own floorY placement in buildTown),
+    // hence the opposite floor check for just that one.
+    const localAreaKey = getAreaKey(local.x, local.z);
+    const inTownGroundFloor = localAreaKey === "town" && local.currentFloor === 0;
+    scaleNameLabel(rodzRig, camera, lastHeight || canvas.height, inTownGroundFloor && Math.hypot(local.x - RODZ_X, local.z - RODZ_Z) <= LABEL_VISIBLE_DISTANCE);
+    scaleNameLabel(karraRig, camera, lastHeight || canvas.height, localAreaKey === "karirs" && Math.hypot(local.x - KARRA_X, local.z - KARRA_Z) <= LABEL_VISIBLE_DISTANCE);
+    scaleNameLabel(jaredRig, camera, lastHeight || canvas.height, inTownGroundFloor && Math.hypot(local.x - JARED_X, local.z - JARED_Z) <= LABEL_VISIBLE_DISTANCE);
+    scaleNameLabel(bossRickRig, camera, lastHeight || canvas.height, localAreaKey === "luba" && Math.hypot(local.x - BOSS_RICK_X, local.z - BOSS_RICK_Z) <= LABEL_VISIBLE_DISTANCE);
+    scaleNameLabel(usherRig, camera, lastHeight || canvas.height, localAreaKey === "town" && local.currentFloor === CINEMA_SCREEN_FLOOR_INDEX && Math.hypot(local.x - USHER_X, local.z - USHER_Z) <= LABEL_VISIBLE_DISTANCE);
+    scaleNameLabel(stockfishRig, camera, lastHeight || canvas.height, localAreaKey === "tambayan" && Math.hypot(local.x - STOCKFISH_X, local.z - STOCKFISH_Z) <= LABEL_VISIBLE_DISTANCE);
     for (const peer of peers.values()) {
-      scaleNameLabel(peer.rig, camera, lastHeight || canvas.height, Math.hypot(local.x - peer.x, local.z - peer.z) <= LABEL_VISIBLE_DISTANCE);
+      // Same area+floor guard as updateChatBubble's own sameArea/entityFloor
+      // checks just above — name labels are already a child of
+      // peer.rig.group (see buildBlockyCharacter's own group.add(nameLabel)),
+      // so setPeerHidden's group.visible=false during the per-frame peer
+      // loop normally cascades to hide this too, but that's an indirect
+      // side effect of the battle-dome/floor hide logic, not something
+      // scaleNameLabel itself checks — asserted explicitly here too, same
+      // defensive belt-and-braces reasoning as the rest of this frame's own
+      // visibility checks.
+      const peerVisible =
+        getAreaKey(peer.x, peer.z) === localAreaKey &&
+        peer.floor === local.currentFloor &&
+        Math.hypot(local.x - peer.x, local.z - peer.z) <= LABEL_VISIBLE_DISTANCE;
+      scaleNameLabel(peer.rig, camera, lastHeight || canvas.height, peerVisible);
     }
     if (battle) {
       for (const member of battle.playerTeam) scaleNameLabel(member.rig, camera, lastHeight || canvas.height);
@@ -7461,9 +12184,67 @@ export function mount(el, ctx) {
       scaleNameLabel(pvpBattle.selfRig, camera, lastHeight || canvas.height);
       scaleNameLabel(pvpBattle.opponentRig, camera, lastHeight || canvas.height);
     }
+    // Spectated battles aren't part of the if/else chain above — unlike
+    // battle/teamBattle/pvpBattle (mutually exclusive, at most one of MY
+    // OWN fights runs at a time), this client can simultaneously be
+    // spectating any number of OTHER players' wild battles, including one
+    // while it's off fighting its own.
+    for (const entry of peerBattles.values()) {
+      for (const memberRig of entry.memberRigs) scaleNameLabel(memberRig.rig, camera, lastHeight || canvas.height);
+      scaleNameLabel(entry.wildRig, camera, lastHeight || canvas.height);
+    }
 
     updateSkyFollowCamera(skyDome, sunSprite, camera);
     renderer.render(scene, camera);
+
+    // Cinema screen visibility — mirrors applyGlophicsFloorCutaway's own
+    // "opaque once index <= currentFloor" rule (index > currentFloor is the
+    // transparent/hidden case there) rather than hardcoding
+    // `currentFloor === 1`, so this stays correct without changes if a
+    // future floor 3 is ever added above floor 2. Also hidden during any of
+    // the three battle types, which overlay this same canvas/camera with
+    // their own scene content — the CSS3D layer would otherwise float on
+    // top of a battle scene nonsensically. "Hidden" means actually not
+    // rendering/showing the DOM layer at all (style.display = "none", and
+    // the .render() call below is skipped outright) — but display:none
+    // alone was found to NOT reliably stop YouTube's own player from
+    // continuing to decode/play in the background inside this specific
+    // webview (flagged as a real resource drain — the video would keep
+    // running the entire time this game panel is mounted, not just while
+    // on floor 2), so an explicit pauseVideo/playVideo postMessage command
+    // (see sendCinemaScreenCommand) is sent at the same transition, the
+    // actual documented way to control a YouTube embed's playback state
+    // rather than relying on a browser DOM-visibility side effect for it.
+    // Also requires isInsideGlophicsFootprint — currentFloor alone isn't
+    // enough. The screen is a CSS3DObject (see cssRenderer/cssScene above),
+    // which never respects the WebGL depth buffer, so if currentFloor ever
+    // stayed at CINEMA_SCREEN_FLOOR_INDEX while the player's real X/Z was
+    // outside the tower (e.g. a battle's own end-of-fight relocation not
+    // reconciling floor state the way the stairs' own goToGlophicsFloor
+    // always does), the screen would show straight through the back wall
+    // from outside — no geometry could ever occlude it either way. Same
+    // defensive belt-and-braces reasoning as updateGlophicsExteriorCutaway's
+    // own identical footprint check just above.
+    const cinemaScreenVisible =
+      local.currentFloor >= CINEMA_SCREEN_FLOOR_INDEX &&
+      isInsideGlophicsFootprint(local.x, local.z) &&
+      !battle &&
+      !teamBattle &&
+      !pvpBattle;
+    if (cinemaScreenVisible !== cinemaScreenShown) {
+      cinemaScreenShown = cinemaScreenVisible;
+      cssRenderer.domElement.style.display = cinemaScreenShown ? "" : "none";
+      // Only meaningful for an actual YouTube embed — since the
+      // projectionist can now point this at any http(s) URL (see
+      // USHER_NAME's own section), a non-YouTube page has no obligation to
+      // implement (or even ignore harmlessly) this postMessage protocol, so
+      // it's simply never sent for one.
+      if (isYoutubeEmbedUrl(cinemaScreenUrl)) {
+        sendCinemaScreenCommand(cinemaScreen.iframe, cinemaScreenShown ? "playVideo" : "pauseVideo");
+      }
+    }
+    if (cinemaScreenShown) cssRenderer.render(cssScene, camera);
+
     if (!disposed) rafId = requestAnimationFrame(frame);
   }
   rafId = requestAnimationFrame(frame);
@@ -7475,6 +12256,8 @@ export function mount(el, ctx) {
     if (teamBattle) endTeamBattle();
     if (pvpBattle) endPvpBattle();
     closeGlophimonStatsModal(); // disposes the modal's own preview rig/RAF loop, if one was open
+    hideCharMovementsModal(); // same reasoning — disposes its own preview rig/RAF loop, if one was open
+    hidePoseDesignerModal(); // same reasoning again
     socket.dispose();
     canvas.removeEventListener("wheel", onWheel);
     canvas.removeEventListener("mousedown", onMouseDown);
@@ -7490,13 +12273,28 @@ export function mount(el, ctx) {
     disposeRig(karraRig);
     disposeRig(jaredRig);
     disposeRig(bossRickRig);
+    disposeRig(usherRig);
+    disposeRig(stockfishRig);
     karirsBoard.texture.dispose();
     karirsBoard.sprite.material.dispose();
     hideRodzShoutBubble();
     if (local.chatBubble) disposeChatBubble(local.chatBubble);
+    // Before removePeer below — teardownSpectatorBattleEntry does its own
+    // defensive peers.get() lookup, but disposing each spectated battle's
+    // own dome/rigs while the peer it belongs to still exists is cleaner
+    // than leaving it for whatever order Map iteration below happens to hit.
+    for (const userId of [...peerBattles.keys()]) teardownSpectatorBattleEntry(userId);
     for (const userId of [...peers.keys()]) removePeer(userId);
     for (const id of [...wildSpawns.keys()]) removeWildSpawn(id);
     renderer.dispose();
+    // Blank the iframe's own src BEFORE removing it — removal alone doesn't
+    // reliably stop an already-loaded YouTube player from continuing to
+    // play audio in some browsers, but clearing src first does (this is the
+    // important part of this cleanup, not just tidiness — a background
+    // Glophimon tab should never keep playing music after the player has
+    // left it entirely).
+    cinemaScreen.iframe.src = "";
+    cssRenderer.domElement.remove();
   };
 
   return {
@@ -7524,6 +12322,329 @@ export function unmount(el) {
   }
 }
 
+// The Pose Designer dev tool's own controllable joints. "axis" x/y/z means
+// rig[part].rotation.x/y/z; posY means rig[part].position.y (only ever
+// "visual", for the whole-body crouch/jump height every real pose already
+// uses that same way).
+//
+// Lean (forward/back and sideways) and head movement are rotations of
+// "visual"/"head" around their own local origin — pivoting the whole body
+// from the feet, or the whole head from the neck — not a position offset.
+// The very first version of "Body Lean" moved visual.position.z instead
+// (a straight-line shift, same trick applyAttackPose's own lunge uses),
+// which read as nothing happening: a translation along the camera's own
+// view axis barely changes the silhouette, unlike an actual tilt.
+const POSE_DESIGNER_PARTS = [
+  // ±3.3 rad (~189°) rather than stopping at ±2.2 (~126°, short of even
+  // horizontal-behind) — a hanging arm is 0, so it takes a full ±π (~3.14)
+  // to swing all the way up to pointing straight overhead; the extra bit
+  // past π is just a little headroom past dead-vertical, confirmed
+  // visually rather than assumed.
+  { key: "leftArmX", label: "L Arm Swing", part: "leftArm", axis: "x", min: -3.3, max: 3.3, step: 0.05 },
+  { key: "leftArmZ", label: "L Arm Spread", part: "leftArm", axis: "z", min: -1.6, max: 1.6, step: 0.05 },
+  { key: "rightArmX", label: "R Arm Swing", part: "rightArm", axis: "x", min: -3.3, max: 3.3, step: 0.05 },
+  { key: "rightArmZ", label: "R Arm Spread", part: "rightArm", axis: "z", min: -1.6, max: 1.6, step: 0.05 },
+  { key: "leftLegX", label: "L Leg Swing", part: "leftLeg", axis: "x", min: -1.6, max: 1.6, step: 0.05 },
+  { key: "leftLegZ", label: "L Leg Spread", part: "leftLeg", axis: "z", min: -1.2, max: 1.2, step: 0.05 },
+  { key: "rightLegX", label: "R Leg Swing", part: "rightLeg", axis: "x", min: -1.6, max: 1.6, step: 0.05 },
+  { key: "rightLegZ", label: "R Leg Spread", part: "rightLeg", axis: "z", min: -1.2, max: 1.2, step: 0.05 },
+  { key: "bodyY", label: "Body Height", part: "visual", axis: "posY", min: -0.3, max: 0.5, step: 0.01 },
+  // Actually moving the whole body (a straight-line step/lunge), distinct
+  // from the Lean sliders just below (which tilt/pivot from the feet in
+  // place) — the two combine for things a lean alone can't do, e.g. a real
+  // sidestep or a forward lunge that also carries the feet with it.
+  { key: "bodyMoveForward", label: "Move Forward/Back", part: "visual", axis: "posZ", min: -0.6, max: 0.6, step: 0.02 },
+  { key: "bodyMoveSide", label: "Move Sideways", part: "visual", axis: "posX", min: -0.6, max: 0.6, step: 0.02 },
+  { key: "bodyLeanForward", label: "Lean Forward/Back", part: "visual", axis: "x", min: -0.6, max: 0.6, step: 0.02 },
+  { key: "bodyLeanSide", label: "Lean Sideways", part: "visual", axis: "z", min: -0.6, max: 0.6, step: 0.02 },
+  // Yaw — twisting the whole body (torso, arms, legs together) around the
+  // vertical axis, independent of both Lean (which tilts it, rotation.x/z)
+  // and the character's actual movement-facing (group.rotation.y, driven by
+  // input direction, untouched by anything in this designer). Full ±π so
+  // any orientation is reachable directly by the slider without wrapping.
+  { key: "bodyRotation", label: "Body Rotation", part: "visual", axis: "y", min: -3.14, max: 3.14, step: 0.02 },
+  { key: "headTurn", label: "Head Turn", part: "head", axis: "y", min: -1.0, max: 1.0, step: 0.02 },
+  { key: "headNod", label: "Head Nod", part: "head", axis: "x", min: -0.6, max: 0.6, step: 0.02 },
+  { key: "headTilt", label: "Head Tilt", part: "head", axis: "z", min: -0.6, max: 0.6, step: 0.02 },
+];
+
+function poseDesignerDefaultValues() {
+  const values = {};
+  for (const spec of POSE_DESIGNER_PARTS) values[spec.key] = 0;
+  return values;
+}
+
+// Writes one full set of Pose Designer values onto a rig — shared by the
+// live (slider-driven) preview and keyframe-playback preview below, so the
+// two can never render a pose differently from how it was authored.
+function applyPoseDesignerValues(rig, values) {
+  for (const spec of POSE_DESIGNER_PARTS) {
+    const obj = rig[spec.part];
+    const v = values[spec.key] ?? 0;
+    if (spec.axis === "x") obj.rotation.x = v;
+    else if (spec.axis === "y") obj.rotation.y = v;
+    else if (spec.axis === "z") obj.rotation.z = v;
+    else if (spec.axis === "posX") obj.position.x = v;
+    else if (spec.axis === "posY") obj.position.y = v;
+    else if (spec.axis === "posZ") obj.position.z = v;
+  }
+}
+
+// Blends between consecutive keyframes and applies the result to rig —
+// elapsedMs is caller-tracked (not stored here), so this same function
+// drives both the Pose Designer's own preview (see poseDesignerFrame) and,
+// via tryPlayOverride below, a saved override's real, permanent use in the
+// live game — the two can never render a saved pose differently. Returns
+// false (and touches nothing) for an empty/missing keyframe list, so
+// callers can fall through to the built-in procedural pose.
+function playPoseKeyframes(rig, keyframes, elapsedMs) {
+  if (!keyframes || keyframes.length === 0) return false;
+  const totalMs = keyframes.reduce((sum, kf) => sum + Math.max(1, kf.transitionMs), 0);
+  const t = elapsedMs % totalMs;
+  let prevValues = keyframes[keyframes.length - 1].values; // wraps: last -> first
+  let acc = 0;
+  let segmentIdx = keyframes.length - 1;
+  for (let i = 0; i < keyframes.length; i++) {
+    const dur = Math.max(1, keyframes[i].transitionMs);
+    if (t < acc + dur) {
+      segmentIdx = i;
+      break;
+    }
+    acc += dur;
+    prevValues = keyframes[i].values;
+  }
+  const dur = Math.max(1, keyframes[segmentIdx].transitionMs);
+  const localT = Math.min(1, (t - acc) / dur);
+  const toValues = keyframes[segmentIdx].values;
+  const blended = {};
+  for (const spec of POSE_DESIGNER_PARTS) {
+    const a = prevValues[spec.key] ?? 0;
+    const b = toValues[spec.key] ?? 0;
+    blended[spec.key] = a + (b - a) * localT;
+  }
+  applyPoseDesignerValues(rig, blended);
+  return true;
+}
+
+// The inverse of applyPoseDesignerValues — reads whatever a rig's joints
+// currently hold back out into POSE_DESIGNER_PARTS' own {key: value} shape.
+// Only ever used by sampleBuiltinPoseKeyframes below, to snapshot a
+// throwaway rig after running a *real* pose function on it, rather than
+// hand-guessing values that would inevitably drift from the real thing.
+function readPoseDesignerValues(rig) {
+  const values = {};
+  for (const spec of POSE_DESIGNER_PARTS) {
+    const obj = rig[spec.part];
+    if (spec.axis === "x") values[spec.key] = obj.rotation.x;
+    else if (spec.axis === "y") values[spec.key] = obj.rotation.y;
+    else if (spec.axis === "z") values[spec.key] = obj.rotation.z;
+    else if (spec.axis === "posX") values[spec.key] = obj.position.x;
+    else if (spec.axis === "posY") values[spec.key] = obj.position.y;
+    else if (spec.axis === "posZ") values[spec.key] = obj.position.z;
+  }
+  return values;
+}
+
+// "Recreate" one of the 6 built-in procedural poses as an editable keyframe
+// sequence, by actually *running* the real pose function(s) on a scratch
+// rig (never added to any scene) and reading back the result — a faithful
+// sample, not a hand-guessed approximation that could silently drift from
+// what the built-in pose really does. Lets the Pose Designer offer "start
+// from the real thing" instead of only ever a blank slate for a slot with
+// no custom override saved yet.
+//
+// Idle/Ready settle toward a fixed target via easeTo (see character.js) —
+// a huge dt (100) makes easeTo's own min(1, rate*dt) clamp jump straight to
+// that target in one call, so a single keyframe holding it is an exact
+// sample, not an approximation. Walk is a genuine phase-driven cycle with
+// no fixed duration of its own, so it's sampled at 8 evenly-spaced points
+// around one full phase revolution (with walkBlend pinned to 1 — fully
+// blended into the cycle, not still easing in from idle) and looped over an
+// arbitrarily chosen 800ms — the original real-time speed doesn't carry
+// over, but the shape of the gait does, since keyframe playback is its own
+// separate system from here on. Attack/Defend/Cast already have a real
+// fixed envelope duration (see ATTACK_ANIM_MS etc.), so those are sampled
+// directly across their own actual timeline.
+function sampleBuiltinPoseKeyframes(poseName) {
+  const scratchRig = buildBlockyCharacter({ head: "#ffffff", body: "#ffffff", arm: "#ffffff", leg: "#ffffff" }, null);
+  let keyframes = [];
+  if (poseName === "idle") {
+    applyIdlePose(scratchRig, 100);
+    keyframes = [{ values: readPoseDesignerValues(scratchRig), transitionMs: 500 }];
+  } else if (poseName === "ready") {
+    applyReadyPose(scratchRig, 100);
+    keyframes = [{ values: readPoseDesignerValues(scratchRig), transitionMs: 500 }];
+  } else if (poseName === "walk") {
+    const STEPS = 8;
+    const CYCLE_MS = 800;
+    for (let i = 0; i < STEPS; i++) {
+      scratchRig.walkPhase = (i / STEPS) * Math.PI * 2;
+      scratchRig.walkBlend = 1;
+      updateWalkCycle(scratchRig, 0, 1); // dt=0 — samples this exact phase, advances nothing
+      keyframes.push({ values: readPoseDesignerValues(scratchRig), transitionMs: CYCLE_MS / STEPS });
+    }
+  } else {
+    const fn = poseName === "attack" ? applyAttackPose : poseName === "cast" ? applyCastPose : applyDefendPose;
+    const totalMs = poseName === "attack" ? ATTACK_ANIM_MS : poseName === "cast" ? CAST_ANIM_MS : DEFEND_ANIM_MS;
+    const STEPS = 6;
+    for (let i = 0; i <= STEPS; i++) {
+      fn(scratchRig, (i / STEPS) * totalMs, totalMs);
+      keyframes.push({ values: readPoseDesignerValues(scratchRig), transitionMs: Math.max(1, Math.round(totalMs / STEPS)) });
+    }
+  }
+  disposeRig(scratchRig);
+  return keyframes;
+}
+
+// Camera Designer — every slot the dev panel offers, each tagged with which
+// of the 2 shapes/UIs it uses (see CAMERA_DESIGNER_FIELDS/CAMERA_FOCUS_FIELDS
+// below and mount()'s own slot-select "change" handler, which swaps the
+// rendered sliders based on this): kind:"orbit" is the original reset/orbit
+// camera (radius/pitch/starting angle/auto-rotate/rotation speed) — "wild"
+// here stays exactly as it always was, unchanged in meaning/id, so an
+// already-saved override isn't orphaned. kind:"focus" is new — one of the
+// wild battle's own 4 independently-tunable focus-camera re-aim moments
+// (see focusWildCameraOnRig/resolveWildFocusParams), never the 3v3 team
+// battle's near-identical (and deliberately untouched) focusCameraOnMember.
+// Enforced again server-side (see the api's own ORBIT_CAMERA_SLOTS/
+// FOCUS_CAMERA_SLOTS) so a stray request can't wedge in an arbitrary key.
+const CAMERA_OVERRIDE_SLOTS = [
+  { id: "wild", label: "Wild: Reset / Orbit", kind: "orbit" },
+  { id: "team", label: "Team Battle (3v3)", kind: "orbit" },
+  { id: "pvp", label: "PvP Battle", kind: "orbit" },
+  { id: "wild_decide_defend", label: "Wild: Decide Defend", kind: "focus" },
+  { id: "wild_declare", label: "Wild: About to Attack", kind: "focus" },
+  { id: "wild_attack_scene", label: "Wild: Attack Scene", kind: "focus" },
+  { id: "wild_defend_scene", label: "Wild: Defend Scene", kind: "focus" },
+];
+
+// The reset/orbit camera's own tunable shape (radius, pitch, starting
+// angle, whether it auto-rotates, and how fast) for every kind:"orbit" slot
+// above. Explicitly NOT the focus camera (see CAMERA_FOCUS_FIELDS below for
+// that); this only ever touches the wide "nothing focused" fallback framing
+// every battle type falls back to. min/max mirror the same real bounds the
+// per-frame battle code already clamps elevation to (MIN_ELEVATION/
+// MAX_ELEVATION) so a saved override can never produce an orientation the
+// game wouldn't otherwise allow.
+const CAMERA_DESIGNER_FIELDS = [
+  { key: "radius", label: "Distance", min: 2, max: 20, step: 0.5 },
+  { key: "elevation", label: "Pitch", min: MIN_ELEVATION, max: MAX_ELEVATION, step: 0.01 },
+  { key: "angle", label: "Starting Angle", min: 0, max: Math.PI * 2, step: 0.01 },
+  { key: "rotateSpeed", label: "Rotation Speed (Y axis)", min: 0, max: 1.0, step: 0.01 },
+  // Y-axis rotation (rotateSpeed above) is a full 360° orbit — it wraps for
+  // free via sin/cos periodicity, so it can spin forever in one direction.
+  // Pitch can't do that without eventually flipping the camera upside
+  // down, so this is a bounce between MIN_ELEVATION/MAX_ELEVATION instead
+  // of a spin (see advanceOrbitElevation) — a slow crane-up-crane-down
+  // sweep rather than a loop. 0 (the default) means "don't move," same
+  // "byte-identical until customized" contract every other field here
+  // already follows.
+  { key: "elevationRotateSpeed", label: "Rotation Speed (X axis)", min: 0, max: 0.5, step: 0.01 },
+];
+
+// The wild battle's own focus camera's tunable shape, for every
+// kind:"focus" slot above — see TEAM_FOCUS_CAM_BEHIND/HEIGHT/LOOK_Y/
+// LOOK_AHEAD for the shared constants these ranges are centered on, and
+// resolveWildFocusParams for how a saved override here actually gets read
+// at battle time. angle/rotateSpeed/heightRotateSpeed (new) give a focus
+// shot the same orbit-around-the-subject capability the 3 orbit slots
+// already have — angle is a static "start here" offset from today's
+// default "directly behind" placement (0 reproduces that exact placement —
+// see computeFocusCameraFrame's own theta parameter), rotateSpeed spins it
+// around the anchor rig on the Y axis (free-spinning, no bounds needed —
+// same reasoning as the orbit slots' own rotateSpeed), and
+// heightRotateSpeed bounces the camera's own height between this field's
+// own min/max (FOCUS_CAM_HEIGHT_MIN/MAX) the same way the orbit slots'
+// elevationRotateSpeed bounces pitch between MIN_ELEVATION/MAX_ELEVATION
+// (see advanceOrbitElevation, generalized to take explicit bounds so both
+// use the one function). autoRotate gates all of it, same as the orbit
+// slots — see the slot-select "change" handler, which used to force-hide
+// that whole control for a focus slot and no longer does.
+const CAMERA_FOCUS_FIELDS = [
+  { key: "behind", label: "Distance Behind", min: 0.3, max: 3, step: 0.05 },
+  { key: "height", label: "Height", min: FOCUS_CAM_HEIGHT_MIN, max: FOCUS_CAM_HEIGHT_MAX, step: 0.05 },
+  { key: "lookY", label: "Look-At Height", min: -1, max: 2, step: 0.05 },
+  { key: "lookAhead", label: "Look-Ahead Distance", min: 0, max: 8, step: 0.1 },
+  { key: "angle", label: "Orbit Angle", min: 0, max: Math.PI * 2, step: 0.01 },
+  { key: "rotateSpeed", label: "Rotation Speed (Y axis)", min: 0, max: 1.0, step: 0.01 },
+  { key: "heightRotateSpeed", label: "Rotation Speed (Height)", min: 0, max: 0.5, step: 0.01 },
+];
+
+// Defaults reproduce TODAY's hardcoded behavior exactly — a player who never
+// opens the Camera Designer sees zero change, since a slot with no saved
+// override falls back to these same constants either way.
+function cameraDesignerDefaultValues(slotId) {
+  const slot = CAMERA_OVERRIDE_SLOTS.find((s) => s.id === slotId);
+  if (slot && slot.kind === "focus") {
+    // All 4 focus slots share the exact same default shape — the shared
+    // TEAM_FOCUS_CAM_* constants every one of them falls back to today,
+    // before any of them has ever been individually customized.
+    // rotateSpeed/heightRotateSpeed default to 0 ("off") rather than the
+    // orbit slots' own RESET_CAM_ORBIT_SPEED-and-on default — a focus shot
+    // never rotated at all before this, so "off until customized" is the
+    // byte-identical baseline here, same principle as the orbit slots' own
+    // elevationRotateSpeed defaulting to 0.
+    return {
+      behind: TEAM_FOCUS_CAM_BEHIND,
+      height: TEAM_FOCUS_CAM_HEIGHT,
+      lookY: TEAM_FOCUS_CAM_LOOK_Y,
+      lookAhead: TEAM_FOCUS_CAM_LOOK_AHEAD,
+      angle: 0,
+      autoRotate: true,
+      rotateSpeed: 0,
+      heightRotateSpeed: 0,
+    };
+  }
+  // kind:"orbit" (or an unrecognized/blank slotId, which the slot-select's
+  // own "(pick a battle type below)" placeholder can produce) — only the
+  // team (3v3) slot differs among these, since that battle type already
+  // used its own wider TEAM_CAM_RADIUS instead of BATTLE_CAM_RADIUS.
+  return {
+    radius: slotId === "team" ? TEAM_CAM_RADIUS : BATTLE_CAM_RADIUS,
+    elevation: BATTLE_CAM_ELEVATION,
+    angle: 0,
+    autoRotate: true,
+    rotateSpeed: RESET_CAM_ORBIT_SPEED,
+    elevationRotateSpeed: 0, // off by default — today's exact behavior (a fixed pitch) until a player turns it up
+  };
+}
+
+// Y-axis (heading) counterpart is a plain `angle += speed * dt` — it never
+// needs bounds-checking since sin/cos already wrap it for free every full
+// turn. Pitch has a real valid range (MIN_ELEVATION/MAX_ELEVATION for the 3
+// orbit slots) a camera can't cross without flipping upside down, so this
+// bounces back and forth between explicit `min`/`max` bounds instead of a
+// free spin — `state` is the battle/teamBattle/pvpBattle object itself (or,
+// for a focus slot's own height-bounce, that slot's own
+// battle.focusOrbitState[slotId] entry — see advanceFocusOrbit), so
+// camElevation/camElevationDir persist across frames the same way
+// state.camAngle already does. `min`/`max` are explicit parameters (rather
+// than this function hardcoding MIN_ELEVATION/MAX_ELEVATION itself) so the
+// exact same bounce logic can also drive a focus shot's height bounce
+// between FOCUS_CAM_HEIGHT_MIN/MAX, instead of a second near-duplicate copy
+// of this function existing just to use different bounds. Snaps back to
+// the slider's own static `baseElevation` the instant rotation is turned
+// off (speed <= 0), so disabling it doesn't leave the camera stranded
+// wherever the bounce last left it.
+function advanceOrbitElevation(state, baseElevation, rotateSpeed, dt, min, max) {
+  if (rotateSpeed <= 0) {
+    state.camElevation = baseElevation;
+    state.camElevationDir = 1;
+    return state.camElevation;
+  }
+  if (state.camElevation == null) state.camElevation = baseElevation;
+  if (!state.camElevationDir) state.camElevationDir = 1;
+  state.camElevation += state.camElevationDir * rotateSpeed * dt;
+  if (state.camElevation >= max) {
+    state.camElevation = max;
+    state.camElevationDir = -1;
+  } else if (state.camElevation <= min) {
+    state.camElevation = min;
+    state.camElevationDir = 1;
+  }
+  return state.camElevation;
+}
+
 const PREVIEW_TARGET_Y = 0.9; // roughly chest height, so the orbit centers the character in frame rather than its feet
 const PREVIEW_MIN_RADIUS = 1.4;
 const PREVIEW_MAX_RADIUS = 5;
@@ -7531,6 +12652,17 @@ const PREVIEW_DEFAULT_RADIUS = 2.4;
 const PREVIEW_DEFAULT_ELEVATION = 0.35;
 const PREVIEW_MIN_ELEVATION = -0.4;
 const PREVIEW_MAX_ELEVATION = 1.3;
+// Camera Designer only (options.battleScenePreview below) — a "wild" rig
+// and a "your side" rig placed symmetrically around the origin so the
+// origin itself is their midpoint, matching how the real per-battle reset
+// camera always orbits/looks at a battle's own centerX/centerZ without
+// this preview needing to invent a separate center concept of its own.
+// Distances are shorter than the real BATTLE_WILD_OFFSET/
+// BATTLE_PLAYER_MON_OFFSET (this 320x240 preview canvas is much smaller
+// than the real battle viewport) — picked purely so both rigs read clearly
+// at the Camera Designer's own default radius/elevation.
+const PREVIEW_BATTLE_WILD_Z = 1.6;
+const PREVIEW_BATTLE_PLAYER_Z = -1.2;
 
 // Character-creation preview — a small standalone rotate-to-inspect view of
 // the current color choices, live-updated as the player edits them (see
@@ -7540,7 +12672,7 @@ const PREVIEW_MAX_ELEVATION = 1.3;
 // Manual toggle, unlike the real world view, since orbiting is this view's
 // entire purpose) so every angle can be checked before committing (colors
 // can never be changed again once created — see the game's own plan).
-export function mountPreview(el, initialColors) {
+export function mountPreview(el, initialColors, options = {}) {
   el.innerHTML = "";
   const canvas = document.createElement("canvas");
   canvas.width = 320;
@@ -7553,8 +12685,52 @@ export function mountPreview(el, initialColors) {
   el.appendChild(canvas);
 
   const { renderer, scene, camera } = createScene(canvas);
-  const rig = buildBlockyCharacter(initialColors, null);
-  scene.add(rig.group);
+  // Camera Designer only (options.battleScenePreview) — builds a tiny
+  // randomized "battle" (a wild-side rig + a your-side rig, see
+  // PREVIEW_BATTLE_WILD_Z/PREVIEW_BATTLE_PLAYER_Z above) instead of the
+  // single centered character every other caller (character creation, the
+  // starter picker, Character Movements, the Pose Designer) still gets —
+  // species are random since this is purely a stand-in for "something
+  // battle-shaped to frame the camera against," not a real fight. `rig`
+  // stays a single real rig (the "your side" one) so setColors/setPose/
+  // setCustomPose/showFrontMarker below keep working exactly as before for
+  // every other caller; `extraRigs` holds anything beyond that one, given
+  // the same idle treatment each frame and disposed the same way.
+  const extraRigs = [];
+  let rig;
+  if (options.battleScenePreview) {
+    const wildSpecies = pickRandomSpeciesByRarity();
+    const wildRig = buildBlockyCharacter(
+      { head: wildSpecies.head_color, body: wildSpecies.body_color, arm: wildSpecies.arm_color, leg: wildSpecies.leg_color },
+      wildSpecies.name,
+    );
+    wildRig.group.position.set(0, 0, PREVIEW_BATTLE_WILD_Z);
+    wildRig.group.rotation.y = Math.PI; // facing back toward the player side — same convention startWildBattle's own wildRig uses
+    scene.add(wildRig.group);
+    extraRigs.push(wildRig);
+
+    const playerSpecies = pickRandomSpeciesByRarity();
+    rig = buildBlockyCharacter(
+      { head: playerSpecies.head_color, body: playerSpecies.body_color, arm: playerSpecies.arm_color, leg: playerSpecies.leg_color },
+      playerSpecies.name,
+    );
+    rig.group.position.set(0, 0, PREVIEW_BATTLE_PLAYER_Z);
+    scene.add(rig.group);
+  } else {
+    rig = buildBlockyCharacter(initialColors, null);
+    scene.add(rig.group);
+  }
+  // Opt-in only — the Pose Designer is the one place this actually matters
+  // (you're constantly orbiting the camera while posing and need to tell
+  // front from back); character creation/the starter picker/Character
+  // Movements never asked for it, so they're unaffected. Both markers, not
+  // just the front smiley — Body Rotation turns the head right along with
+  // the rest of the body, so the smiley alone could end up facing away
+  // from the camera with nothing telling you it's now on the far side.
+  if (options.showFrontMarker) {
+    rig.head.add(buildFaceMarker());
+    rig.head.add(buildBackMarker());
+  }
 
   let camAngle = 0;
   let camElevation = PREVIEW_DEFAULT_ELEVATION;
@@ -7599,11 +12775,48 @@ export function mountPreview(el, initialColors) {
   let rafId = 0;
   let disposed = false;
 
+  // Which pose this preview plays — defaults to idle (character creation/
+  // starter picker never call setPose, so they're unaffected by any of
+  // this). See the Character Movements dev panel (mount()'s own
+  // charMovementsButton) for the only caller that switches it.
+  let currentPose = "idle";
+  let poseElapsedMs = 0;
+  // Only ever set via setCustomPose (the Pose Designer dev panel) — a
+  // per-frame callback given full control of the rig instead of one of the
+  // named poses below, so the designer can drive it from live sliders or
+  // its own keyframe playback using this exact same preview/camera/orbit.
+  let customPoseFn = null;
+  // A brief hold at rest between loops of a fixed-envelope pose (Attack/
+  // Defend/Cast) — without it, the animation would restart mid-swing the
+  // instant it completes, reading as a stutter rather than a held finish.
+  const POSE_LOOP_PAUSE_MS = 400;
+
   function frame(now) {
     const dt = Math.min(0.1, (now - lastFrameTime) / 1000);
     lastFrameTime = now;
+    poseElapsedMs += dt * 1000;
 
-    applyIdlePose(rig, dt); // a light idle bob so the preview doesn't look frozen, same as the real world view's own idle characters
+    if (currentPose === "walk") {
+      updateWalkCycle(rig, dt);
+    } else if (currentPose === "ready") {
+      applyReadyPose(rig, dt);
+    } else if (currentPose === "attack" || currentPose === "defend" || currentPose === "cast") {
+      const totalMs = currentPose === "attack" ? ATTACK_ANIM_MS : currentPose === "cast" ? CAST_ANIM_MS : DEFEND_ANIM_MS;
+      const loopElapsedMs = poseElapsedMs % (totalMs + POSE_LOOP_PAUSE_MS);
+      const clamped = Math.min(loopElapsedMs, totalMs);
+      if (currentPose === "attack") applyAttackPose(rig, clamped, totalMs);
+      else if (currentPose === "cast") applyCastPose(rig, clamped, totalMs);
+      else applyDefendPose(rig, clamped, totalMs);
+    } else if (currentPose === "custom") {
+      customPoseFn?.(rig, dt);
+    } else {
+      applyIdlePose(rig, dt); // a light idle bob so the preview doesn't look frozen, same as the real world view's own idle characters
+    }
+    // The battle-scene preview's extra "wild" rig (see options.battleScenePreview
+    // above) never switches pose with `rig` — nothing here declares moves or
+    // attacks, it's just a stand-in body for the camera to frame, so a plain
+    // idle bob is all it ever needs.
+    for (const extraRig of extraRigs) applyIdlePose(extraRig, dt);
 
     const width = canvas.clientWidth || canvas.getBoundingClientRect().width;
     const height = canvas.clientHeight || canvas.getBoundingClientRect().height;
@@ -7615,12 +12828,25 @@ export function mountPreview(el, initialColors) {
       lastHeight = height;
     }
 
-    camera.position.set(
-      Math.sin(camAngle) * Math.cos(camElevation) * zoomRadius,
-      PREVIEW_TARGET_Y + Math.sin(camElevation) * zoomRadius,
-      Math.cos(camAngle) * Math.cos(camElevation) * zoomRadius,
-    );
-    camera.lookAt(0, PREVIEW_TARGET_Y, 0);
+    // Camera Designer only (see game.js's own cameraDesignerButton/
+    // cameraDesignerDriver) — an optional external hook that takes over
+    // this exact same orbit-camera/lookAt call entirely, so that panel can
+    // drive the preview from its live slider values (radius/pitch/angle/
+    // rotation speed) instead of mouse drag. Every other caller of
+    // mountPreview (character creation, the starter picker, Character
+    // Movements, the Pose Designer) never passes this, so they keep using
+    // the drag/wheel-driven camAngle/camElevation/zoomRadius above,
+    // completely unaffected.
+    if (options.cameraDriver) {
+      options.cameraDriver(camera, dt);
+    } else {
+      camera.position.set(
+        Math.sin(camAngle) * Math.cos(camElevation) * zoomRadius,
+        PREVIEW_TARGET_Y + Math.sin(camElevation) * zoomRadius,
+        Math.cos(camAngle) * Math.cos(camElevation) * zoomRadius,
+      );
+      camera.lookAt(0, PREVIEW_TARGET_Y, 0);
+    }
 
     renderer.render(scene, camera);
     if (!disposed) rafId = requestAnimationFrame(frame);
@@ -7635,12 +12861,23 @@ export function mountPreview(el, initialColors) {
     window.removeEventListener("mousemove", onMouseMove);
     window.removeEventListener("mouseup", onMouseUp);
     disposeRig(rig);
+    for (const extraRig of extraRigs) disposeRig(extraRig);
     renderer.dispose();
   };
 
   return {
     setColors(colors) {
       recolorRig(rig, colors);
+    },
+    setPose(pose) {
+      currentPose = pose;
+      poseElapsedMs = 0; // restart a fixed-envelope pose from its beginning rather than mid-swing
+      customPoseFn = null;
+    },
+    setCustomPose(fn) {
+      currentPose = "custom";
+      poseElapsedMs = 0;
+      customPoseFn = fn;
     },
     dispose() {
       if (el._glophimonPreviewCleanup) {

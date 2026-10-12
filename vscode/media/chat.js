@@ -16,6 +16,17 @@ const pendingGlophimonWildRequests = new Map();
 // was accepted/the claimed amount) to update the popup correctly.
 let nextKarirsRequestId = 1;
 const pendingKarirsRequests = new Map();
+// Pose Designer's "Save to Game"/"Reset to Default" (see game.js's own
+// onSavePoseOverride/onResetPoseOverride) — same awaited-result shape as
+// the Karirs requests above.
+let nextPoseOverrideRequestId = 1;
+const pendingPoseOverrideRequests = new Map();
+// Camera Designer's "Save to Game"/"Reset to Default" (see game.js's own
+// onSaveCameraOverride/onResetCameraOverride) — same awaited-result shape,
+// its own requestId/Map so a pose-override reply can never resolve a
+// camera-override request or vice versa.
+let nextCameraOverrideRequestId = 1;
+const pendingCameraOverrideRequests = new Map();
 // Jared's shop (see game.js's own ctx.onShopBuy) — same awaited-result
 // idea, its own requestId/Map so it never collides with a Karirs one.
 let nextShopRequestId = 1;
@@ -29,6 +40,7 @@ const textbox = document.getElementById('textbox');
 const msgContainer = document.getElementById('msg-users');
 const msgContent = document.getElementById('msg-content');
 const msgEl = document.getElementById('msg');
+const hideOverlayEl = document.getElementById('hide-overlay');
 
 const gameCatalogEl = document.getElementById('game-catalog');
 const gameHintEl = document.getElementById('game-hint');
@@ -105,17 +117,54 @@ let glsimsWorldActive = false;
 // one-time creation form is showing, the view entirely) outside of any
 // real lobby (see enterGlophimon/exitGlophimon below).
 let glophimonActive = false;
+// Glophiworld — Glophimon's real-time-combat sibling (see
+// enterGlophiworld/exitGlophiworld below), same "owns gameStageEl outside
+// the lobby" shape, its own flag so re-entering one game while the other
+// is still active can never be mistaken for a no-op guard against itself.
+let glophiworldActive = false;
+// Character creation/starter-picker (see showGlophimonCreate/
+// showGlophimonStarterPicker below) is one generic, visually-identical
+// onboarding flow shared by both games — this says which one a pending
+// creation/starter submission is actually for, since the DOM/functions
+// themselves are reused rather than duplicated wholesale.
+let creationGameKey = 'glophimon';
+function setCreationActive(gameKey, active) {
+    if (gameKey === 'glophiworld') glophiworldActive = active;
+    else glophimonActive = active;
+}
 // A Luba match hosted from inside Glophimon's own world (see
 // onLubaMatchReady below) — same "owns gameStageEl outside of any real
 // lobby" reasoning as the three flags above, plus there's no real Cheddar
 // game_lobbies row backing this match at all for renderLobby() to even
 // find.
 let lubaFromGlophimon = false;
+// Which Glophi-game (glophimon/glophiworld) actually hosted the match —
+// the "return to Glophimon" button has to re-enter the SAME one it came
+// from, not always Glophimon specifically, now that there are two.
+let lubaFromGlophiGame = 'glophimon';
 
 // The most recently clicked "Claim 250 coins" button — only one claim can
 // realistically be in flight at a time, so tracking just the last one is
 // enough to update it once the host's response comes back.
 let pendingDailyBonusBtn = null;
+
+// msgContent (the on-screen chat/system log) was only ever appended to,
+// never trimmed, for the entire lifetime of this webview session — and
+// this panel is kept alive in the background the whole time it's open
+// (registerWebviewViewProvider's own retainContextWhenHidden:true), so a
+// long-running VS Code session with a lot of chat/lobby/game activity
+// accumulated an ever-growing, uncapped pile of <p> DOM nodes. Caps it to
+// the most recent MAX_LOG_LINES, dropping the oldest ones past that —
+// used by every log/log.invite/log.replay/log.daily_bonus append below
+// instead of each calling msgContent.appendChild directly.
+const MAX_LOG_LINES = 300;
+function appendLogLine(p) {
+    msgContent.appendChild(p);
+    while (msgContent.childElementCount > MAX_LOG_LINES) {
+        msgContent.removeChild(msgContent.firstChild);
+    }
+    msgContainer.scrollTop = msgContainer.scrollHeight;
+}
 
 // Receive messages from extension
 window.addEventListener('message', event => {
@@ -123,8 +172,22 @@ window.addEventListener('message', event => {
     if (msg.type === 'log') {
         const p = document.createElement('p');
         p.textContent = msg.text;
-        msgContent.appendChild(p);
-        msgContainer.scrollTop = msgContainer.scrollHeight;
+        appendLogLine(p);
+    }
+    else if (msg.type === 'hide') {
+        // hidden: true -> opaque and catches clicks (nothing behind it is
+        // interactive while it's covering the view); hidden: false -> fully
+        // transparent, and lets clicks straight through to what's under it.
+        // #user-actions (the input box) is a separate element outside #msg
+        // (see chat.html/css) — untouched either way.
+        hideOverlayEl.style.opacity = msg.hidden ? '1' : '0';
+        hideOverlayEl.style.pointerEvents = msg.hidden ? 'auto' : 'none';
+    }
+    else if (msg.type === 'chats.visibility') {
+        // Independent of #game-drawer-lock's own "unlocked" toggle — see
+        // chat.css's own #msg.chats-hidden rules, which override "unlocked"
+        // regardless of which one got set first.
+        msgEl.classList.toggle('chats-hidden', msg.hidden);
     }
     else if (msg.type === 'log.invite') {
         const p = document.createElement('p');
@@ -141,8 +204,7 @@ window.addEventListener('message', event => {
             vscode.postMessage({ type: 'game', action: 'resume_lobby', lobbyId: msg.lobbyId });
         });
         p.appendChild(joinBtn);
-        msgContent.appendChild(p);
-        msgContainer.scrollTop = msgContainer.scrollHeight;
+        appendLogLine(p);
     }
     else if (msg.type === 'catalog.render') {
         renderCatalog(msg.data ?? []);
@@ -191,6 +253,20 @@ window.addEventListener('message', event => {
             resolve(msg.result);
         }
     }
+    else if (msg.type === 'glophimon.poseOverrideResult') {
+        const resolve = pendingPoseOverrideRequests.get(msg.requestId);
+        if (resolve) {
+            pendingPoseOverrideRequests.delete(msg.requestId);
+            resolve(msg.result);
+        }
+    }
+    else if (msg.type === 'glophimon.cameraOverrideResult') {
+        const resolve = pendingCameraOverrideRequests.get(msg.requestId);
+        if (resolve) {
+            pendingCameraOverrideRequests.delete(msg.requestId);
+            resolve(msg.result);
+        }
+    }
     else if (msg.type === 'glophimon.shopResult') {
         const resolve = pendingShopRequests.get(msg.requestId);
         if (resolve) {
@@ -202,6 +278,53 @@ window.addEventListener('message', event => {
         const resolve = pendingBattleRequests.get(msg.requestId);
         if (resolve) {
             pendingBattleRequests.delete(msg.requestId);
+            resolve(msg.result);
+        }
+    }
+    else if (msg.type === 'glophiworld.create') {
+        showGlophimonCreate('glophiworld');
+    }
+    else if (msg.type === 'glophiworld.chooseStarter') {
+        showGlophimonStarterPicker(msg.species ?? [], 'glophiworld');
+    }
+    else if (msg.type === 'glophiworld.mount') {
+        enterGlophiworld(msg.character, msg.starter, msg.glophimon ?? [], msg.inventory ?? { glophiballs: 0, potions: 0, daily_claim_available: false, g_coins: 1000 });
+    }
+    else if (msg.type === 'glophiworld.menu') {
+        const glophimonList = msg.glophimon ?? [];
+        const inventory = msg.inventory ?? { glophiballs: 0, potions: 0, daily_claim_available: false, g_coins: 1000 };
+        if (glophiworldInstance && glophiworldInstance.setMenuData) glophiworldInstance.setMenuData(glophimonList, inventory);
+    }
+    // Karirs/pose-override/camera-override/shop results are all generic
+    // requestId-keyed maps (see the top of this file) shared by both
+    // Glophimon and Glophiworld — resolving from the same pendingXxxRequests
+    // map either game's own result message landed in is correct as-is,
+    // there's no per-game map to duplicate here.
+    else if (msg.type === 'glophiworld.karirsResult') {
+        const resolve = pendingKarirsRequests.get(msg.requestId);
+        if (resolve) {
+            pendingKarirsRequests.delete(msg.requestId);
+            resolve(msg.result);
+        }
+    }
+    else if (msg.type === 'glophiworld.poseOverrideResult') {
+        const resolve = pendingPoseOverrideRequests.get(msg.requestId);
+        if (resolve) {
+            pendingPoseOverrideRequests.delete(msg.requestId);
+            resolve(msg.result);
+        }
+    }
+    else if (msg.type === 'glophiworld.cameraOverrideResult') {
+        const resolve = pendingCameraOverrideRequests.get(msg.requestId);
+        if (resolve) {
+            pendingCameraOverrideRequests.delete(msg.requestId);
+            resolve(msg.result);
+        }
+    }
+    else if (msg.type === 'glophiworld.shopResult') {
+        const resolve = pendingShopRequests.get(msg.requestId);
+        if (resolve) {
+            pendingShopRequests.delete(msg.requestId);
             resolve(msg.result);
         }
     }
@@ -220,8 +343,7 @@ window.addEventListener('message', event => {
             vscode.postMessage({ type: 'game.action', gameKey: 'karirs', action: 'view_replay', data: { raceId: msg.raceId } });
         });
         p.appendChild(replayBtn);
-        msgContent.appendChild(p);
-        msgContainer.scrollTop = msgContainer.scrollHeight;
+        appendLogLine(p);
     }
     else if (msg.type === 'log.daily_bonus') {
         const p = document.createElement('p');
@@ -241,8 +363,7 @@ window.addEventListener('message', event => {
             vscode.postMessage({ type: 'game.action', gameKey: 'karirs', action: 'claim_daily_bonus', data: {} });
         });
         p.appendChild(claimBtn);
-        msgContent.appendChild(p);
-        msgContainer.scrollTop = msgContainer.scrollHeight;
+        appendLogLine(p);
     }
     else if (msg.type === 'game.event') {
         // A replay is watchable straight from chat whether or not any karirs
@@ -592,13 +713,14 @@ function disposeGlophimonPreview() {
     });
 });
 
-function showGlophimonCreate() {
-    glophimonActive = true;
+function showGlophimonCreate(gameKey = 'glophimon') {
+    creationGameKey = gameKey;
+    setCreationActive(gameKey, true);
     lobbyViewEl.style.display = 'none';
     gameHintEl.style.display = 'none';
     glophimonCreateEl.style.display = 'block';
     disposeGlophimonPreview();
-    const game = window.CheddarGames && window.CheddarGames['glophimon'];
+    const game = window.CheddarGames && window.CheddarGames[gameKey];
     if (game && game.mountPreview) {
         glophimonPreview = game.mountPreview(glophimonPreviewEl, currentGlophimonColors());
     }
@@ -608,7 +730,7 @@ glophimonCreateSubmitBtn.addEventListener('click', () => {
     const displayName = glophimonNameInput.value.trim();
     if (!displayName) return;
     vscode.postMessage({
-        type: 'glophimon',
+        type: creationGameKey,
         action: 'create',
         displayName,
         headColor: glophimonHeadColorInput.value,
@@ -635,8 +757,9 @@ function disposeGlophimonStarterPreview() {
     }
 }
 
-function showGlophimonStarterPicker(species) {
-    glophimonActive = true;
+function showGlophimonStarterPicker(species, gameKey = 'glophimon') {
+    creationGameKey = gameKey;
+    setCreationActive(gameKey, true);
     lobbyViewEl.style.display = 'none';
     gameHintEl.style.display = 'none';
     glophimonCreateEl.style.display = 'none';
@@ -646,7 +769,7 @@ function showGlophimonStarterPicker(species) {
     glophimonStarterSubmitBtn.disabled = true;
     glophimonStarterListEl.innerHTML = '';
 
-    const game = window.CheddarGames && window.CheddarGames['glophimon'];
+    const game = window.CheddarGames && window.CheddarGames[gameKey];
 
     function selectSpecies(s) {
         selectedStarterKey = s.key;
@@ -691,7 +814,7 @@ function showGlophimonStarterPicker(species) {
 
 glophimonStarterSubmitBtn.addEventListener('click', () => {
     if (!selectedStarterKey) return;
-    vscode.postMessage({ type: 'glophimon', action: 'choose_starter', speciesKey: selectedStarterKey });
+    vscode.postMessage({ type: creationGameKey, action: 'choose_starter', speciesKey: selectedStarterKey });
 });
 
 // Reference to the mounted game instance's own return value — lets the
@@ -699,8 +822,24 @@ glophimonStarterSubmitBtn.addEventListener('click', () => {
 // in-canvas menu (see game.js's own setMenuData) — the only menu now,
 // there's no separate vscode-chrome panel to keep in sync any more.
 let glophimonInstance = null;
+// Same idea for Glophiworld's own mounted instance (see enterGlophiworld/
+// exitGlophiworld below) — its own reference, since only one of the two
+// games is ever actually mounted at a time but either could be.
+let glophiworldInstance = null;
 
 function enterGlophimon(character, starter, glophimon, inventory) {
+    // Re-running /glophimon while already inside it (easy to do by accident
+    // — see doGlophimonEnter, which always re-sends glophimon.mount with no
+    // idea whether the client's already there) used to mount a second
+    // instance right on top of the first without ever tearing it down —
+    // opening a second WebSocket for the same account while the first was
+    // still open, which the server correctly rejects as already_in_world.
+    // That rejection fires onRejected on the *new* instance, which calls
+    // exitGlophimon() and yanks the whole view away, while the original
+    // still-good connection is left running orphaned underneath. Simplest
+    // fix: re-entering while already active is just a no-op, matching how
+    // mountGame() already guards every other game the same way.
+    if (glophimonActive) return;
     const game = window.CheddarGames && window.CheddarGames['glophimon'];
     if (!game || !game.mount) {
         console.error('no vendored Glophimon module — was vendor-games.sh run before packaging?');
@@ -718,6 +857,15 @@ function enterGlophimon(character, starter, glophimon, inventory) {
     glophimonInstance = game.mount(gameStageEl, {
         character,
         starter,
+        // Keyed by pose name ("idle"/"walk"/...) — see the api's own
+        // CharacterOut.pose_overrides and game.js's own POSE_DESIGNER_PARTS/
+        // tryPlayOverride. {} (never undefined) when nothing's been saved.
+        poseOverrides: character.pose_overrides || {},
+        // Keyed by battle type ("wild"/"team"/"pvp") — see the api's own
+        // CharacterOut.camera_overrides and game.js's own
+        // CAMERA_DESIGNER_FIELDS/cameraOverrides. {} (never undefined) when
+        // nothing's been saved, same convention as poseOverrides above.
+        cameraOverrides: character.camera_overrides || {},
         onRejected: exitGlophimon,
         onOpenMenu: () => vscode.postMessage({ type: 'glophimon', action: 'open_menu' }),
         onActivateGlophimon: (ownedId, slot) => vscode.postMessage({ type: 'glophimon', action: 'activate_glophimon', ownedId, slot }),
@@ -746,6 +894,8 @@ function enterGlophimon(character, starter, glophimon, inventory) {
                 return;
             }
             lubaFromGlophimon = true;
+            lubaFromGlophiGame = 'glophimon';
+            lubaReturnToGlophimonBtn.textContent = 'Return to Glophimon';
             gameStageEl.style.display = 'block';
             gameStageEl.dataset.mountedKey = 'luba';
             luba.mount(gameStageEl, {
@@ -771,6 +921,32 @@ function enterGlophimon(character, starter, glophimon, inventory) {
             // Shown for the whole match, not just once it's over — leaving
             // early and going back to Glophimon has to be possible at any
             // point, not only after the timer runs out.
+            lubaReturnToGlophimonBtn.style.display = 'inline-block';
+        },
+        // Boss Rick's own "Practice Mode" choice (see renderBossRickMenu's
+        // "choose_mode" step) — a fully local sandbox, no lobby/WebSocket
+        // at all (see game.js's own mountPractice), so this skips straight
+        // to mounting it instead of going through the host/mode/duration
+        // flow onLubaMatchReady above waits on. Deliberately NOT
+        // enterLubaPractice() (used by the standalone /lobby "Practice"
+        // button) — that one hides/restores lobbyViewEl via renderLobby(),
+        // which has no meaning here; this mirrors onLubaMatchReady's own
+        // exitGlophimon()+lubaReturnToGlophimonBtn handoff instead, since
+        // there's no "match over" event to ever hide that button on its
+        // own — leaving is always manual, exactly like a real match.
+        onLubaPracticeRequested: () => {
+            exitGlophimon({ skipLobbyRender: true });
+            const luba = window.CheddarGames && window.CheddarGames['luba'];
+            if (!luba || !luba.mountPractice) {
+                console.error('no vendored Luba practice mode — was vendor-games.sh run before packaging?');
+                return;
+            }
+            lubaFromGlophimon = true;
+            lubaFromGlophiGame = 'glophimon';
+            lubaReturnToGlophimonBtn.textContent = 'Return to Glophimon';
+            gameStageEl.style.display = 'block';
+            gameStageEl.dataset.mountedKey = 'luba';
+            luba.mountPractice(gameStageEl);
             lubaReturnToGlophimonBtn.style.display = 'inline-block';
         },
         // Fire-and-forget, same trust level as everything else here — the
@@ -819,6 +995,41 @@ function enterGlophimon(character, starter, glophimon, inventory) {
                 vscode.postMessage({ type: 'glophimon', action: 'karirs_claim', requestId });
             });
         },
+        // Pose Designer's "Save to Game"/"Reset to Default" — awaited the
+        // same way, since the panel needs to know the save actually landed
+        // before it starts applying the override live.
+        onSavePoseOverride: (poseName, keyframes) => {
+            const requestId = nextPoseOverrideRequestId++;
+            return new Promise((resolve) => {
+                pendingPoseOverrideRequests.set(requestId, resolve);
+                vscode.postMessage({ type: 'glophimon', action: 'save_pose_override', requestId, poseName, keyframes });
+            });
+        },
+        onResetPoseOverride: (poseName) => {
+            const requestId = nextPoseOverrideRequestId++;
+            return new Promise((resolve) => {
+                pendingPoseOverrideRequests.set(requestId, resolve);
+                vscode.postMessage({ type: 'glophimon', action: 'reset_pose_override', requestId, poseName });
+            });
+        },
+        // Camera Designer's "Save to Game"/"Reset to Default" — awaited the
+        // same way as the pose overrides above, since the panel needs to
+        // know the save actually landed before it starts trusting its own
+        // in-memory cameraOverrides.
+        onSaveCameraOverride: (slotName, values) => {
+            const requestId = nextCameraOverrideRequestId++;
+            return new Promise((resolve) => {
+                pendingCameraOverrideRequests.set(requestId, resolve);
+                vscode.postMessage({ type: 'glophimon', action: 'save_camera_override', requestId, slotName, values });
+            });
+        },
+        onResetCameraOverride: (slotName) => {
+            const requestId = nextCameraOverrideRequestId++;
+            return new Promise((resolve) => {
+                pendingCameraOverrideRequests.set(requestId, resolve);
+                vscode.postMessage({ type: 'glophimon', action: 'reset_camera_override', requestId, slotName });
+            });
+        },
         // Jared's shop — awaited the same way, since the popup needs to
         // know whether the purchase actually went through.
         onShopBuy: (itemKey, quantity) => {
@@ -845,6 +1056,208 @@ function enterGlophimon(character, starter, glophimon, inventory) {
     if (glophimonInstance && glophimonInstance.setMenuData) glophimonInstance.setMenuData(glophimon ?? [], inventory ?? { glophiballs: 0, potions: 0, daily_claim_available: false, g_coins: 1000 });
 }
 
+function enterGlophiworld(character, starter, glophimon, inventory) {
+    // Re-running /glophimon while already inside it (easy to do by accident
+    // — see doGlophimonEnter, which always re-sends glophimon.mount with no
+    // idea whether the client's already there) used to mount a second
+    // instance right on top of the first without ever tearing it down —
+    // opening a second WebSocket for the same account while the first was
+    // still open, which the server correctly rejects as already_in_world.
+    // That rejection fires onRejected on the *new* instance, which calls
+    // exitGlophiworld() and yanks the whole view away, while the original
+    // still-good connection is left running orphaned underneath. Simplest
+    // fix: re-entering while already active is just a no-op, matching how
+    // mountGame() already guards every other game the same way.
+    if (glophiworldActive) return;
+    const game = window.CheddarGames && window.CheddarGames['glophiworld'];
+    if (!game || !game.mount) {
+        console.error('no vendored Glophiworld module — was vendor-games.sh run before packaging?');
+        return;
+    }
+    glophiworldActive = true;
+    lobbyViewEl.style.display = 'none';
+    gameHintEl.style.display = 'none';
+    disposeGlophimonPreview();
+    disposeGlophimonStarterPreview();
+    glophimonCreateEl.style.display = 'none';
+    glophimonStarterEl.style.display = 'none';
+    gameStageEl.style.display = 'block';
+    gameStageEl.dataset.mountedKey = 'glophiworld';
+    glophiworldInstance = game.mount(gameStageEl, {
+        character,
+        starter,
+        // Keyed by pose name ("idle"/"walk"/...) — see the api's own
+        // CharacterOut.pose_overrides and game.js's own POSE_DESIGNER_PARTS/
+        // tryPlayOverride. {} (never undefined) when nothing's been saved.
+        poseOverrides: character.pose_overrides || {},
+        // Keyed by battle type ("wild"/"team"/"pvp") — see the api's own
+        // CharacterOut.camera_overrides and game.js's own
+        // CAMERA_DESIGNER_FIELDS/cameraOverrides. {} (never undefined) when
+        // nothing's been saved, same convention as poseOverrides above.
+        cameraOverrides: character.camera_overrides || {},
+        onRejected: exitGlophiworld,
+        onOpenMenu: () => vscode.postMessage({ type: 'glophiworld', action: 'open_menu' }),
+        onActivateGlophimon: (ownedId, slot) => vscode.postMessage({ type: 'glophiworld', action: 'activate_glophimon', ownedId, slot }),
+        onDeactivateGlophimon: (ownedId) => vscode.postMessage({ type: 'glophiworld', action: 'deactivate_glophimon', ownedId }),
+        onReleaseGlophimon: (ownedId) => vscode.postMessage({ type: 'glophiworld', action: 'release_glophimon', ownedId }),
+        onUseGlophiball: () => vscode.postMessage({ type: 'glophiworld', action: 'use_glophiball' }),
+        onClaimDaily: () => vscode.postMessage({ type: 'glophiworld', action: 'claim_daily' }),
+        // "Leave Glophimon" now lives as the last row of the in-canvas menu
+        // list (see game.js's own renderGlophimonMenuPanel) rather than a
+        // separate vscode-chrome button — same exitGlophiworld() effect either way.
+        onLeaveGlophimon: exitGlophiworld,
+        // The Luba lobby handoff — fired once the api's own luba_start
+        // handler has already configured the real match server-side (see
+        // main.py) and told every member the lobby_id to connect with.
+        // Nothing else in this codebase has ever called into another
+        // game's mount() from inside a different game's own ctx callback
+        // before this — chat.js is the only place that's allowed to own
+        // gameStageEl, so the actual cross-game mount has to live here,
+        // not inside game.js itself.
+        onLubaMatchReady: ({ lobbyId, participants, hostId, selfId }) => {
+            exitGlophiworld({ skipLobbyRender: true });
+            const luba = window.CheddarGames && window.CheddarGames['luba'];
+            if (!luba || !luba.mount) {
+                console.error('no vendored Luba module — was vendor-games.sh run before packaging?');
+                return;
+            }
+            lubaFromGlophimon = true;
+            lubaFromGlophiGame = 'glophiworld';
+            lubaReturnToGlophimonBtn.textContent = 'Return to Glophiworld';
+            gameStageEl.style.display = 'block';
+            gameStageEl.dataset.mountedKey = 'luba';
+            luba.mount(gameStageEl, {
+                gameKey: 'luba',
+                gameName: 'Deathmatch',
+                lobbyId,
+                selfId,
+                leaderId: hostId,
+                // {id, display_name} — matches exactly what Luba's own
+                // game.js reads (ctx.participants.find(p => p.id === ...),
+                // info.display_name || info.username), not a shape guessed
+                // from Glophimon's own {user_id, display_name} member rows.
+                participants: participants.map((m) => ({ id: m.user_id, display_name: m.display_name })),
+                // Belt-and-suspenders — the button's already shown the
+                // instant the match mounts (see below), so a real player
+                // can leave early rather than being stuck until the timer
+                // runs out; this just re-asserts it's visible once the
+                // match genuinely ends too.
+                onMatchOver: () => {
+                    lubaReturnToGlophimonBtn.style.display = 'inline-block';
+                },
+            });
+            // Shown for the whole match, not just once it's over — leaving
+            // early and going back to Glophimon has to be possible at any
+            // point, not only after the timer runs out.
+            lubaReturnToGlophimonBtn.style.display = 'inline-block';
+        },
+        // Boss Rick's own "Practice Mode" choice (see renderBossRickMenu's
+        // "choose_mode" step) — a fully local sandbox, no lobby/WebSocket
+        // at all (see game.js's own mountPractice), so this skips straight
+        // to mounting it instead of going through the host/mode/duration
+        // flow onLubaMatchReady above waits on. Deliberately NOT
+        // enterLubaPractice() (used by the standalone /lobby "Practice"
+        // button) — that one hides/restores lobbyViewEl via renderLobby(),
+        // which has no meaning here; this mirrors onLubaMatchReady's own
+        // exitGlophiworld()+lubaReturnToGlophimonBtn handoff instead, since
+        // there's no "match over" event to ever hide that button on its
+        // own — leaving is always manual, exactly like a real match.
+        onLubaPracticeRequested: () => {
+            exitGlophiworld({ skipLobbyRender: true });
+            const luba = window.CheddarGames && window.CheddarGames['luba'];
+            if (!luba || !luba.mountPractice) {
+                console.error('no vendored Luba practice mode — was vendor-games.sh run before packaging?');
+                return;
+            }
+            lubaFromGlophimon = true;
+            lubaFromGlophiGame = 'glophiworld';
+            lubaReturnToGlophimonBtn.textContent = 'Return to Glophiworld';
+            gameStageEl.style.display = 'block';
+            gameStageEl.dataset.mountedKey = 'luba';
+            luba.mountPractice(gameStageEl);
+            lubaReturnToGlophimonBtn.style.display = 'inline-block';
+        },
+        // Fire-and-forget, same trust level as everything else here — the
+        // client already computed the real resulting HP (damage taken,
+        // Rodz's heal, or blacking out), this just persists it.
+        onSetPlayerHp: (currentHp) => vscode.postMessage({ type: 'glophiworld', action: 'set_hp', currentHp }),
+        // Same fire-and-forget idea, for each owned Glophimon's own HP (see
+        // game.js's own syncOwnedGlophimonHp) — battle damage no longer
+        // resets between fights, so it has to actually persist.
+        onSetGlophimonHp: (updates) => vscode.postMessage({ type: 'glophiworld', action: 'set_glophimon_hp', updates }),
+        // The Karirs field — all three need a real result back (see
+        // 'glophiworld.karirsResult' above), unlike the fire-and-forget actions further up.
+        onKarirsFetchState: () => {
+            const requestId = nextKarirsRequestId++;
+            return new Promise((resolve) => {
+                pendingKarirsRequests.set(requestId, resolve);
+                vscode.postMessage({ type: 'glophiworld', action: 'karirs_fetch_state', requestId });
+            });
+        },
+        onKarirsPlaceBet: (racerName, wager) => {
+            const requestId = nextKarirsRequestId++;
+            return new Promise((resolve) => {
+                pendingKarirsRequests.set(requestId, resolve);
+                vscode.postMessage({ type: 'glophiworld', action: 'karirs_place_bet', requestId, racerName, wager });
+            });
+        },
+        onKarirsClaim: () => {
+            const requestId = nextKarirsRequestId++;
+            return new Promise((resolve) => {
+                pendingKarirsRequests.set(requestId, resolve);
+                vscode.postMessage({ type: 'glophiworld', action: 'karirs_claim', requestId });
+            });
+        },
+        // Pose Designer's "Save to Game"/"Reset to Default" — awaited the
+        // same way, since the panel needs to know the save actually landed
+        // before it starts applying the override live.
+        onSavePoseOverride: (poseName, keyframes) => {
+            const requestId = nextPoseOverrideRequestId++;
+            return new Promise((resolve) => {
+                pendingPoseOverrideRequests.set(requestId, resolve);
+                vscode.postMessage({ type: 'glophiworld', action: 'save_pose_override', requestId, poseName, keyframes });
+            });
+        },
+        onResetPoseOverride: (poseName) => {
+            const requestId = nextPoseOverrideRequestId++;
+            return new Promise((resolve) => {
+                pendingPoseOverrideRequests.set(requestId, resolve);
+                vscode.postMessage({ type: 'glophiworld', action: 'reset_pose_override', requestId, poseName });
+            });
+        },
+        // Camera Designer's "Save to Game"/"Reset to Default" — awaited the
+        // same way as the pose overrides above, since the panel needs to
+        // know the save actually landed before it starts trusting its own
+        // in-memory cameraOverrides.
+        onSaveCameraOverride: (slotName, values) => {
+            const requestId = nextCameraOverrideRequestId++;
+            return new Promise((resolve) => {
+                pendingCameraOverrideRequests.set(requestId, resolve);
+                vscode.postMessage({ type: 'glophiworld', action: 'save_camera_override', requestId, slotName, values });
+            });
+        },
+        onResetCameraOverride: (slotName) => {
+            const requestId = nextCameraOverrideRequestId++;
+            return new Promise((resolve) => {
+                pendingCameraOverrideRequests.set(requestId, resolve);
+                vscode.postMessage({ type: 'glophiworld', action: 'reset_camera_override', requestId, slotName });
+            });
+        },
+        // Jared's shop — awaited the same way, since the popup needs to
+        // know whether the purchase actually went through.
+        onShopBuy: (itemKey, quantity) => {
+            const requestId = nextShopRequestId++;
+            return new Promise((resolve) => {
+                pendingShopRequests.set(requestId, resolve);
+                vscode.postMessage({ type: 'glophiworld', action: 'shop_buy', requestId, itemKey, quantity });
+            });
+        },
+    });
+    // Populates game.js's own menuData immediately (see its getActiveLineup)
+    // rather than waiting for the player to open the Menu at least once.
+    if (glophiworldInstance && glophiworldInstance.setMenuData) glophiworldInstance.setMenuData(glophimon ?? [], inventory ?? { glophiballs: 0, potions: 0, daily_claim_available: false, g_coins: 1000 });
+}
+
 // opts.skipLobbyRender — true when the real destination right after this
 // call is another mount() (see onLubaMatchReady below), not the normal
 // lobby screen; without it every other caller (onRejected/onLeaveGlophimon,
@@ -863,11 +1276,41 @@ function exitGlophimon(opts = {}) {
     if (!opts.skipLobbyRender) renderLobby(lastLobby, lastSelfId, lastTracksCompletion);
 }
 
+function exitGlophiworld(opts = {}) {
+    const game = window.CheddarGames && window.CheddarGames['glophiworld'];
+    if (game) game.unmount(gameStageEl);
+    glophiworldInstance = null;
+    gameStageEl.style.display = 'none';
+    delete gameStageEl.dataset.mountedKey;
+    disposeGlophimonPreview();
+    disposeGlophimonStarterPreview();
+    glophimonCreateEl.style.display = 'none';
+    glophimonStarterEl.style.display = 'none';
+    glophiworldActive = false;
+    if (!opts.skipLobbyRender) renderLobby(lastLobby, lastSelfId, lastTracksCompletion);
+}
+
 function mountGame(msg) {
     if (lubaPracticeActive) return; // practice owns gameStageEl right now — see its own comment
     if (glsimsWorldActive) return; // GL Sims World owns gameStageEl right now — see its own comment
     if (glophimonActive) return; // Glophimon owns gameStageEl (or the creation form) right now — see its own comment
+    if (glophiworldActive) return; // Glophiworld owns gameStageEl (or the creation form) right now — see its own comment
     if (lubaFromGlophimon) return; // a Glophimon-hosted Luba match owns gameStageEl right now — see its own comment
+    // Whatever's currently mounted under gameStageEl.dataset.mountedKey (a
+    // DIFFERENT lobby-scoped game than the one about to be mounted here —
+    // e.g. switching lobbies via the "Rejoin" button, or a background lobby
+    // update silently swapping which lobby is "current") never got its own
+    // unmount() called before this function used to just overwrite
+    // gameStageEl's contents directly. Each game's own mount() does wipe
+    // the DOM (innerHTML = ''), so the swap LOOKED clean, but the old
+    // game's RAF loop, WebSocket, and three.js renderer/geometries were
+    // never actually torn down — they kept running against a now-detached
+    // canvas indefinitely (this panel's own retainContextWhenHidden:true
+    // means nothing short of a full window reload would ever clear them).
+    // unmountGame() itself already no-ops safely if nothing is mounted, so
+    // this is safe to call unconditionally rather than only when the key
+    // actually differs.
+    unmountGame();
     const game = window.CheddarGames && window.CheddarGames[msg.gameKey];
     if (!game) {
         console.error(`no vendored module for game "${msg.gameKey}" — was vendor-games.sh run before packaging?`);
@@ -919,6 +1362,9 @@ function renderLobby(lobby, selfId, tracksCompletion) {
     // Same reasoning — Glophimon also owns gameStageEl (or the creation
     // form) outside of any real lobby (see enterGlophimon below).
     if (glophimonActive) return;
+    // Same reasoning — Glophiworld also owns gameStageEl (or the creation
+    // form) outside of any real lobby (see enterGlophiworld below).
+    if (glophiworldActive) return;
     // Same reasoning — a Glophimon-hosted Luba match also owns gameStageEl,
     // and has no real lobby row for this to even look up in the first
     // place (see onLubaMatchReady below).
@@ -1057,10 +1503,12 @@ window.addEventListener('click', (e) => {
         lubaFromGlophimon = false;
         gameStageEl.style.display = 'none';
         delete gameStageEl.dataset.mountedKey;
-        // Same re-entry doGlophimonEnter() already does for the /glophimon
-        // command and right after character/starter creation — a full
-        // fresh fetch, not a special "resume" path (see extension.ts).
-        vscode.postMessage({ type: 'glophimon', action: 'enter' });
+        // Same re-entry doGlophimonEnter()/doGlophiworldEnter() already does
+        // for the /glophimon and /glophiworld commands and right after
+        // character/starter creation — a full fresh fetch, not a special
+        // "resume" path (see extension.ts) — re-entering whichever of the
+        // two games actually hosted this match (see lubaFromGlophiGame).
+        vscode.postMessage({ type: lubaFromGlophiGame, action: 'enter' });
     }
     else if (e.target.id === 'lobby-leave') {
         vscode.postMessage({ type: 'game', action: 'leave' });

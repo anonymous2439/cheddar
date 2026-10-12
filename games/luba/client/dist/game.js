@@ -12663,6 +12663,193 @@
       return new _BoxGeometry(data.width, data.height, data.depth, data.widthSegments, data.heightSegments, data.depthSegments);
     }
   };
+  var CylinderGeometry = class _CylinderGeometry extends BufferGeometry {
+    /**
+     * Constructs a new cylinder geometry.
+     *
+     * @param {number} [radiusTop=1] - Radius of the cylinder at the top.
+     * @param {number} [radiusBottom=1] - Radius of the cylinder at the bottom.
+     * @param {number} [height=1] - Height of the cylinder.
+     * @param {number} [radialSegments=32] - Number of segmented faces around the circumference of the cylinder.
+     * @param {number} [heightSegments=1] - Number of rows of faces along the height of the cylinder.
+     * @param {boolean} [openEnded=false] - Whether the base of the cylinder is open or capped.
+     * @param {number} [thetaStart=0] - Start angle for first segment, in radians.
+     * @param {number} [thetaLength=Math.PI*2] - The central angle, often called theta, of the circular sector, in radians.
+     * The default value results in a complete cylinder.
+     */
+    constructor(radiusTop = 1, radiusBottom = 1, height = 1, radialSegments = 32, heightSegments = 1, openEnded = false, thetaStart = 0, thetaLength = Math.PI * 2) {
+      super();
+      this.type = "CylinderGeometry";
+      this.parameters = {
+        radiusTop,
+        radiusBottom,
+        height,
+        radialSegments,
+        heightSegments,
+        openEnded,
+        thetaStart,
+        thetaLength
+      };
+      const scope = this;
+      radialSegments = Math.floor(radialSegments);
+      heightSegments = Math.floor(heightSegments);
+      const indices = [];
+      const vertices = [];
+      const normals = [];
+      const uvs = [];
+      let index = 0;
+      const indexArray = [];
+      const halfHeight = height / 2;
+      let groupStart = 0;
+      generateTorso();
+      if (openEnded === false) {
+        if (radiusTop > 0) generateCap(true);
+        if (radiusBottom > 0) generateCap(false);
+      }
+      this.setIndex(indices);
+      this.setAttribute("position", new Float32BufferAttribute(vertices, 3));
+      this.setAttribute("normal", new Float32BufferAttribute(normals, 3));
+      this.setAttribute("uv", new Float32BufferAttribute(uvs, 2));
+      function generateTorso() {
+        const normal = new Vector3();
+        const vertex2 = new Vector3();
+        let groupCount = 0;
+        const slope = (radiusBottom - radiusTop) / height;
+        for (let y = 0; y <= heightSegments; y++) {
+          const indexRow = [];
+          const v = y / heightSegments;
+          const radius = v * (radiusBottom - radiusTop) + radiusTop;
+          for (let x = 0; x <= radialSegments; x++) {
+            const u = x / radialSegments;
+            const theta = u * thetaLength + thetaStart;
+            const sinTheta = Math.sin(theta);
+            const cosTheta = Math.cos(theta);
+            vertex2.x = radius * sinTheta;
+            vertex2.y = -v * height + halfHeight;
+            vertex2.z = radius * cosTheta;
+            vertices.push(vertex2.x, vertex2.y, vertex2.z);
+            normal.set(sinTheta, slope, cosTheta).normalize();
+            normals.push(normal.x, normal.y, normal.z);
+            uvs.push(u, 1 - v);
+            indexRow.push(index++);
+          }
+          indexArray.push(indexRow);
+        }
+        for (let x = 0; x < radialSegments; x++) {
+          for (let y = 0; y < heightSegments; y++) {
+            const a = indexArray[y][x];
+            const b = indexArray[y + 1][x];
+            const c = indexArray[y + 1][x + 1];
+            const d = indexArray[y][x + 1];
+            if (radiusTop > 0 || y !== 0) {
+              indices.push(a, b, d);
+              groupCount += 3;
+            }
+            if (radiusBottom > 0 || y !== heightSegments - 1) {
+              indices.push(b, c, d);
+              groupCount += 3;
+            }
+          }
+        }
+        scope.addGroup(groupStart, groupCount, 0);
+        groupStart += groupCount;
+      }
+      function generateCap(top) {
+        const centerIndexStart = index;
+        const uv = new Vector2();
+        const vertex2 = new Vector3();
+        let groupCount = 0;
+        const radius = top === true ? radiusTop : radiusBottom;
+        const sign = top === true ? 1 : -1;
+        for (let x = 1; x <= radialSegments; x++) {
+          vertices.push(0, halfHeight * sign, 0);
+          normals.push(0, sign, 0);
+          uvs.push(0.5, 0.5);
+          index++;
+        }
+        const centerIndexEnd = index;
+        for (let x = 0; x <= radialSegments; x++) {
+          const u = x / radialSegments;
+          const theta = u * thetaLength + thetaStart;
+          const cosTheta = Math.cos(theta);
+          const sinTheta = Math.sin(theta);
+          vertex2.x = radius * sinTheta;
+          vertex2.y = halfHeight * sign;
+          vertex2.z = radius * cosTheta;
+          vertices.push(vertex2.x, vertex2.y, vertex2.z);
+          normals.push(0, sign, 0);
+          uv.x = cosTheta * 0.5 + 0.5;
+          uv.y = sinTheta * 0.5 * sign + 0.5;
+          uvs.push(uv.x, uv.y);
+          index++;
+        }
+        for (let x = 0; x < radialSegments; x++) {
+          const c = centerIndexStart + x;
+          const i = centerIndexEnd + x;
+          if (top === true) {
+            indices.push(i, i + 1, c);
+          } else {
+            indices.push(i + 1, i, c);
+          }
+          groupCount += 3;
+        }
+        scope.addGroup(groupStart, groupCount, top === true ? 1 : 2);
+        groupStart += groupCount;
+      }
+    }
+    copy(source) {
+      super.copy(source);
+      this.parameters = Object.assign({}, source.parameters);
+      return this;
+    }
+    /**
+     * Factory method for creating an instance of this class from the given
+     * JSON object.
+     *
+     * @param {Object} data - A JSON object representing the serialized geometry.
+     * @return {CylinderGeometry} A new instance.
+     */
+    static fromJSON(data) {
+      return new _CylinderGeometry(data.radiusTop, data.radiusBottom, data.height, data.radialSegments, data.heightSegments, data.openEnded, data.thetaStart, data.thetaLength);
+    }
+  };
+  var ConeGeometry = class _ConeGeometry extends CylinderGeometry {
+    /**
+     * Constructs a new cone geometry.
+     *
+     * @param {number} [radius=1] - Radius of the cone base.
+     * @param {number} [height=1] - Height of the cone.
+     * @param {number} [radialSegments=32] - Number of segmented faces around the circumference of the cone.
+     * @param {number} [heightSegments=1] - Number of rows of faces along the height of the cone.
+     * @param {boolean} [openEnded=false] - Whether the base of the cone is open or capped.
+     * @param {number} [thetaStart=0] - Start angle for first segment, in radians.
+     * @param {number} [thetaLength=Math.PI*2] - The central angle, often called theta, of the circular sector, in radians.
+     * The default value results in a complete cone.
+     */
+    constructor(radius = 1, height = 1, radialSegments = 32, heightSegments = 1, openEnded = false, thetaStart = 0, thetaLength = Math.PI * 2) {
+      super(0, radius, height, radialSegments, heightSegments, openEnded, thetaStart, thetaLength);
+      this.type = "ConeGeometry";
+      this.parameters = {
+        radius,
+        height,
+        radialSegments,
+        heightSegments,
+        openEnded,
+        thetaStart,
+        thetaLength
+      };
+    }
+    /**
+     * Factory method for creating an instance of this class from the given
+     * JSON object.
+     *
+     * @param {Object} data - A JSON object representing the serialized geometry.
+     * @return {ConeGeometry} A new instance.
+     */
+    static fromJSON(data) {
+      return new _ConeGeometry(data.radius, data.height, data.radialSegments, data.heightSegments, data.openEnded, data.thetaStart, data.thetaLength);
+    }
+  };
   var PlaneGeometry = class _PlaneGeometry extends BufferGeometry {
     /**
      * Constructs a new plane geometry.
@@ -12824,6 +13011,86 @@
      */
     static fromJSON(data) {
       return new _SphereGeometry(data.radius, data.widthSegments, data.heightSegments, data.phiStart, data.phiLength, data.thetaStart, data.thetaLength);
+    }
+  };
+  var TorusGeometry = class _TorusGeometry extends BufferGeometry {
+    /**
+     * Constructs a new torus geometry.
+     *
+     * @param {number} [radius=1] - Radius of the torus, from the center of the torus to the center of the tube.
+     * @param {number} [tube=0.4] - Radius of the tube. Must be smaller than `radius`.
+     * @param {number} [radialSegments=12] - The number of radial segments.
+     * @param {number} [tubularSegments=48] - The number of tubular segments.
+     * @param {number} [arc=Math.PI*2] - Central angle in radians.
+     * @param {number} [thetaStart=0] - Start of the tubular sweep in radians.
+     * @param {number} [thetaLength=Math.PI*2] - Length of the tubular sweep in radians.
+     */
+    constructor(radius = 1, tube = 0.4, radialSegments = 12, tubularSegments = 48, arc = Math.PI * 2, thetaStart = 0, thetaLength = Math.PI * 2) {
+      super();
+      this.type = "TorusGeometry";
+      this.parameters = {
+        radius,
+        tube,
+        radialSegments,
+        tubularSegments,
+        arc,
+        thetaStart,
+        thetaLength
+      };
+      radialSegments = Math.floor(radialSegments);
+      tubularSegments = Math.floor(tubularSegments);
+      const indices = [];
+      const vertices = [];
+      const normals = [];
+      const uvs = [];
+      const center = new Vector3();
+      const vertex2 = new Vector3();
+      const normal = new Vector3();
+      for (let j = 0; j <= radialSegments; j++) {
+        const v = thetaStart + j / radialSegments * thetaLength;
+        for (let i = 0; i <= tubularSegments; i++) {
+          const u = i / tubularSegments * arc;
+          vertex2.x = (radius + tube * Math.cos(v)) * Math.cos(u);
+          vertex2.y = (radius + tube * Math.cos(v)) * Math.sin(u);
+          vertex2.z = tube * Math.sin(v);
+          vertices.push(vertex2.x, vertex2.y, vertex2.z);
+          center.x = radius * Math.cos(u);
+          center.y = radius * Math.sin(u);
+          normal.subVectors(vertex2, center).normalize();
+          normals.push(normal.x, normal.y, normal.z);
+          uvs.push(i / tubularSegments);
+          uvs.push(j / radialSegments);
+        }
+      }
+      for (let j = 1; j <= radialSegments; j++) {
+        for (let i = 1; i <= tubularSegments; i++) {
+          const a = (tubularSegments + 1) * j + i - 1;
+          const b = (tubularSegments + 1) * (j - 1) + i - 1;
+          const c = (tubularSegments + 1) * (j - 1) + i;
+          const d = (tubularSegments + 1) * j + i;
+          indices.push(a, b, d);
+          indices.push(b, c, d);
+        }
+      }
+      this.setIndex(indices);
+      this.setAttribute("position", new Float32BufferAttribute(vertices, 3));
+      this.setAttribute("normal", new Float32BufferAttribute(normals, 3));
+      this.setAttribute("uv", new Float32BufferAttribute(uvs, 2));
+    }
+    copy(source) {
+      super.copy(source);
+      this.parameters = Object.assign({}, source.parameters);
+      return this;
+    }
+    /**
+     * Factory method for creating an instance of this class from the given
+     * JSON object.
+     *
+     * @param {Object} data - A JSON object representing the serialized geometry.
+     * @return {TorusGeometry} A new instance.
+     */
+    static fromJSON(data) {
+      return new _TorusGeometry(data.radius, data.tube, data.radialSegments, data.tubularSegments, data.arc);
     }
   };
   function cloneUniforms(src) {
@@ -27294,6 +27561,17 @@ void main() {
   var RUN_ARM_TRAIL = 1.1;
   var RUN_ARM_OSC = 0.15;
   var RUN_BODY_LEAN = 0.28;
+  var BOW_RADIUS = 0.42;
+  var BOW_TUBE_RADIUS = 0.025;
+  var BOW_ARC = Math.PI * 1.15;
+  var BOW_ARM_NEUTRAL = { x: -0.5, z: 0 };
+  var BOW_ARM_DRAWN = { x: 0.35, z: 0.55 };
+  var BOW_DRAW_EASE_MS = 220;
+  var BOW_MIN_DRAW_MS = 120;
+  var BOW_MAX_DRAW_MS = 1200;
+  var BOW_RELEASE_SNAP_MS = 100;
+  var BOW_RELEASE_SETTLE_MS = 220;
+  var BOW_HOLD_POSE = { x: -1.1, z: -0.15 };
   var COOLDOWN_TINT_COLOR = new Color("#ff3b30");
   var COOLDOWN_TINT_STRENGTH = 0.45;
   var COOLDOWN_TINT_EASE_RATE = 6;
@@ -27341,6 +27619,22 @@ void main() {
     const guard = new Mesh(new BoxGeometry(0.22, 0.06, 0.06), new MeshStandardMaterial({ color: "#78716c" }));
     swordPivot.add(blade, guard);
     rightArm.add(swordPivot);
+    const bowPivot = new Group();
+    bowPivot.position.set(0, -ARM_H, 0);
+    const bowMaterial = new MeshStandardMaterial({ color: "#78350f", roughness: 0.6 });
+    const bowArc = new Mesh(
+      new TorusGeometry(BOW_RADIUS, BOW_TUBE_RADIUS, 8, 16, BOW_ARC),
+      bowMaterial
+    );
+    bowArc.rotation.z = Math.PI / 2 - BOW_ARC / 2;
+    bowArc.rotation.y = Math.PI / 2;
+    bowArc.castShadow = true;
+    const bowString = new Mesh(
+      new CylinderGeometry(8e-3, 8e-3, BOW_RADIUS * 1.85, 6),
+      new MeshBasicMaterial({ color: "#e7e5e4" })
+    );
+    bowPivot.add(bowArc, bowString);
+    leftArm.add(bowPivot);
     const shield = new Mesh(
       new SphereGeometry(0.95, 16, 12),
       new MeshBasicMaterial({ color: "#22d3ee", transparent: true, opacity: 0.22, depthWrite: false })
@@ -27348,6 +27642,7 @@ void main() {
     shield.position.y = 0.9;
     shield.visible = false;
     group.add(shield);
+    bowPivot.visible = false;
     return {
       group,
       visual,
@@ -27359,6 +27654,15 @@ void main() {
       rightLeg,
       swordPivot,
       blade,
+      bowPivot,
+      equippedWeapon: "sword",
+      bowDrawing: false,
+      bowDrawStartAt: -Infinity,
+      // Set by releaseBowDraw at the exact moment of firing — drives the
+      // accelerated snap/settle follow-through in updatePlayerVisual's own
+      // bow-pose block once bowDrawing goes back to false.
+      bowReleaseAt: -Infinity,
+      bowReleaseFromCharge: 0,
       shield,
       // Swept-hit tracking (see getSwordWorldSamplePoints/isActiveSwing
       // below) — isActiveSwing is true only while the blade is actually
@@ -27407,6 +27711,37 @@ void main() {
     }
     return false;
   }
+  function setEquippedWeapon(rig, weapon) {
+    if (rig.equippedWeapon === weapon) return;
+    rig.equippedWeapon = weapon;
+    rig.bowDrawing = false;
+    rig.swordPivot.visible = weapon === "sword";
+    rig.bowPivot.visible = weapon === "bow";
+  }
+  function switchEquippedWeapon(rig) {
+    setEquippedWeapon(rig, rig.equippedWeapon === "sword" ? "bow" : "sword");
+  }
+  function setRigOpacity(rig, opacity) {
+    rig.group.traverse((obj) => {
+      if (obj.isMesh && obj !== rig.shield) {
+        obj.material.transparent = opacity < 1;
+        obj.material.opacity = opacity;
+        obj.material.needsUpdate = true;
+      }
+    });
+  }
+  function startBowDraw(rig, nowMs) {
+    rig.bowDrawing = true;
+    rig.bowDrawStartAt = nowMs;
+  }
+  function releaseBowDraw(rig, nowMs, minSpeed, maxSpeed) {
+    const heldMs = Math.max(0, nowMs - rig.bowDrawStartAt);
+    const chargeFrac = Math.min(1, Math.max(0, (heldMs - BOW_MIN_DRAW_MS) / (BOW_MAX_DRAW_MS - BOW_MIN_DRAW_MS)));
+    rig.bowDrawing = false;
+    rig.bowReleaseAt = nowMs;
+    rig.bowReleaseFromCharge = chargeFrac;
+    return { speed: minSpeed + (maxSpeed - minSpeed) * chargeFrac, chargeFrac };
+  }
   function interruptToCooldown(rig, nowMs) {
     rig.cooldownFromX = rig.rightArm.rotation.x;
     rig.cooldownFromZ = rig.rightArm.rotation.z;
@@ -27414,7 +27749,7 @@ void main() {
     rig.comboState = "cooldown";
     rig.stateEnteredAt = nowMs;
   }
-  function updatePlayerVisual(rig, nowMs, isMoving, dt) {
+  function updatePlayerVisual(rig, nowMs, isMoving, dt, aimElevation = 0) {
     const easeStep = Math.min(1, dt * BOB_EASE_RATE);
     rig.walkBlend += ((isMoving ? 1 : 0) - rig.walkBlend) * easeStep;
     if (isMoving) rig.walkPhase += dt * WALK_FREQUENCY;
@@ -27422,8 +27757,24 @@ void main() {
     rig.leftLeg.rotation.x = swing;
     rig.rightLeg.rotation.x = -swing;
     const armTrail = RUN_ARM_TRAIL * rig.walkBlend + Math.sin(rig.walkPhase) * RUN_ARM_OSC * rig.walkBlend;
-    rig.leftArm.rotation.x = armTrail;
-    if (rig.comboState === "idle") {
+    const isBow = rig.equippedWeapon === "bow";
+    let leftArmT = 0;
+    if (isBow) {
+      if (rig.bowDrawing) {
+        leftArmT = Math.min(1, (nowMs - rig.bowDrawStartAt) / BOW_DRAW_EASE_MS);
+      } else {
+        leftArmT = Math.max(0, 1 - (nowMs - rig.bowReleaseAt) / BOW_DRAW_EASE_MS);
+      }
+    }
+    if (isBow) {
+      rig.leftArm.rotation.x = BOW_HOLD_POSE.x - aimElevation * leftArmT;
+      rig.leftArm.rotation.z = BOW_HOLD_POSE.z;
+      rig.head.rotation.x = -aimElevation * leftArmT;
+    } else {
+      rig.leftArm.rotation.x = armTrail;
+      rig.head.rotation.x = 0;
+    }
+    if (!isBow && rig.comboState === "idle") {
       rig.rightArm.rotation.x = armTrail;
       rig.visual.rotation.x = RUN_BODY_LEAN * rig.walkBlend;
     }
@@ -27483,6 +27834,27 @@ void main() {
         rig.comboState = "idle";
         rig.stateEnteredAt = nowMs;
       }
+    }
+    if (isBow) {
+      let chargeFrac;
+      if (rig.bowDrawing) {
+        const heldMs = nowMs - rig.bowDrawStartAt;
+        chargeFrac = Math.min(1, Math.max(0, (heldMs - BOW_MIN_DRAW_MS) / (BOW_MAX_DRAW_MS - BOW_MIN_DRAW_MS)));
+      } else {
+        const releaseElapsed = nowMs - rig.bowReleaseAt;
+        if (releaseElapsed < BOW_RELEASE_SNAP_MS) {
+          const t = releaseElapsed / BOW_RELEASE_SNAP_MS;
+          chargeFrac = rig.bowReleaseFromCharge + (1 - rig.bowReleaseFromCharge) * (t * t);
+        } else if (releaseElapsed < BOW_RELEASE_SNAP_MS + BOW_RELEASE_SETTLE_MS) {
+          const t = (releaseElapsed - BOW_RELEASE_SNAP_MS) / BOW_RELEASE_SETTLE_MS;
+          chargeFrac = 1 - t;
+        } else {
+          chargeFrac = 0;
+        }
+      }
+      const drawnX = BOW_ARM_DRAWN.x - aimElevation;
+      rig.rightArm.rotation.x = BOW_ARM_NEUTRAL.x + (drawnX - BOW_ARM_NEUTRAL.x) * chargeFrac;
+      rig.rightArm.rotation.z = BOW_ARM_NEUTRAL.z + (BOW_ARM_DRAWN.z - BOW_ARM_NEUTRAL.z) * chargeFrac;
     }
     const tintTarget = rig.comboState === "cooldown" ? 1 : 0;
     rig.cooldownTintAlpha += (tintTarget - rig.cooldownTintAlpha) * Math.min(1, dt * COOLDOWN_TINT_EASE_RATE);
@@ -27574,8 +27946,24 @@ void main() {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
     }
     return {
-      sendPosition(x, y, z, facing, isActiveSwing, bladePoints) {
-        send({ type: "position", x, y, z, facing, isActiveSwing, bladePoints: bladePoints || null });
+      // equippedWeapon/aimElevation/isDrawingBow — added for the bow: lets
+      // every peer see the shooter actually holding/aiming/drawing it (see
+      // main.py's own peer_position broadcast and game.js's own
+      // peer_position handler), the same way isActiveSwing already lets
+      // peers mirror a sword swing.
+      sendPosition(x, y, z, facing, isActiveSwing, bladePoints, equippedWeapon, aimElevation, isDrawingBow) {
+        send({
+          type: "position",
+          x,
+          y,
+          z,
+          facing,
+          isActiveSwing,
+          bladePoints: bladePoints || null,
+          equippedWeapon,
+          aimElevation,
+          isDrawingBow
+        });
       },
       sendAttackStart() {
         send({ type: "attack_start" });
@@ -27591,6 +27979,18 @@ void main() {
       },
       sendFell() {
         send({ type: "fell" });
+      },
+      // Sent once, on release (not a tick-gated stream like position/attack
+      // sampling) — the server assigns the arrow's real id and simulates its
+      // whole flight itself (see main.py's own arrow tick loop), broadcasting
+      // "arrow_spawned" back to every client including this one so the local
+      // visual spawns from the same authoritative event everyone else sees,
+      // same reasoning as the smoke skill's own no-optimistic-local-spawn
+      // choice. speed is client-reported but clamped server-side to a sane
+      // range — never trusted outright, same trust model as everything else
+      // here that's client-authoritative-with-a-backstop.
+      sendFireArrow(originX, originY, originZ, dirX, dirY, dirZ, speed) {
+        send({ type: "fire_arrow", originX, originY, originZ, dirX, dirY, dirZ, speed });
       },
       sendSmokeStart() {
         send({ type: "smoke_start" });
@@ -27872,6 +28272,11 @@ void main() {
   // src/game.js
   var CAMERA_DISTANCE = 2.7;
   var CAMERA_DAMPING = 0.18;
+  var AIM_CAMERA_DISTANCE = 1.3;
+  var AIM_SIDE_OFFSET = 0.55;
+  var AIM_PIVOT_HEIGHT_FRAC = 0.95;
+  var AIM_LOCAL_OPACITY = 0.3;
+  var AIM_BLEND_RATE = 6;
   var CAMERA_BASE_TILT = 0.42;
   var TURN_SPEED = 2.4;
   var PITCH_SPEED = 2;
@@ -27889,6 +28294,61 @@ void main() {
   var SMOKE_DURATION_MS = 6e3;
   var PEER_EASE_RATE = 12;
   var PEER_MOVE_THRESHOLD = 0.05;
+  var BOW_MIN_ARROW_SPEED = 14;
+  var BOW_MAX_ARROW_SPEED = 34;
+  var BOW_COOLDOWN_MS = 250;
+  var ARROW_ORIGIN_FORWARD_OFFSET = 0.35;
+  var ARROW_GRAVITY_CLIENT = 12;
+  var ARROW_MAX_LIFETIME_MS_CLIENT = 4200;
+  var ARROW_SHAFT_LENGTH = 0.5;
+  function createArrowVisual(scene, x, y, z, vx, vy, vz) {
+    const group = new Group();
+    const shaft = new Mesh(
+      new CylinderGeometry(0.015, 0.02, ARROW_SHAFT_LENGTH, 6),
+      new MeshStandardMaterial({ color: "#78350f" })
+    );
+    shaft.rotation.x = -Math.PI / 2;
+    group.add(shaft);
+    const tip = new Mesh(new ConeGeometry(0.035, 0.09, 6), new MeshStandardMaterial({ color: "#a8a29e" }));
+    tip.rotation.x = -Math.PI / 2;
+    tip.position.z = -(ARROW_SHAFT_LENGTH / 2 + 0.045);
+    group.add(tip);
+    group.position.set(x, y, z);
+    scene.add(group);
+    let vX = vx;
+    let vY = vy;
+    let vZ = vz;
+    let elapsedMs = 0;
+    const ahead = new Vector3();
+    group.lookAt(x + vX, y + vY, z + vZ);
+    return {
+      mesh: group,
+      // Returns false once the arrow's own client-local safety lifetime is
+      // up (see ARROW_MAX_LIFETIME_MS_CLIENT) — normal removal is driven by
+      // the server's "arrow_expired" message instead (see disposeArrow),
+      // this is only a backstop against a dropped message stranding the
+      // visual forever.
+      update(dt) {
+        elapsedMs += dt * 1e3;
+        vY -= ARROW_GRAVITY_CLIENT * dt;
+        group.position.x += vX * dt;
+        group.position.y += vY * dt;
+        group.position.z += vZ * dt;
+        ahead.set(group.position.x + vX, group.position.y + vY, group.position.z + vZ);
+        group.lookAt(ahead);
+        return elapsedMs < ARROW_MAX_LIFETIME_MS_CLIENT;
+      }
+    };
+  }
+  function disposeArrowVisual(scene, arrow) {
+    scene.remove(arrow.mesh);
+    arrow.mesh.traverse((obj) => {
+      if (obj.isMesh) {
+        obj.geometry.dispose();
+        obj.material.dispose();
+      }
+    });
+  }
   function buildArenaMeshes(scene, arena) {
     const floorMat = new MeshStandardMaterial({ color: "#3f3f46" });
     const obstacleMat = new MeshStandardMaterial({ color: "#78350f" });
@@ -27928,12 +28388,14 @@ void main() {
   var DASH_KEYS = ["ShiftLeft", "ShiftRight"];
   var STANDINGS_KEY = "Tab";
   var SMOKE_KEY = "KeyF";
-  function createInputState(canvas, rotateButtonState, onPointerLockChange) {
+  var WEAPON_SWITCH_KEY = "KeyQ";
+  function createInputState(canvas, rotateButtonState, onPointerLockChange, onWeaponSwitch) {
     const pressed = /* @__PURE__ */ new Set();
     let jumpQueued = false;
     let attackQueued = false;
     let dashQueued = false;
     let smokeQueued = false;
+    let mouseIsDown = false;
     let mouseDeltaX = 0;
     let mouseDeltaY = 0;
     let canvasFocused = document.activeElement === canvas;
@@ -27943,6 +28405,7 @@ void main() {
     function onBlur() {
       canvasFocused = false;
       pressed.clear();
+      mouseIsDown = false;
     }
     function keydown(e) {
       if (!canvasFocused) return;
@@ -27951,6 +28414,7 @@ void main() {
       if (e.code === "KeyJ") attackQueued = true;
       if (DASH_KEYS.includes(e.code)) dashQueued = true;
       if (e.code === SMOKE_KEY) smokeQueued = true;
+      if (e.code === WEAPON_SWITCH_KEY) onWeaponSwitch();
       if (e.code === MOUSE_LOOK_KEY) {
         if (document.pointerLockElement === canvas) document.exitPointerLock();
         else canvas.requestPointerLock();
@@ -27961,7 +28425,13 @@ void main() {
       pressed.delete(e.code);
     }
     function mousedown(e) {
-      if (e.button === 0 && (e.target === canvas || document.pointerLockElement === canvas)) attackQueued = true;
+      if (e.button === 0 && (e.target === canvas || document.pointerLockElement === canvas)) {
+        attackQueued = true;
+        mouseIsDown = true;
+      }
+    }
+    function mouseup(e) {
+      if (e.button === 0) mouseIsDown = false;
     }
     function mousemove(e) {
       if (document.pointerLockElement !== canvas) return;
@@ -27976,6 +28446,7 @@ void main() {
     window.addEventListener("keydown", keydown);
     window.addEventListener("keyup", keyup);
     window.addEventListener("mousedown", mousedown);
+    window.addEventListener("mouseup", mouseup);
     window.addEventListener("mousemove", mousemove);
     document.addEventListener("pointerlockchange", pointerlockchange);
     return {
@@ -28005,7 +28476,20 @@ void main() {
         attackQueued = false;
         dashQueued = false;
         smokeQueued = false;
-        return { inputForward, inputStrafe, turn, pitchTurn, mouseTurnDelta, mousePitchDelta, jump, attack, dash, smoke, standingsHeld };
+        return {
+          inputForward,
+          inputStrafe,
+          turn,
+          pitchTurn,
+          mouseTurnDelta,
+          mousePitchDelta,
+          jump,
+          attack,
+          dash,
+          smoke,
+          mouseHeld: mouseIsDown,
+          standingsHeld
+        };
       },
       dispose() {
         canvas.removeEventListener("focus", onFocus);
@@ -28013,6 +28497,7 @@ void main() {
         window.removeEventListener("keydown", keydown);
         window.removeEventListener("keyup", keyup);
         window.removeEventListener("mousedown", mousedown);
+        window.removeEventListener("mouseup", mouseup);
         window.removeEventListener("mousemove", mousemove);
         document.removeEventListener("pointerlockchange", pointerlockchange);
         if (document.pointerLockElement === canvas) document.exitPointerLock();
@@ -28084,19 +28569,29 @@ void main() {
     const sword = makeBar("\u2694", "Sword: Ready");
     const smoke = makeBar("\u{1F4A8}", "Smoke: Ready");
     const dash = makeBar("\u{1F4AB}", "Dash: Ready");
+    const bow = makeBar("\u{1F3F9}", "Bow: Ready");
     wrap.appendChild(sword.box);
     wrap.appendChild(smoke.box);
     wrap.appendChild(dash.box);
+    wrap.appendChild(bow.box);
     function updateBar(bar, name, frac, totalMs) {
       bar.barFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
       bar.labelEl.textContent = frac > 0 ? `${name}: ${(frac * totalMs / 1e3).toFixed(1)}s` : `${name}: Ready`;
     }
     return {
       el: wrap,
-      update(swordFrac, smokeFrac, dashFrac) {
+      update(swordFrac, smokeFrac, dashFrac, bowInfo) {
         updateBar(sword, "\u2694 Sword", swordFrac, ATTACK_COOLDOWN_MS);
         updateBar(smoke, "\u{1F4A8} Smoke", smokeFrac, SMOKE_COOLDOWN_MS);
         updateBar(dash, "\u{1F4AB} Dash", dashFrac, DASH_COOLDOWN_MS);
+        if (bowInfo?.charging) {
+          bow.barFill.style.background = "#4ade80";
+          bow.barFill.style.width = `${Math.max(0, Math.min(1, bowInfo.frac)) * 100}%`;
+          bow.labelEl.textContent = `\u{1F3F9} Bow: Charging ${Math.round(bowInfo.frac * 100)}%`;
+        } else {
+          bow.barFill.style.background = "#38bdf8";
+          updateBar(bow, "\u{1F3F9} Bow", bowInfo?.frac ?? 0, BOW_COOLDOWN_MS);
+        }
       }
     };
   }
@@ -28150,6 +28645,33 @@ void main() {
       }
     };
   }
+  function buildBowReticle() {
+    const el = document.createElement("div");
+    el.style.position = "absolute";
+    el.style.top = "50%";
+    el.style.left = "50%";
+    el.style.width = "14px";
+    el.style.height = "14px";
+    el.style.marginLeft = "-7px";
+    el.style.marginTop = "-7px";
+    el.style.borderRadius = "50%";
+    el.style.border = "2px solid #ef4444";
+    el.style.boxShadow = "0 0 3px rgba(0,0,0,0.7)";
+    el.style.pointerEvents = "none";
+    el.style.display = "none";
+    el.style.opacity = "0";
+    return {
+      el,
+      // t: 0-1, the same aimBlend value driving the camera's own zoom/offset
+      // — fades in/out with it (see frame()'s own camera section) instead of
+      // an instant show/hide, so the reticle's own appearance matches the
+      // smooth camera transition rather than popping in ahead of or behind it.
+      setBlend(t) {
+        el.style.display = t > 1e-3 ? "block" : "none";
+        el.style.opacity = String(t);
+      }
+    };
+  }
   function mount(el, ctx) {
     el.innerHTML = "";
     const wrap = document.createElement("div");
@@ -28157,7 +28679,7 @@ void main() {
     const status = document.createElement("p");
     status.style.fontSize = "12px";
     status.style.margin = "0 0 6px 0";
-    status.textContent = "WASD to move/strafe, arrow keys (or M for mouse-look) to look around, Space to jump, click or J to swing, Shift to dash. Connecting\u2026";
+    status.textContent = "WASD to move/strafe, arrow keys (or M for mouse-look) to look around, Space to jump, click or J to swing, Q to switch sword/bow, Shift to dash. Connecting\u2026";
     wrap.appendChild(status);
     const mouseLookStatus = document.createElement("p");
     mouseLookStatus.style.fontSize = "11px";
@@ -28199,6 +28721,8 @@ void main() {
     canvasWrap.appendChild(smokeIcon.el);
     const dashIcon = buildSkillCanvasIcon("\u{1F4AB}", 48);
     canvasWrap.appendChild(dashIcon.el);
+    const bowReticle = buildBowReticle();
+    canvasWrap.appendChild(bowReticle.el);
     wrap.appendChild(canvasWrap);
     const cooldownHud = buildCooldownHud();
     wrap.appendChild(cooldownHud.el);
@@ -28209,7 +28733,7 @@ void main() {
     controlsHelp.style.margin = "8px 0 0 0";
     controlsHelp.style.color = "#a3a3a3";
     controlsHelp.style.lineHeight = "1.5";
-    controlsHelp.innerHTML = "<strong>Controls</strong> \u2014 WASD: move/strafe &nbsp;\u2022&nbsp; Arrow keys: look &nbsp;\u2022&nbsp; M: toggle mouse-look &nbsp;\u2022&nbsp; Space: jump &nbsp;\u2022&nbsp; Click or J: swing sword &nbsp;\u2022&nbsp; Shift: dash &nbsp;\u2022&nbsp; F: smoke skill &nbsp;\u2022&nbsp; Tab (hold): show standings";
+    controlsHelp.innerHTML = "<strong>Controls</strong> \u2014 WASD: move/strafe &nbsp;\u2022&nbsp; Arrow keys: look &nbsp;\u2022&nbsp; M: toggle mouse-look &nbsp;\u2022&nbsp; Space: jump &nbsp;\u2022&nbsp; Click or J: swing sword / fire bow &nbsp;\u2022&nbsp; Q: switch sword/bow &nbsp;\u2022&nbsp; Hold click with the bow out: draw \u2014 longer hold flies faster &nbsp;\u2022&nbsp; Shift: dash &nbsp;\u2022&nbsp; F: smoke skill &nbsp;\u2022&nbsp; Tab (hold): show standings";
     wrap.appendChild(controlsHelp);
     el.appendChild(wrap);
     canvas.focus();
@@ -28219,6 +28743,16 @@ void main() {
     const rig = buildPlayerRig("#f59e0b");
     scene.add(rig.group);
     const peers = /* @__PURE__ */ new Map();
+    const arrows = /* @__PURE__ */ new Map();
+    function spawnArrowFromServer(arrowId, x, y, z, vx, vy, vz) {
+      arrows.set(arrowId, createArrowVisual(scene, x, y, z, vx, vy, vz));
+    }
+    function despawnArrow(arrowId) {
+      const arrow = arrows.get(arrowId);
+      if (!arrow) return;
+      disposeArrowVisual(scene, arrow);
+      arrows.delete(arrowId);
+    }
     function ensurePeer(userId, x, y, z, facing) {
       let peer = peers.get(userId);
       if (!peer) {
@@ -28238,7 +28772,13 @@ void main() {
           isMoving: false,
           wasActiveSwing: false,
           invulnerableUntil: 0,
-          kills: 0
+          kills: 0,
+          // Bow visuals — see the peer_position/roster handlers below for
+          // where these actually get set, and setEquippedWeapon/startBowDraw
+          // for how they're applied to peerRig. wasDrawingBow tracks the
+          // rising/falling edge the same way wasActiveSwing does above.
+          aimElevation: 0,
+          wasDrawingBow: false
         };
         peer.rig.group.position.set(x, y, z);
         peer.rig.group.rotation.y = facing;
@@ -28257,9 +28797,21 @@ void main() {
     let pitchAngle = 0;
     const camPos = new Vector3(SPAWN.x, SPAWN.y + PLAYER_HEIGHT, SPAWN.z + CAMERA_DISTANCE);
     const camLookAt = new Vector3(SPAWN.x, SPAWN.y, SPAWN.z);
-    const input = createInputState(canvas, turnButtons.state, (locked) => {
-      mouseLookStatus.textContent = locked ? "Mouse-look: ON (press M to disable)" : "Mouse-look: off (press M to try enabling it)";
-    });
+    const aimDirScratch = new Vector3();
+    const input = createInputState(
+      canvas,
+      turnButtons.state,
+      (locked) => {
+        mouseLookStatus.textContent = locked ? "Mouse-look: ON (press M to disable)" : "Mouse-look: off (press M to try enabling it)";
+      },
+      () => {
+        if (rig.isActiveSwing) return;
+        switchEquippedWeapon(rig);
+        status.textContent = rig.equippedWeapon === "bow" ? "Bow equipped. Hold click to draw, release to fire." : "Sword equipped.";
+        if (rig.equippedWeapon === "bow") canvas.requestPointerLock();
+        else if (document.pointerLockElement === canvas) document.exitPointerLock();
+      }
+    );
     let lastWidth = 0;
     let lastHeight = 0;
     let lastFrameTime = performance.now();
@@ -28281,6 +28833,8 @@ void main() {
     let matchEndsAt = 0;
     let matchOver = false;
     let smokeCooldownUntil = 0;
+    let bowCooldownUntil = 0;
+    let aimBlend = 0;
     const bloodEffects = [];
     const BLOOD_SPRAY_HEIGHT = 1;
     const NECK_Y2 = 1.3;
@@ -28370,6 +28924,8 @@ void main() {
           for (const p of msg.players) {
             const peer = ensurePeer(p.userId, p.x, p.y, p.z, p.facing);
             peer.kills = p.kills;
+            setEquippedWeapon(peer.rig, p.equippedWeapon === "bow" ? "bow" : "sword");
+            peer.aimElevation = p.aimElevation || 0;
             if (!p.alive) startDeathFall(peer.rig, performance.now());
           }
           status.textContent = `Connected \u2014 ${msg.players.length} other player(s) here.`;
@@ -28393,6 +28949,14 @@ void main() {
             tryAttack(peer.rig, performance.now());
           }
           peer.wasActiveSwing = !!msg.isActiveSwing;
+          setEquippedWeapon(peer.rig, msg.equippedWeapon === "bow" ? "bow" : "sword");
+          peer.aimElevation = msg.aimElevation || 0;
+          if (msg.isDrawingBow && !peer.wasDrawingBow && !peer.rig.isDead) {
+            startBowDraw(peer.rig, performance.now());
+          } else if (!msg.isDrawingBow && peer.wasDrawingBow) {
+            peer.rig.bowDrawing = false;
+          }
+          peer.wasDrawingBow = !!msg.isDrawingBow;
           break;
         }
         case "death":
@@ -28421,6 +28985,12 @@ void main() {
           bloodEffects.push(spawnSmokeCloud(scene, msg.x, msg.y, msg.z, SMOKE_RADIUS, msg.durationMs));
           if (msg.userId === ctx.selfId) status.textContent = "Smoke deployed!";
           break;
+        case "arrow_spawned":
+          spawnArrowFromServer(msg.arrowId, msg.x, msg.y, msg.z, msg.vx, msg.vy, msg.vz);
+          break;
+        case "arrow_expired":
+          despawnArrow(msg.arrowId);
+          break;
         case "_disconnected":
           status.textContent = "Disconnected from the match.";
           break;
@@ -28429,10 +28999,28 @@ void main() {
           break;
       }
     });
+    function fireArrow(speed) {
+      const dir = camera.getWorldDirection(aimDirScratch);
+      const origin = camera.position.clone().addScaledVector(dir, ARROW_ORIGIN_FORWARD_OFFSET);
+      socket.sendFireArrow(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, speed);
+    }
     function frame(now) {
       const dt = Math.min(0.1, (now - lastFrameTime) / 1e3);
       lastFrameTime = now;
-      const { inputForward, inputStrafe, turn, pitchTurn, mouseTurnDelta, mousePitchDelta, jump, attack, dash, smoke, standingsHeld } = input.read();
+      const {
+        inputForward,
+        inputStrafe,
+        turn,
+        pitchTurn,
+        mouseTurnDelta,
+        mousePitchDelta,
+        jump,
+        attack,
+        dash,
+        smoke,
+        mouseHeld,
+        standingsHeld
+      } = input.read();
       if (!matchOver) {
         const msLeft = Math.max(0, matchEndsAt - now);
         const totalSec = Math.ceil(msLeft / 1e3);
@@ -28526,22 +29114,43 @@ void main() {
         socket.sendFell();
       }
       rig.group.position.set(physics.x, physics.y, physics.z);
-      if (!isDead) rig.group.rotation.y = facingAngle;
+      let aimElevation = 0;
+      if (!isDead) {
+        if (rig.equippedWeapon === "bow") {
+          const dir = camera.getWorldDirection(aimDirScratch);
+          rig.group.rotation.y = Math.atan2(dir.x, dir.z);
+          aimElevation = Math.asin(Math.max(-1, Math.min(1, dir.y)));
+        } else {
+          rig.group.rotation.y = facingAngle;
+        }
+      }
       const isInvulnerable = now < invulnerableUntil;
-      if (attack && matchOver) {
-        status.textContent = "Time's up \u2014 combat's over.";
-      } else if (attack && isInvulnerable) {
-        status.textContent = "Still preparing \u2014 can't attack yet\u2026";
-      } else if (attack && !playerStunned) {
-        const started = tryAttack(rig, now);
-        if (!started) status.textContent = "Sword's still on cooldown\u2026";
-        else {
-          status.textContent = "Swing!";
-          socket.sendAttackStart();
+      const canAct = !matchOver && !isInvulnerable && !playerStunned && !isDead;
+      if (rig.equippedWeapon === "sword") {
+        if (attack && matchOver) {
+          status.textContent = "Time's up \u2014 combat's over.";
+        } else if (attack && isInvulnerable) {
+          status.textContent = "Still preparing \u2014 can't attack yet\u2026";
+        } else if (attack && !playerStunned) {
+          const started = tryAttack(rig, now);
+          if (!started) status.textContent = "Sword's still on cooldown\u2026";
+          else {
+            status.textContent = "Swing!";
+            socket.sendAttackStart();
+          }
+        }
+      } else {
+        if (mouseHeld && !rig.bowDrawing && canAct && now >= bowCooldownUntil) {
+          startBowDraw(rig, now);
+        } else if (!mouseHeld && rig.bowDrawing) {
+          const { speed } = releaseBowDraw(rig, now, BOW_MIN_ARROW_SPEED, BOW_MAX_ARROW_SPEED);
+          bowCooldownUntil = now + BOW_COOLDOWN_MS;
+          fireArrow(speed);
+          status.textContent = "Loosed!";
         }
       }
       if (isDead) updateDeathFall(rig, now);
-      else updatePlayerVisual(rig, now, isMoving, dt);
+      else updatePlayerVisual(rig, now, isMoving, dt, aimElevation);
       updateShieldVisual(rig, isInvulnerable, now);
       if (smoke && matchOver) {
         status.textContent = "Time's up \u2014 combat's over.";
@@ -28554,10 +29163,12 @@ void main() {
       }
       const smokeFrac = Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS);
       const dashFrac = Math.max(0, (dashCooldownUntil - now) / DASH_COOLDOWN_MS);
+      const bowInfo = rig.bowDrawing ? { charging: true, frac: Math.min(1, (now - rig.bowDrawStartAt - BOW_MIN_DRAW_MS) / (BOW_MAX_DRAW_MS - BOW_MIN_DRAW_MS)) } : { charging: false, frac: Math.max(0, (bowCooldownUntil - now) / BOW_COOLDOWN_MS) };
       cooldownHud.update(
         rig.comboState === "cooldown" ? Math.max(0, 1 - (now - rig.stateEnteredAt) / ATTACK_COOLDOWN_MS) : 0,
         smokeFrac,
-        dashFrac
+        dashFrac,
+        bowInfo
       );
       smokeIcon.update(smokeFrac, SMOKE_COOLDOWN_MS);
       dashIcon.update(dashFrac, DASH_COOLDOWN_MS);
@@ -28565,7 +29176,7 @@ void main() {
       const peerEase = 1 - Math.exp(-PEER_EASE_RATE * dt);
       for (const peer of peers.values()) {
         if (peer.rig.isDead) updateDeathFall(peer.rig, now);
-        else updatePlayerVisual(peer.rig, now, peer.isMoving, dt);
+        else updatePlayerVisual(peer.rig, now, peer.isMoving, dt, peer.aimElevation);
         updateShieldVisual(peer.rig, now < peer.invulnerableUntil, now);
         peer.rig.group.position.x += (peer.targetX - peer.rig.group.position.x) * peerEase;
         peer.rig.group.position.y += (peer.targetY - peer.rig.group.position.y) * peerEase;
@@ -28579,7 +29190,17 @@ void main() {
       if (now - lastNetworkTickAt >= NETWORK_TICK_MS) {
         lastNetworkTickAt = now;
         const bladePoints = rig.isActiveSwing ? getSwordWorldSamplePoints(rig) : null;
-        socket.sendPosition(physics.x, physics.y, physics.z, facingAngle, rig.isActiveSwing, bladePoints);
+        socket.sendPosition(
+          physics.x,
+          physics.y,
+          physics.z,
+          facingAngle,
+          rig.isActiveSwing,
+          bladePoints,
+          rig.equippedWeapon,
+          aimElevation,
+          rig.bowDrawing
+        );
       }
       if (playerWasActive && !rig.isActiveSwing) {
         status.textContent = "Swing finished.";
@@ -28589,20 +29210,29 @@ void main() {
       const orbitX = Math.sin(facingAngle) * Math.cos(effectivePitch);
       const orbitY = Math.sin(effectivePitch);
       const orbitZ = Math.cos(facingAngle) * Math.cos(effectivePitch);
+      const aimTarget = rig.bowDrawing ? 1 : 0;
+      aimBlend += (aimTarget - aimBlend) * (1 - Math.exp(-AIM_BLEND_RATE * dt));
+      bowReticle.setBlend(aimBlend);
       const pivotX = physics.x;
-      const pivotY = physics.y + PLAYER_HEIGHT * 0.6;
+      const pivotY = physics.y + PLAYER_HEIGHT * (0.6 + (AIM_PIVOT_HEIGHT_FRAC - 0.6) * aimBlend);
       const pivotZ = physics.z;
-      const desiredCamX = pivotX - orbitX * CAMERA_DISTANCE;
-      const desiredCamY = pivotY + orbitY * CAMERA_DISTANCE;
-      const desiredCamZ = pivotZ - orbitZ * CAMERA_DISTANCE;
+      const cameraDistance = CAMERA_DISTANCE + (AIM_CAMERA_DISTANCE - CAMERA_DISTANCE) * aimBlend;
+      const aimRightX = -Math.cos(facingAngle);
+      const aimRightZ = Math.sin(facingAngle);
+      const lookAtX = pivotX + aimRightX * AIM_SIDE_OFFSET * aimBlend;
+      const lookAtZ = pivotZ + aimRightZ * AIM_SIDE_OFFSET * aimBlend;
+      const desiredCamX = pivotX - orbitX * cameraDistance;
+      const desiredCamY = pivotY + orbitY * cameraDistance;
+      const desiredCamZ = pivotZ - orbitZ * cameraDistance;
       camPos.x += (desiredCamX - camPos.x) * CAMERA_DAMPING;
       camPos.y += (desiredCamY - camPos.y) * CAMERA_DAMPING;
       camPos.z += (desiredCamZ - camPos.z) * CAMERA_DAMPING;
-      camLookAt.x += (pivotX - camLookAt.x) * CAMERA_DAMPING;
+      camLookAt.x += (lookAtX - camLookAt.x) * CAMERA_DAMPING;
       camLookAt.y += (pivotY - camLookAt.y) * CAMERA_DAMPING;
-      camLookAt.z += (pivotZ - camLookAt.z) * CAMERA_DAMPING;
+      camLookAt.z += (lookAtZ - camLookAt.z) * CAMERA_DAMPING;
       camera.position.copy(camPos);
       camera.lookAt(camLookAt);
+      setRigOpacity(rig, 1 - (1 - AIM_LOCAL_OPACITY) * aimBlend);
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
       if (width > 0 && height > 0 && (width !== lastWidth || height !== lastHeight)) {
@@ -28615,6 +29245,9 @@ void main() {
       for (let i = bloodEffects.length - 1; i >= 0; i--) {
         if (!bloodEffects[i].update(dt)) bloodEffects.splice(i, 1);
       }
+      for (const [arrowId, arrow] of arrows) {
+        if (!arrow.update(dt)) despawnArrow(arrowId);
+      }
       renderer.render(scene, camera);
       rafId = requestAnimationFrame(frame);
     }
@@ -28624,6 +29257,7 @@ void main() {
       input.dispose();
       socket.dispose();
       for (const userId of Array.from(peers.keys())) removePeer(userId);
+      for (const arrow of arrows.values()) disposeArrowVisual(scene, arrow);
       disposeRig(rig);
       for (const effect of bloodEffects) effect.update(1e3);
       renderer.dispose();
@@ -28649,7 +29283,7 @@ void main() {
     const status = document.createElement("p");
     status.style.fontSize = "12px";
     status.style.margin = "0 0 6px 0";
-    status.textContent = "Practice mode \u2014 the dummy attacks on its own timer so you can drill parries. WASD to move/strafe, arrow keys (or M for mouse-look) to look around, Space to jump, click or J to swing, Shift to dash.";
+    status.textContent = "Practice mode \u2014 the dummy attacks on its own timer so you can drill parries. WASD to move/strafe, arrow keys (or M for mouse-look) to look around, Space to jump, click or J to swing, Q to switch sword/bow, Shift to dash.";
     wrap.appendChild(status);
     const mouseLookStatus = document.createElement("p");
     mouseLookStatus.style.fontSize = "11px";
@@ -28679,6 +29313,8 @@ void main() {
     canvasWrap.appendChild(smokeIcon.el);
     const dashIcon = buildSkillCanvasIcon("\u{1F4AB}", 48);
     canvasWrap.appendChild(dashIcon.el);
+    const bowReticle = buildBowReticle();
+    canvasWrap.appendChild(bowReticle.el);
     wrap.appendChild(canvasWrap);
     const cooldownHud = buildCooldownHud();
     wrap.appendChild(cooldownHud.el);
@@ -28689,7 +29325,7 @@ void main() {
     controlsHelp.style.margin = "8px 0 0 0";
     controlsHelp.style.color = "#a3a3a3";
     controlsHelp.style.lineHeight = "1.5";
-    controlsHelp.innerHTML = "<strong>Controls</strong> \u2014 WASD: move/strafe &nbsp;\u2022&nbsp; Arrow keys: look &nbsp;\u2022&nbsp; M: toggle mouse-look &nbsp;\u2022&nbsp; Space: jump &nbsp;\u2022&nbsp; Click or J: swing sword &nbsp;\u2022&nbsp; Shift: dash &nbsp;\u2022&nbsp; F: smoke skill";
+    controlsHelp.innerHTML = "<strong>Controls</strong> \u2014 WASD: move/strafe &nbsp;\u2022&nbsp; Arrow keys: look &nbsp;\u2022&nbsp; M: toggle mouse-look &nbsp;\u2022&nbsp; Space: jump &nbsp;\u2022&nbsp; Click or J: swing sword / fire bow &nbsp;\u2022&nbsp; Q: switch sword/bow &nbsp;\u2022&nbsp; Hold click with the bow out: draw \u2014 longer hold flies faster &nbsp;\u2022&nbsp; Shift: dash &nbsp;\u2022&nbsp; F: smoke skill";
     wrap.appendChild(controlsHelp);
     el.appendChild(wrap);
     canvas.focus();
@@ -28710,9 +29346,21 @@ void main() {
     let pitchAngle = 0;
     const camPos = new Vector3(SPAWN.x, SPAWN.y + PLAYER_HEIGHT, SPAWN.z + CAMERA_DISTANCE);
     const camLookAt = new Vector3(SPAWN.x, SPAWN.y, SPAWN.z);
-    const input = createInputState(canvas, turnButtons.state, (locked) => {
-      mouseLookStatus.textContent = locked ? "Mouse-look: ON (press M to disable)" : "Mouse-look: off (press M to try enabling it)";
-    });
+    const aimDirScratch = new Vector3();
+    const input = createInputState(
+      canvas,
+      turnButtons.state,
+      (locked) => {
+        mouseLookStatus.textContent = locked ? "Mouse-look: ON (press M to disable)" : "Mouse-look: off (press M to try enabling it)";
+      },
+      () => {
+        if (rig.isActiveSwing) return;
+        switchEquippedWeapon(rig);
+        status.textContent = rig.equippedWeapon === "bow" ? "Bow equipped. Hold click to draw, release to fire." : "Sword equipped.";
+        if (rig.equippedWeapon === "bow") canvas.requestPointerLock();
+        else if (document.pointerLockElement === canvas) document.exitPointerLock();
+      }
+    );
     let lastWidth = 0;
     let lastHeight = 0;
     let lastFrameTime = performance.now();
@@ -28731,7 +29379,10 @@ void main() {
     let hitsLanded = 0;
     let timesHit = 0;
     let smokeCooldownUntil = 0;
+    let bowCooldownUntil = 0;
+    let aimBlend = 0;
     const bloodEffects = [];
+    const arrows = [];
     const BLOOD_SPRAY_HEIGHT = 1;
     function respawnPlayer(now) {
       isDead = false;
@@ -28778,7 +29429,7 @@ void main() {
     function frame(now) {
       const dt = Math.min(0.1, (now - lastFrameTime) / 1e3);
       lastFrameTime = now;
-      const { inputForward, inputStrafe, turn, pitchTurn, mouseTurnDelta, mousePitchDelta, jump, attack, dash, smoke } = input.read();
+      const { inputForward, inputStrafe, turn, pitchTurn, mouseTurnDelta, mousePitchDelta, jump, attack, dash, smoke, mouseHeld } = input.read();
       scoreEl.textContent = `Hits landed: ${hitsLanded} \u2014 Times you've been hit: ${timesHit}`;
       facingAngle += turn * TURN_SPEED * dt + mouseTurnDelta;
       pitchAngle += pitchTurn * PITCH_SPEED * dt + mousePitchDelta;
@@ -28848,11 +29499,33 @@ void main() {
         setTimeout(() => respawnPlayer(performance.now()), PRACTICE_RESPAWN_MS);
       }
       rig.group.position.set(physics.x, physics.y, physics.z);
-      if (!isDead) rig.group.rotation.y = facingAngle;
-      if (attack && !playerStunned) {
-        const started = tryAttack(rig, now);
-        if (!started) status.textContent = "Sword's still on cooldown\u2026";
-        else status.textContent = "Swing!";
+      let aimElevation = 0;
+      if (!isDead) {
+        if (rig.equippedWeapon === "bow") {
+          const dir = camera.getWorldDirection(aimDirScratch);
+          rig.group.rotation.y = Math.atan2(dir.x, dir.z);
+          aimElevation = Math.asin(Math.max(-1, Math.min(1, dir.y)));
+        } else {
+          rig.group.rotation.y = facingAngle;
+        }
+      }
+      if (rig.equippedWeapon === "sword") {
+        if (attack && !playerStunned) {
+          const started = tryAttack(rig, now);
+          if (!started) status.textContent = "Sword's still on cooldown\u2026";
+          else status.textContent = "Swing!";
+        }
+      } else {
+        if (mouseHeld && !rig.bowDrawing && !playerStunned && now >= bowCooldownUntil) {
+          startBowDraw(rig, now);
+        } else if (!mouseHeld && rig.bowDrawing) {
+          const { speed } = releaseBowDraw(rig, now, BOW_MIN_ARROW_SPEED, BOW_MAX_ARROW_SPEED);
+          bowCooldownUntil = now + BOW_COOLDOWN_MS;
+          const dir = camera.getWorldDirection(aimDirScratch);
+          const origin = camera.position.clone().addScaledVector(dir, ARROW_ORIGIN_FORWARD_OFFSET);
+          arrows.push(createArrowVisual(scene, origin.x, origin.y, origin.z, dir.x * speed, dir.y * speed, dir.z * speed));
+          status.textContent = "Loosed!";
+        }
       }
       if (smoke && !playerStunned && now >= smokeCooldownUntil) {
         smokeCooldownUntil = now + SMOKE_COOLDOWN_MS;
@@ -28863,15 +29536,17 @@ void main() {
       }
       const smokeFrac = Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS);
       const dashFrac = Math.max(0, (dashCooldownUntil - now) / DASH_COOLDOWN_MS);
+      const bowInfo = rig.bowDrawing ? { charging: true, frac: Math.min(1, (now - rig.bowDrawStartAt - BOW_MIN_DRAW_MS) / (BOW_MAX_DRAW_MS - BOW_MIN_DRAW_MS)) } : { charging: false, frac: Math.max(0, (bowCooldownUntil - now) / BOW_COOLDOWN_MS) };
       cooldownHud.update(
         rig.comboState === "cooldown" ? Math.max(0, 1 - (now - rig.stateEnteredAt) / ATTACK_COOLDOWN_MS) : 0,
         smokeFrac,
-        dashFrac
+        dashFrac,
+        bowInfo
       );
       smokeIcon.update(smokeFrac, SMOKE_COOLDOWN_MS);
       dashIcon.update(dashFrac, DASH_COOLDOWN_MS);
       if (isDead) updateDeathFall(rig, now);
-      else updatePlayerVisual(rig, now, isMoving, dt);
+      else updatePlayerVisual(rig, now, isMoving, dt, aimElevation);
       const dummyDead = now < dummyDeadUntil;
       if (dummy.comboState === "idle") {
         dummy.group.rotation.y = Math.atan2(physics.x - dummy.group.position.x, physics.z - dummy.group.position.z);
@@ -28927,6 +29602,36 @@ void main() {
           setTimeout(() => respawnPlayer(performance.now()), PRACTICE_RESPAWN_MS);
         }
       }
+      for (let i = arrows.length - 1; i >= 0; i--) {
+        const arrow = arrows[i];
+        const stillAlive = arrow.update(dt);
+        const pos = arrow.mesh.position;
+        let landed = pos.y <= 0;
+        if (!arrow.hasHit && !dummyDead) {
+          const dx = pos.x - dummy.group.position.x;
+          const dz = pos.z - dummy.group.position.z;
+          if (Math.hypot(dx, dz) <= PRACTICE_HIT_RADIUS && pos.y >= dummy.group.position.y && pos.y <= dummy.group.position.y + PLAYER_HEIGHT + 0.2) {
+            arrow.hasHit = true;
+            landed = true;
+            hitsLanded++;
+            startDeathFall(dummy, now);
+            const headshot = pos.y >= dummy.group.position.y + HEAD_Y_MIN;
+            if (headshot) triggerDecapitation(dummy, pos.x, pos.z, "#ef4444");
+            else bloodEffects.push(spawnBloodSpray(scene, dummy.group.position.x, dummy.group.position.y + BLOOD_SPRAY_HEIGHT, dummy.group.position.z));
+            dummyDeadUntil = now + PRACTICE_RESPAWN_MS;
+            status.textContent = headshot ? "Headshot!" : "Hit!";
+            setTimeout(() => {
+              resetAfterRespawn(dummy, performance.now());
+              dummy.group.position.set(DUMMY_POS.x, DUMMY_POS.y, DUMMY_POS.z);
+              dummyNextAttackAt = performance.now() + DUMMY_ATTACK_MIN_MS;
+            }, PRACTICE_RESPAWN_MS);
+          }
+        }
+        if (!stillAlive || landed) {
+          disposeArrowVisual(scene, arrow);
+          arrows.splice(i, 1);
+        }
+      }
       if (playerWasActive && !rig.isActiveSwing) {
         status.textContent = "Swing finished.";
       }
@@ -28935,20 +29640,29 @@ void main() {
       const orbitX = Math.sin(facingAngle) * Math.cos(effectivePitch);
       const orbitY = Math.sin(effectivePitch);
       const orbitZ = Math.cos(facingAngle) * Math.cos(effectivePitch);
+      const aimTarget = rig.bowDrawing ? 1 : 0;
+      aimBlend += (aimTarget - aimBlend) * (1 - Math.exp(-AIM_BLEND_RATE * dt));
+      bowReticle.setBlend(aimBlend);
       const pivotX = physics.x;
-      const pivotY = physics.y + PLAYER_HEIGHT * 0.6;
+      const pivotY = physics.y + PLAYER_HEIGHT * (0.6 + (AIM_PIVOT_HEIGHT_FRAC - 0.6) * aimBlend);
       const pivotZ = physics.z;
-      const desiredCamX = pivotX - orbitX * CAMERA_DISTANCE;
-      const desiredCamY = pivotY + orbitY * CAMERA_DISTANCE;
-      const desiredCamZ = pivotZ - orbitZ * CAMERA_DISTANCE;
+      const cameraDistance = CAMERA_DISTANCE + (AIM_CAMERA_DISTANCE - CAMERA_DISTANCE) * aimBlend;
+      const aimRightX = -Math.cos(facingAngle);
+      const aimRightZ = Math.sin(facingAngle);
+      const lookAtX = pivotX + aimRightX * AIM_SIDE_OFFSET * aimBlend;
+      const lookAtZ = pivotZ + aimRightZ * AIM_SIDE_OFFSET * aimBlend;
+      const desiredCamX = pivotX - orbitX * cameraDistance;
+      const desiredCamY = pivotY + orbitY * cameraDistance;
+      const desiredCamZ = pivotZ - orbitZ * cameraDistance;
       camPos.x += (desiredCamX - camPos.x) * CAMERA_DAMPING;
       camPos.y += (desiredCamY - camPos.y) * CAMERA_DAMPING;
       camPos.z += (desiredCamZ - camPos.z) * CAMERA_DAMPING;
-      camLookAt.x += (pivotX - camLookAt.x) * CAMERA_DAMPING;
+      camLookAt.x += (lookAtX - camLookAt.x) * CAMERA_DAMPING;
       camLookAt.y += (pivotY - camLookAt.y) * CAMERA_DAMPING;
-      camLookAt.z += (pivotZ - camLookAt.z) * CAMERA_DAMPING;
+      camLookAt.z += (lookAtZ - camLookAt.z) * CAMERA_DAMPING;
       camera.position.copy(camPos);
       camera.lookAt(camLookAt);
+      setRigOpacity(rig, 1 - (1 - AIM_LOCAL_OPACITY) * aimBlend);
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
       if (width > 0 && height > 0 && (width !== lastWidth || height !== lastHeight)) {
@@ -28971,6 +29685,7 @@ void main() {
       disposeRig(rig);
       disposeRig(dummy);
       for (const effect of bloodEffects) effect.update(1e3);
+      for (const arrow of arrows) disposeArrowVisual(scene, arrow);
       renderer.dispose();
     };
   }

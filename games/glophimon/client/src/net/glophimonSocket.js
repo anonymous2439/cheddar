@@ -52,9 +52,15 @@ export function connectGlophimonSocket(onMessage) {
   connect();
 
   return {
-    sendPosition(x, z, facing) {
+    // floor: which Glophics floor the player is currently on (0 = ground) —
+    // see game.js's own local.currentFloor/GLOPHICS_FLOORS. Threaded
+    // through unchanged to the server (main.py's own Connection.floor),
+    // which relays it to every other connected client exactly like x/z/
+    // facing already are, so peers can be hidden/rendered at the right
+    // height on whichever floor they're actually standing on.
+    sendPosition(x, z, facing, floor) {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "position", x, z, facing }));
+        ws.send(JSON.stringify({ type: "position", x, z, facing, floor }));
       }
     },
     sendChat(text) {
@@ -139,6 +145,11 @@ export function connectGlophimonSocket(onMessage) {
         ws.send(JSON.stringify({ type: "chess_host_request", board_id: boardId }));
       }
     },
+    sendChessAiStart(boardId) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "chess_ai_start", board_id: boardId }));
+      }
+    },
     sendChessCancelHost(boardId) {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "chess_cancel_host", board_id: boardId }));
@@ -157,6 +168,153 @@ export function connectGlophimonSocket(onMessage) {
     sendChessResign(boardId) {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "chess_resign", board_id: boardId }));
+      }
+    },
+    // Draw offer / undo request — human-vs-human boards only (see the api's
+    // own chess_draw_offer/chess_undo_request), same fire-and-forget shape
+    // as every send method above.
+    sendChessDrawOffer(boardId) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "chess_draw_offer", board_id: boardId }));
+      }
+    },
+    sendChessDrawRespond(boardId, accept) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "chess_draw_respond", board_id: boardId, accept: !!accept }));
+      }
+    },
+    sendChessUndoRequest(boardId) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "chess_undo_request", board_id: boardId }));
+      }
+    },
+    sendChessUndoRespond(boardId, accept) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "chess_undo_respond", board_id: boardId, accept: !!accept }));
+      }
+    },
+    // Dama (Phase 2) — shares tables 1/2 with Chess but is otherwise a
+    // fully separate message set (see the api's own _handle_dama_message).
+    // sendDamaMove's board is the *whole* resulting 8x8 grid, not a single
+    // move notation — the server trusts the sending client's own dama.js
+    // validation rather than re-deriving the move itself (see this
+    // feature's own plan file for why).
+    sendDamaHostRequest(boardId) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "dama_host_request", board_id: boardId }));
+      }
+    },
+    // Phase 3 — the standing AI table's Dama option (see the api's own
+    // dama_ai_start), same fire-and-forget shape as sendChessAiStart.
+    sendDamaAiStart(boardId) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "dama_ai_start", board_id: boardId }));
+      }
+    },
+    sendDamaCancelHost(boardId) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "dama_cancel_host", board_id: boardId }));
+      }
+    },
+    sendDamaJoinRequest(boardId) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "dama_join_request", board_id: boardId }));
+      }
+    },
+    // last_move: {from: {row,col}, to: {row,col}} — the WHOLE current turn's
+    // own start/end squares so far (start stays fixed across a multi-jump
+    // chain's own hops, see game.js's own activeDamaMatch.turnStartSquare),
+    // used purely for the last-move highlight (see the api's own last_move
+    // field) — never validated server-side, same trust level as `board`.
+    sendDamaMove(boardId, board, { continued, outcome, lastMove }) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "dama_move", board_id: boardId, board, continued: !!continued, outcome: outcome || null, last_move: lastMove || null }));
+      }
+    },
+    sendDamaResign(boardId) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "dama_resign", board_id: boardId }));
+      }
+    },
+    // Draw offer / undo request — same shape as Chess's own (see
+    // sendChessDrawOffer etc.), human-vs-human boards only.
+    sendDamaDrawOffer(boardId) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "dama_draw_offer", board_id: boardId }));
+      }
+    },
+    sendDamaDrawRespond(boardId, accept) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "dama_draw_respond", board_id: boardId, accept: !!accept }));
+      }
+    },
+    sendDamaUndoRequest(boardId) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "dama_undo_request", board_id: boardId }));
+      }
+    },
+    sendDamaUndoRespond(boardId, accept) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "dama_undo_respond", board_id: boardId, accept: !!accept }));
+      }
+    },
+    // Sent only by whichever client the server just told (via dama_state's
+    // own undo_accept_pending_for) that its undo request was accepted — the
+    // ONE client that still has the pre-move board in memory (see game.js's
+    // own activeDamaMatch.lastTurnSnapshot). board/sideToMove is exactly
+    // that snapshot, played back to the server the same way any other
+    // dama_move's board already is.
+    sendDamaUndoCommit(boardId, board, sideToMove) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "dama_undo_commit", board_id: boardId, board, side_to_move: sideToMove }));
+      }
+    },
+    // Full spectator mode for wild battles — same fire-and-forget shape as
+    // every send method above, but narrating an already-computed LOCAL
+    // simulation rather than asking the server to do or validate anything:
+    // wild battles stay entirely client-side/non-authoritative (species
+    // stats, moves, HP, turn order, RNG are all simulated by
+    // game.js's own startWildBattle/resolvePlayerAttack/resolveWildAttack),
+    // so these three just tell the server "here's my fight's current full
+    // state," which stores it (keyed by this user's own user_id) and
+    // rebroadcasts it to everyone else as wild_battle_state/wild_battle_end
+    // (see the api's own _handle_wild_battle_message) — the exact same
+    // trust level sendPosition already gets. `snapshot` is always the WHOLE
+    // current state, never a delta (see game.js's own buildBattleSnapshot),
+    // so a spectator can render correctly from just the latest message with
+    // no history to reconcile. Never called at all for the dev-only
+    // "Simulate Wild Battle" shortcut, which was never engaged with the
+    // server in the first place (see startWildBattle's own wildId guard).
+    sendWildBattleStart(snapshot) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "wild_battle_start", ...snapshot }));
+      }
+    },
+    sendWildBattleUpdate(snapshot) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "wild_battle_update", ...snapshot }));
+      }
+    },
+    sendWildBattleEnd() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "wild_battle_end" }));
+      }
+    },
+    // Floor 2 cinema's shared projectionist role — same fire-and-forget
+    // shape as every send method above, server-validated (see main.py's
+    // own _handle_cinema_message: re-checks the role is actually vacant/
+    // actually held by this caller rather than trusting whatever the
+    // client's own Usher popup currently shows) and answered via a
+    // cinema_projectionist_state/cinema_screen_state/cinema_error message
+    // rather than a direct reply to either of these.
+    sendCinemaClaimProjectionist() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "cinema_claim_projectionist" }));
+      }
+    },
+    sendCinemaSetUrl(url) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "cinema_set_url", url }));
       }
     },
     dispose() {

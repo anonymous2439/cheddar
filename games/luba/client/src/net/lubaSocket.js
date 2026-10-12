@@ -54,8 +54,24 @@ export function connectLubaSocket(lobbyId, onMessage) {
   }
 
   return {
-    sendPosition(x, y, z, facing, isActiveSwing, bladePoints) {
-      send({ type: "position", x, y, z, facing, isActiveSwing, bladePoints: bladePoints || null });
+    // equippedWeapon/aimElevation/isDrawingBow — added for the bow: lets
+    // every peer see the shooter actually holding/aiming/drawing it (see
+    // main.py's own peer_position broadcast and game.js's own
+    // peer_position handler), the same way isActiveSwing already lets
+    // peers mirror a sword swing.
+    sendPosition(x, y, z, facing, isActiveSwing, bladePoints, equippedWeapon, aimElevation, isDrawingBow) {
+      send({
+        type: "position",
+        x,
+        y,
+        z,
+        facing,
+        isActiveSwing,
+        bladePoints: bladePoints || null,
+        equippedWeapon,
+        aimElevation,
+        isDrawingBow,
+      });
     },
     sendAttackStart() {
       send({ type: "attack_start" });
@@ -71,6 +87,18 @@ export function connectLubaSocket(lobbyId, onMessage) {
     },
     sendFell() {
       send({ type: "fell" });
+    },
+    // Sent once, on release (not a tick-gated stream like position/attack
+    // sampling) — the server assigns the arrow's real id and simulates its
+    // whole flight itself (see main.py's own arrow tick loop), broadcasting
+    // "arrow_spawned" back to every client including this one so the local
+    // visual spawns from the same authoritative event everyone else sees,
+    // same reasoning as the smoke skill's own no-optimistic-local-spawn
+    // choice. speed is client-reported but clamped server-side to a sane
+    // range — never trusted outright, same trust model as everything else
+    // here that's client-authoritative-with-a-backstop.
+    sendFireArrow(originX, originY, originZ, dirX, dirY, dirZ, speed) {
+      send({ type: "fire_arrow", originX, originY, originZ, dirX, dirY, dirZ, speed });
     },
     sendSmokeStart() {
       send({ type: "smoke_start" });

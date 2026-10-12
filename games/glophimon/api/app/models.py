@@ -12,7 +12,36 @@ class GlophimonCharacter(Base):
     are the persistence layer that makes "teleported to where they last
     left" work: written on a throttled timer while connected and once more,
     unconditionally, on disconnect (see main.py's world_ws) so the latest
-    position always survives even between throttled saves."""
+    position always survives even between throttled saves.
+
+    pose_overrides is the one deliberate exception to "never edited
+    afterward" above — see PUT/DELETE /me/pose-overrides/{pose_name}. A
+    dict keyed by pose name ("idle"/"walk"/"ready"/"attack"/"defend"/
+    "cast") to {"keyframes": [...]} , written by the Pose Designer dev
+    panel's own "Save to Game" button (see game.js). Missing key or null
+    value both mean "no override — use the built-in pose," same as an
+    empty dict; the client never needs to distinguish those two.
+
+    camera_overrides is the same idea for the Camera Designer dev panel —
+    see PUT/DELETE /me/camera-overrides/{slot_name}. Two different shapes
+    live in this one dict, disambiguated purely by which slot_name key
+    they're stored under (see ORBIT_CAMERA_SLOTS/FOCUS_CAMERA_SLOTS in
+    main.py):
+      - "wild"/"team"/"pvp" -> {"radius":..., "elevation":..., "angle":...,
+        "autoRotate":..., "rotateSpeed":...} (see CameraOverrideUpdate in
+        schemas.py), customizing that battle type's reset/orbit camera — the
+        wide "nothing focused" fallback framing.
+      - "wild_decide_defend"/"wild_declare"/"wild_attack_scene"/
+        "wild_defend_scene" -> {"behind":..., "height":..., "lookY":...,
+        "lookAhead":...} (see CameraFocusOverrideUpdate in schemas.py),
+        independently customizing one of the wild battle's own focus-camera
+        re-aim moments (see game.js's own focusWildCameraOnRig and
+        TEAM_FOCUS_CAM_* for the shared defaults each one falls back to).
+        The 3v3 team battle's own near-identical focus camera
+        (focusCameraOnMember) is NOT covered by any of these — it stays
+        hardcoded, out of scope.
+    Missing key or null value both mean "no override — use the built-in
+    framing," same as pose_overrides above."""
 
     __tablename__ = "glophimon_characters"
 
@@ -26,6 +55,15 @@ class GlophimonCharacter(Base):
     x = Column(Float, nullable=False, default=0.0)
     z = Column(Float, nullable=False, default=0.0)
     facing = Column(Float, nullable=False, default=0.0)
+    # Which Glophics floor this character is currently on (0 = ground) —
+    # the first piece of real vertical/Y-axis state in this entire game.
+    # Persisted/restored via the exact same throttled-write-while-connected
+    # + unconditional-write-on-disconnect mechanism as x/z/facing above
+    # (see main.py's world_ws/persist_position), so a reconnecting client
+    # resumes on whatever floor of the tower it last left, not always back
+    # on the ground. See game.js's own GLOPHICS_FLOORS for what a non-zero
+    # value maps to spatially.
+    floor = Column(Integer, nullable=False, default=0)
     # The player's own trainer HP (separate from any individual Glophimon's
     # own HP, which is never persisted — it's recomputed fresh from level/
     # IVs/EVs at the start of every battle). Doesn't recharge on its own
@@ -33,6 +71,8 @@ class GlophimonCharacter(Base):
     # Rodz's heal (or blacking out, which heals for free at the cost of a
     # trip back to Glophics) restores it.
     current_hp = Column(Integer, nullable=False, default=200)
+    pose_overrides = Column(JSON, nullable=True)
+    camera_overrides = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 

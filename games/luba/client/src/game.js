@@ -24,12 +24,46 @@ import {
   ATTACK_COOLDOWN_MS,
   getHeadWorldPosition,
   hideHead,
+  switchEquippedWeapon,
+  setEquippedWeapon,
+  setRigOpacity,
+  startBowDraw,
+  releaseBowDraw,
+  BOW_MIN_DRAW_MS,
+  BOW_MAX_DRAW_MS,
 } from "./player.js";
 import { connectLubaSocket, NETWORK_TICK_MS } from "./net/lubaSocket.js";
 import { spawnBloodSpray, spawnDashEffect, spawnSmokeCloud, spawnFlyingHead, spawnGoreFountain } from "./effects.js";
 
 const CAMERA_DISTANCE = 2.7; // zoomed in further still (was 3.4, 4.3, originally 5.5) — closer, more readable combat framing
 const CAMERA_DAMPING = 0.18;
+// Aiming (bow equipped) swaps to a much closer over-the-shoulder framing —
+// only about half the body visible, character pushed toward the left edge
+// of frame, aim reticle at dead center. AIM_SIDE_OFFSET shifts the
+// camera's LOOKAT point (not the camera's own position, which still orbits
+// the real pivot at AIM_CAMERA_DISTANCE) sideways toward the character's
+// own right — since the camera then aims a bit right of them, the
+// character's own silhouette reads as pushed left, the classic
+// over-the-shoulder aim-camera trick.
+const AIM_CAMERA_DISTANCE = 1.3;
+const AIM_SIDE_OFFSET = 0.55;
+// Fraction of PLAYER_HEIGHT the orbit pivot sits at — 0.6 (chest) normally,
+// raised close to the top of the head while aiming so the camera reads as
+// an eye-level FPS-style view rather than the usual chest-height
+// third-person one.
+const AIM_PIVOT_HEIGHT_FRAC = 0.95;
+// The LOCAL player's own rig fades to this opacity while aiming — the
+// zoomed-in, over-the-shoulder framing above can otherwise put your own
+// character's body between the camera and whatever's in front of you.
+// Never applied to a peer's rig (see setRigOpacity's own comment) or the
+// practice dummy.
+const AIM_LOCAL_OPACITY = 0.3;
+// How fast aimBlend (see the camera section of frame()) eases toward its
+// target once drawing starts/stops — an exponential rate, same convention
+// as PEER_EASE_RATE below (1 - e^-rate*dt); ~6 reaches about 95% of the
+// way there in half a second, quick enough to feel responsive but not an
+// instant snap.
+const AIM_BLEND_RATE = 6;
 // Added to pitchAngle only for the camera's own orbit position — without
 // this, pitch=0 (the resting state) would put the camera dead level with
 // the pivot, looking flat at the character's chest instead of the more
@@ -89,6 +123,95 @@ const BLADE_HIT_RADIUS = 0.5; // must match main.py's HIT_RADIUS
 // (66ms), well above this; idle floating-point/network jitter is not.
 const PEER_MOVE_THRESHOLD = 0.05;
 
+// Bow — see player.js's own switchEquippedWeapon/startBowDraw/
+// releaseBowDraw for the rig/animation side of this (BOW_MIN_DRAW_MS/
+// BOW_MAX_DRAW_MS live there now, imported above, not duplicated here —
+// updatePlayerVisual's own right-arm charge lift needs the exact same
+// range the speed calc does). A tap still fires (at BOW_MIN_ARROW_SPEED);
+// holding longer ramps toward BOW_MAX_ARROW_SPEED, maxing out at
+// BOW_MAX_DRAW_MS held — see releaseBowDraw's own comment on why there's
+// no minimum hold required to fire at all.
+// Must match main.py's MIN_ARROW_SPEED/MAX_ARROW_SPEED — the server clamps
+// into this same range regardless of what a (possibly modified) client
+// claims, so these only actually matter for how the real, honest client's
+// own charge-to-speed mapping feels.
+const BOW_MIN_ARROW_SPEED = 14;
+const BOW_MAX_ARROW_SPEED = 34;
+const BOW_COOLDOWN_MS = 250; // must match main.py's ARROW_COOLDOWN_S
+// How far in front of the camera's own eye point an arrow is spawned — see
+// fireArrow's own comment on why the origin has to sit on the camera's own
+// aim line at all (not offset sideways to the visual bow's hand) to
+// actually hit dead-center under the reticle. A small nonzero offset just
+// keeps it from spawning exactly at/behind the near clip plane.
+const ARROW_ORIGIN_FORWARD_OFFSET = 0.35;
+// Purely cosmetic here — the server is what actually decides whether an
+// arrow lands a hit (see main.py's own ARROW_GRAVITY/arrow tick loop);
+// this just needs to match closely enough that the locally-rendered arrow
+// visually agrees with what the server is simulating, not be bit-exact.
+const ARROW_GRAVITY_CLIENT = 12;
+const ARROW_MAX_LIFETIME_MS_CLIENT = 4200; // a little past main.py's own ARROW_MAX_LIFETIME_S, so a dropped arrow_expired message can't strand a visual arrow forever
+const ARROW_SHAFT_LENGTH = 0.5;
+
+// A flying arrow's own little rig — shaft + tip, both built pointing along
+// local -Z so a plain group.lookAt(pointAhead) (three.js objects "look"
+// down their own -Z by default) orients the whole thing to face wherever
+// it's currently traveling, re-aimed every frame in update() as gravity
+// bends its path into an arc. Shared by both the real match (spawned from
+// the server's own "arrow_spawned" broadcast, removed by id on
+// "arrow_expired" — see the mount() message handler) and practice mode
+// (spawned/removed locally, no server involved at all).
+function createArrowVisual(scene, x, y, z, vx, vy, vz) {
+  const group = new THREE.Group();
+  const shaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.015, 0.02, ARROW_SHAFT_LENGTH, 6),
+    new THREE.MeshStandardMaterial({ color: "#78350f" }),
+  );
+  shaft.rotation.x = -Math.PI / 2;
+  group.add(shaft);
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.09, 6), new THREE.MeshStandardMaterial({ color: "#a8a29e" }));
+  tip.rotation.x = -Math.PI / 2;
+  tip.position.z = -(ARROW_SHAFT_LENGTH / 2 + 0.045);
+  group.add(tip);
+  group.position.set(x, y, z);
+  scene.add(group);
+
+  let vX = vx;
+  let vY = vy;
+  let vZ = vz;
+  let elapsedMs = 0;
+  const ahead = new THREE.Vector3();
+  group.lookAt(x + vX, y + vY, z + vZ);
+
+  return {
+    mesh: group,
+    // Returns false once the arrow's own client-local safety lifetime is
+    // up (see ARROW_MAX_LIFETIME_MS_CLIENT) — normal removal is driven by
+    // the server's "arrow_expired" message instead (see disposeArrow),
+    // this is only a backstop against a dropped message stranding the
+    // visual forever.
+    update(dt) {
+      elapsedMs += dt * 1000;
+      vY -= ARROW_GRAVITY_CLIENT * dt;
+      group.position.x += vX * dt;
+      group.position.y += vY * dt;
+      group.position.z += vZ * dt;
+      ahead.set(group.position.x + vX, group.position.y + vY, group.position.z + vZ);
+      group.lookAt(ahead);
+      return elapsedMs < ARROW_MAX_LIFETIME_MS_CLIENT;
+    },
+  };
+}
+
+function disposeArrowVisual(scene, arrow) {
+  scene.remove(arrow.mesh);
+  arrow.mesh.traverse((obj) => {
+    if (obj.isMesh) {
+      obj.geometry.dispose();
+      obj.material.dispose();
+    }
+  });
+}
+
 function buildArenaMeshes(scene, arena) {
   const floorMat = new THREE.MeshStandardMaterial({ color: "#3f3f46" });
   const obstacleMat = new THREE.MeshStandardMaterial({ color: "#78350f" });
@@ -144,13 +267,22 @@ const MOUSE_LOOK_KEY = "KeyM";
 const DASH_KEYS = ["ShiftLeft", "ShiftRight"];
 const STANDINGS_KEY = "Tab"; // held, not pressed once — see createInputState's `read()`
 const SMOKE_KEY = "KeyF";
+const WEAPON_SWITCH_KEY = "KeyQ";
 
-function createInputState(canvas, rotateButtonState, onPointerLockChange) {
+function createInputState(canvas, rotateButtonState, onPointerLockChange, onWeaponSwitch) {
   const pressed = new Set();
   let jumpQueued = false;
   let attackQueued = false;
   let dashQueued = false;
   let smokeQueued = false;
+  // Live physical state (not a one-shot queue like the flags above) — the
+  // bow's charge-to-fire needs to know how long the button has actually
+  // been held, which a single-fire "was it pressed this frame" flag can't
+  // express. attackQueued (below) is untouched and still fires the sword's
+  // own instant swing on the same mousedown — the caller (game.js's frame
+  // loop) is what decides which of the two actually matters, based on
+  // whichever weapon is currently equipped.
+  let mouseIsDown = false;
   let mouseDeltaX = 0;
   let mouseDeltaY = 0;
   // Without this, these listeners (necessarily on window/document, since
@@ -168,6 +300,11 @@ function createInputState(canvas, rotateButtonState, onPointerLockChange) {
   function onBlur() {
     canvasFocused = false;
     pressed.clear();
+    // Alt-tabbing away mid-draw must not leave the bow silently drawing
+    // forever (no mouseup will ever arrive at this window again for that
+    // specific press) — same "drop everything held" reasoning pressed.clear()
+    // already applies to keys, just for the mouse button too.
+    mouseIsDown = false;
   }
 
   function keydown(e) {
@@ -177,6 +314,15 @@ function createInputState(canvas, rotateButtonState, onPointerLockChange) {
     if (e.code === "KeyJ") attackQueued = true;
     if (DASH_KEYS.includes(e.code)) dashQueued = true;
     if (e.code === SMOKE_KEY) smokeQueued = true;
+    // Fired synchronously, right here in the keydown handler — not queued
+    // and consumed on the next read() like the flags above — specifically
+    // so game.js's own handler can call canvas.requestPointerLock() in
+    // direct response to this same user gesture (see its own comment):
+    // deferring that call to the next animation frame would risk losing
+    // the browser's "was this a real user action" gesture requirement
+    // requestPointerLock needs, the same reason MOUSE_LOOK_KEY just below
+    // already calls it directly inline instead of through a queued flag.
+    if (e.code === WEAPON_SWITCH_KEY) onWeaponSwitch();
     if (e.code === MOUSE_LOOK_KEY) {
       if (document.pointerLockElement === canvas) document.exitPointerLock();
       else canvas.requestPointerLock();
@@ -194,7 +340,13 @@ function createInputState(canvas, rotateButtonState, onPointerLockChange) {
     // Scoped to clicks actually on the canvas (or already pointer-locked
     // to it, where every mouse event implicitly targets it) — a click on
     // some other part of the panel shouldn't queue a sword swing.
-    if (e.button === 0 && (e.target === canvas || document.pointerLockElement === canvas)) attackQueued = true;
+    if (e.button === 0 && (e.target === canvas || document.pointerLockElement === canvas)) {
+      attackQueued = true;
+      mouseIsDown = true;
+    }
+  }
+  function mouseup(e) {
+    if (e.button === 0) mouseIsDown = false;
   }
   function mousemove(e) {
     if (document.pointerLockElement !== canvas) return;
@@ -210,6 +362,7 @@ function createInputState(canvas, rotateButtonState, onPointerLockChange) {
   window.addEventListener("keydown", keydown);
   window.addEventListener("keyup", keyup);
   window.addEventListener("mousedown", mousedown);
+  window.addEventListener("mouseup", mouseup);
   window.addEventListener("mousemove", mousemove);
   document.addEventListener("pointerlockchange", pointerlockchange);
 
@@ -254,7 +407,20 @@ function createInputState(canvas, rotateButtonState, onPointerLockChange) {
       attackQueued = false;
       dashQueued = false;
       smokeQueued = false;
-      return { inputForward, inputStrafe, turn, pitchTurn, mouseTurnDelta, mousePitchDelta, jump, attack, dash, smoke, standingsHeld };
+      return {
+        inputForward,
+        inputStrafe,
+        turn,
+        pitchTurn,
+        mouseTurnDelta,
+        mousePitchDelta,
+        jump,
+        attack,
+        dash,
+        smoke,
+        mouseHeld: mouseIsDown,
+        standingsHeld,
+      };
     },
     dispose() {
       canvas.removeEventListener("focus", onFocus);
@@ -262,6 +428,7 @@ function createInputState(canvas, rotateButtonState, onPointerLockChange) {
       window.removeEventListener("keydown", keydown);
       window.removeEventListener("keyup", keyup);
       window.removeEventListener("mousedown", mousedown);
+      window.removeEventListener("mouseup", mouseup);
       window.removeEventListener("mousemove", mousemove);
       document.removeEventListener("pointerlockchange", pointerlockchange);
       if (document.pointerLockElement === canvas) document.exitPointerLock();
@@ -348,9 +515,11 @@ function buildCooldownHud() {
   const sword = makeBar("⚔", "Sword: Ready");
   const smoke = makeBar("💨", "Smoke: Ready");
   const dash = makeBar("💫", "Dash: Ready");
+  const bow = makeBar("🏹", "Bow: Ready");
   wrap.appendChild(sword.box);
   wrap.appendChild(smoke.box);
   wrap.appendChild(dash.box);
+  wrap.appendChild(bow.box);
 
   // frac: 0 = ready, 1 = just used — bars fill on use and drain to empty.
   function updateBar(bar, name, frac, totalMs) {
@@ -361,10 +530,24 @@ function buildCooldownHud() {
 
   return {
     el: wrap,
-    update(swordFrac, smokeFrac, dashFrac) {
+    update(swordFrac, smokeFrac, dashFrac, bowInfo) {
       updateBar(sword, "⚔ Sword", swordFrac, ATTACK_COOLDOWN_MS);
       updateBar(smoke, "💨 Smoke", smokeFrac, SMOKE_COOLDOWN_MS);
       updateBar(dash, "💫 Dash", dashFrac, DASH_COOLDOWN_MS);
+      // Same bar, two different meanings depending on what the bow is
+      // currently doing — a green fill climbing up while actively drawing
+      // (so releasing sooner vs. later is legible at a glance), the usual
+      // blue drain-from-full cooldown otherwise. bowInfo is optional (the
+      // sword-only pre-bow call shape still works) so nothing else calling
+      // this needs to change.
+      if (bowInfo?.charging) {
+        bow.barFill.style.background = "#4ade80";
+        bow.barFill.style.width = `${Math.max(0, Math.min(1, bowInfo.frac)) * 100}%`;
+        bow.labelEl.textContent = `🏹 Bow: Charging ${Math.round(bowInfo.frac * 100)}%`;
+      } else {
+        bow.barFill.style.background = "#38bdf8";
+        updateBar(bow, "🏹 Bow", bowInfo?.frac ?? 0, BOW_COOLDOWN_MS);
+      }
     },
   };
 }
@@ -432,6 +615,42 @@ function buildSkillCanvasIcon(emoji, rightOffsetPx) {
   };
 }
 
+// The bow's aim reticle — a plain red ring fixed at dead center of the
+// canvas (not a 3D object): for any perspective camera with a symmetric
+// frustum, screen-center IS the camera's own forward direction by
+// definition, so a fixed CSS overlay is both simpler and more honestly
+// accurate than trying to project anything into 3D space here. This is
+// deliberately the same direction fireArrow's own camera.getWorldDirection()
+// call uses — whatever this ring sits on top of really is where the arrow
+// goes, not an approximation of it.
+function buildBowReticle() {
+  const el = document.createElement("div");
+  el.style.position = "absolute";
+  el.style.top = "50%";
+  el.style.left = "50%";
+  el.style.width = "14px";
+  el.style.height = "14px";
+  el.style.marginLeft = "-7px";
+  el.style.marginTop = "-7px";
+  el.style.borderRadius = "50%";
+  el.style.border = "2px solid #ef4444";
+  el.style.boxShadow = "0 0 3px rgba(0,0,0,0.7)";
+  el.style.pointerEvents = "none";
+  el.style.display = "none";
+  el.style.opacity = "0";
+  return {
+    el,
+    // t: 0-1, the same aimBlend value driving the camera's own zoom/offset
+    // — fades in/out with it (see frame()'s own camera section) instead of
+    // an instant show/hide, so the reticle's own appearance matches the
+    // smooth camera transition rather than popping in ahead of or behind it.
+    setBlend(t) {
+      el.style.display = t > 0.001 ? "block" : "none";
+      el.style.opacity = String(t);
+    },
+  };
+}
+
 function mount(el, ctx) {
   el.innerHTML = "";
   const wrap = document.createElement("div");
@@ -441,7 +660,7 @@ function mount(el, ctx) {
   status.style.fontSize = "12px";
   status.style.margin = "0 0 6px 0";
   status.textContent =
-    "WASD to move/strafe, arrow keys (or M for mouse-look) to look around, Space to jump, click or J to swing, Shift to dash. Connecting…";
+    "WASD to move/strafe, arrow keys (or M for mouse-look) to look around, Space to jump, click or J to swing, Q to switch sword/bow, Shift to dash. Connecting…";
   wrap.appendChild(status);
 
   const mouseLookStatus = document.createElement("p");
@@ -500,6 +719,8 @@ function mount(el, ctx) {
   canvasWrap.appendChild(smokeIcon.el);
   const dashIcon = buildSkillCanvasIcon("💫", 48);
   canvasWrap.appendChild(dashIcon.el);
+  const bowReticle = buildBowReticle();
+  canvasWrap.appendChild(bowReticle.el);
 
   wrap.appendChild(canvasWrap);
 
@@ -515,7 +736,7 @@ function mount(el, ctx) {
   controlsHelp.style.color = "#a3a3a3";
   controlsHelp.style.lineHeight = "1.5";
   controlsHelp.innerHTML =
-    "<strong>Controls</strong> — WASD: move/strafe &nbsp;•&nbsp; Arrow keys: look &nbsp;•&nbsp; M: toggle mouse-look &nbsp;•&nbsp; Space: jump &nbsp;•&nbsp; Click or J: swing sword &nbsp;•&nbsp; Shift: dash &nbsp;•&nbsp; F: smoke skill &nbsp;•&nbsp; Tab (hold): show standings";
+    "<strong>Controls</strong> — WASD: move/strafe &nbsp;•&nbsp; Arrow keys: look &nbsp;•&nbsp; M: toggle mouse-look &nbsp;•&nbsp; Space: jump &nbsp;•&nbsp; Click or J: swing sword / fire bow &nbsp;•&nbsp; Q: switch sword/bow &nbsp;•&nbsp; Hold click with the bow out: draw — longer hold flies faster &nbsp;•&nbsp; Shift: dash &nbsp;•&nbsp; F: smoke skill &nbsp;•&nbsp; Tab (hold): show standings";
   wrap.appendChild(controlsHelp);
 
   el.appendChild(wrap);
@@ -531,6 +752,21 @@ function mount(el, ctx) {
   // userId -> { rig, targetX/Y/Z/Facing (latest network update),
   // renderFacing (eased separately since angles wrap, see updatePeers) }.
   const peers = new Map();
+
+  // arrowId -> the createArrowVisual() handle — keyed by the server's own
+  // id (see main.py's "arrow_spawned") rather than kept in an anonymous
+  // array like bloodEffects, since these need to be removable by id on
+  // "arrow_expired", not just self-expiring.
+  const arrows = new Map();
+  function spawnArrowFromServer(arrowId, x, y, z, vx, vy, vz) {
+    arrows.set(arrowId, createArrowVisual(scene, x, y, z, vx, vy, vz));
+  }
+  function despawnArrow(arrowId) {
+    const arrow = arrows.get(arrowId);
+    if (!arrow) return;
+    disposeArrowVisual(scene, arrow);
+    arrows.delete(arrowId);
+  }
 
   function ensurePeer(userId, x, y, z, facing) {
     let peer = peers.get(userId);
@@ -552,6 +788,12 @@ function mount(el, ctx) {
         wasActiveSwing: false,
         invulnerableUntil: 0,
         kills: 0,
+        // Bow visuals — see the peer_position/roster handlers below for
+        // where these actually get set, and setEquippedWeapon/startBowDraw
+        // for how they're applied to peerRig. wasDrawingBow tracks the
+        // rising/falling edge the same way wasActiveSwing does above.
+        aimElevation: 0,
+        wasDrawingBow: false,
       };
       peer.rig.group.position.set(x, y, z);
       peer.rig.group.rotation.y = facing;
@@ -572,12 +814,33 @@ function mount(el, ctx) {
   let pitchAngle = 0;
   const camPos = new THREE.Vector3(SPAWN.x, SPAWN.y + PLAYER_HEIGHT, SPAWN.z + CAMERA_DISTANCE);
   const camLookAt = new THREE.Vector3(SPAWN.x, SPAWN.y, SPAWN.z);
+  // Reused every frame while aiming (see fireArrow's own comment on why
+  // camera.getWorldDirection() — not a hand-rebuilt angle — is the one
+  // true aim direction) rather than allocating a fresh Vector3 every frame.
+  const aimDirScratch = new THREE.Vector3();
 
-  const input = createInputState(canvas, turnButtons.state, (locked) => {
-    mouseLookStatus.textContent = locked
-      ? "Mouse-look: ON (press M to disable)"
-      : "Mouse-look: off (press M to try enabling it)";
-  });
+  const input = createInputState(
+    canvas,
+    turnButtons.state,
+    (locked) => {
+      mouseLookStatus.textContent = locked
+        ? "Mouse-look: ON (press M to disable)"
+        : "Mouse-look: off (press M to try enabling it)";
+    },
+    () => {
+      if (rig.isActiveSwing) return;
+      switchEquippedWeapon(rig);
+      status.textContent =
+        rig.equippedWeapon === "bow" ? "Bow equipped. Hold click to draw, release to fire." : "Sword equipped.";
+      // Auto-enables the aim camera's mouse-look the instant the bow comes
+      // out (and releases it switching back) — requestPointerLock() must
+      // be called from a real user gesture; see createInputState's own
+      // comment on why this callback fires synchronously from the keydown
+      // itself rather than being deferred to the next animation frame.
+      if (rig.equippedWeapon === "bow") canvas.requestPointerLock();
+      else if (document.pointerLockElement === canvas) document.exitPointerLock();
+    },
+  );
   let lastWidth = 0;
   let lastHeight = 0;
   let lastFrameTime = performance.now();
@@ -600,6 +863,11 @@ function mount(el, ctx) {
   let matchEndsAt = 0; // performance.now()-space — set from roster's matchEndsInMs
   let matchOver = false;
   let smokeCooldownUntil = 0;
+  let bowCooldownUntil = 0;
+  // Eased 0 (normal third-person) -> 1 (fully zoomed-in aim camera) — see
+  // the camera section of frame() for how this is driven, and also used
+  // there to fade the LOCAL rig's own opacity (see setRigOpacity).
+  let aimBlend = 0;
   const bloodEffects = []; // active spawnBloodSpray()/spawnDashEffect()/spawnSmokeCloud() handles — pruned in frame()
 
   // Roughly chest height on the victim — not the exact server-side hit
@@ -715,6 +983,8 @@ function mount(el, ctx) {
         for (const p of msg.players) {
           const peer = ensurePeer(p.userId, p.x, p.y, p.z, p.facing);
           peer.kills = p.kills;
+          setEquippedWeapon(peer.rig, p.equippedWeapon === "bow" ? "bow" : "sword");
+          peer.aimElevation = p.aimElevation || 0;
           if (!p.alive) startDeathFall(peer.rig, performance.now());
         }
         status.textContent = `Connected — ${msg.players.length} other player(s) here.`;
@@ -750,6 +1020,24 @@ function mount(el, ctx) {
           tryAttack(peer.rig, performance.now());
         }
         peer.wasActiveSwing = !!msg.isActiveSwing;
+        // Bow visuals — setEquippedWeapon no-ops if already on that weapon
+        // (see its own comment), so this is safe to call unconditionally
+        // every tick rather than only on an actual change. isDrawingBow is
+        // a rising/falling edge the same way isActiveSwing is just above:
+        // startBowDraw kicks off the draw-in animation on the client's own
+        // clock the instant it rises (no frame-synced timeline over the
+        // wire here either), and it's just snapped back to neutral
+        // directly on the falling edge rather than replaying
+        // releaseBowDraw's own speed math, which a peer's rig has no use
+        // for at all.
+        setEquippedWeapon(peer.rig, msg.equippedWeapon === "bow" ? "bow" : "sword");
+        peer.aimElevation = msg.aimElevation || 0;
+        if (msg.isDrawingBow && !peer.wasDrawingBow && !peer.rig.isDead) {
+          startBowDraw(peer.rig, performance.now());
+        } else if (!msg.isDrawingBow && peer.wasDrawingBow) {
+          peer.rig.bowDrawing = false;
+        }
+        peer.wasDrawingBow = !!msg.isDrawingBow;
         break;
       }
       case "death":
@@ -797,6 +1085,17 @@ function mount(el, ctx) {
         bloodEffects.push(spawnSmokeCloud(scene, msg.x, msg.y, msg.z, SMOKE_RADIUS, msg.durationMs));
         if (msg.userId === ctx.selfId) status.textContent = "Smoke deployed!";
         break;
+      case "arrow_spawned":
+        // Broadcast to everyone including the shooter (see main.py) — no
+        // optimistic local-only spawn, same reasoning as smoke above. The
+        // resulting death (if it hits) arrives as an ordinary "death"
+        // message and is handled by the existing onDeathMessage entirely
+        // unchanged — this case only ever owns the flying-arrow visual.
+        spawnArrowFromServer(msg.arrowId, msg.x, msg.y, msg.z, msg.vx, msg.vy, msg.vz);
+        break;
+      case "arrow_expired":
+        despawnArrow(msg.arrowId);
+        break;
       case "_disconnected":
         status.textContent = "Disconnected from the match.";
         break;
@@ -806,12 +1105,57 @@ function mount(el, ctx) {
     }
   });
 
+  // The aim direction "the camera determines" — literally the camera's own
+  // current forward vector (three.js's getWorldDirection), not a
+  // separately-recomputed angle. This has to be true by construction, not
+  // just by two formulas happening to agree: the red reticle (see
+  // buildBowReticle) sits at dead-center of the canvas with no 3D
+  // counterpart of its own, so "whatever's under the reticle" and "the
+  // camera's own forward direction" are the same thing for any symmetric-
+  // frustum perspective camera. Using anything else here (e.g. rebuilding
+  // a direction from facingAngle/pitchAngle by hand) would silently drift
+  // from the reticle the moment the aim camera's own framing — zoom,
+  // the left/right shoulder offset, anything — changes, since those only
+  // ever touch camPos/camLookAt (and so camera.matrixWorld itself), not
+  // facingAngle/pitchAngle directly.
+  //
+  // The ORIGIN is the camera's own eye point (offset slightly forward),
+  // not the visual bow's hand position — this was a real bug, not a
+  // cosmetic one: the bow sits on the left arm, off to the character's own
+  // side (and that whole character is itself shifted further left on
+  // screen by the aim camera's own AIM_SIDE_OFFSET), so a shot fired
+  // *parallel* to the reticle's direction but *starting* from over there
+  // lands visibly to the side of center, worse the closer the target —
+  // classic gun/camera parallax. Firing from the eye line instead — the
+  // same trick most real FPS games use for hitscan/projectile origins —
+  // guarantees the shot travels exactly along the reticle's own line at
+  // every distance, and reads as coming from around chest/head height
+  // (where the aim camera's own AIM_PIVOT_HEIGHT_FRAC already sits) rather
+  // than from down at the hand.
+  function fireArrow(speed) {
+    const dir = camera.getWorldDirection(aimDirScratch);
+    const origin = camera.position.clone().addScaledVector(dir, ARROW_ORIGIN_FORWARD_OFFSET);
+    socket.sendFireArrow(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, speed);
+  }
+
   function frame(now) {
     const dt = Math.min(0.1, (now - lastFrameTime) / 1000);
     lastFrameTime = now;
 
-    const { inputForward, inputStrafe, turn, pitchTurn, mouseTurnDelta, mousePitchDelta, jump, attack, dash, smoke, standingsHeld } =
-      input.read();
+    const {
+      inputForward,
+      inputStrafe,
+      turn,
+      pitchTurn,
+      mouseTurnDelta,
+      mousePitchDelta,
+      jump,
+      attack,
+      dash,
+      smoke,
+      mouseHeld,
+      standingsHeld,
+    } = input.read();
 
     if (!matchOver) {
       const msLeft = Math.max(0, matchEndsAt - now);
@@ -932,24 +1276,70 @@ function mount(el, ctx) {
     // (facing) is frozen once dead — a lying corpse shouldn't spin just
     // because the camera is still being panned around with the mouse.
     rig.group.position.set(physics.x, physics.y, physics.z);
-    if (!isDead) rig.group.rotation.y = facingAngle;
+    // aimElevation feeds updatePlayerVisual below (nods the head, tilts
+    // the bow) — 0 whenever the sword's out, same as every other rig this
+    // function is ever called for (see updatePlayerVisual's own comment).
+    let aimElevation = 0;
+    if (!isDead) {
+      if (rig.equippedWeapon === "bow") {
+        // Body faces the exact same direction the reticle marks, not just
+        // facingAngle — see fireArrow's own comment on why
+        // camera.getWorldDirection() (not a hand-rebuilt angle) is the one
+        // true aim direction. Only its yaw drives rotation.y; the vertical
+        // component becomes aimElevation instead, since a person tips
+        // their head/arms to look up, not their whole standing body.
+        const dir = camera.getWorldDirection(aimDirScratch);
+        rig.group.rotation.y = Math.atan2(dir.x, dir.z);
+        aimElevation = Math.asin(Math.max(-1, Math.min(1, dir.y)));
+      } else {
+        rig.group.rotation.y = facingAngle;
+      }
+    }
 
     const isInvulnerable = now < invulnerableUntil;
-    if (attack && matchOver) {
-      status.textContent = "Time's up — combat's over.";
-    } else if (attack && isInvulnerable) {
-      status.textContent = "Still preparing — can't attack yet…";
-    } else if (attack && !playerStunned) {
-      const started = tryAttack(rig, now);
-      if (!started) status.textContent = "Sword's still on cooldown…";
-      else {
-        status.textContent = "Swing!";
-        socket.sendAttackStart();
+    const canAct = !matchOver && !isInvulnerable && !playerStunned && !isDead;
+
+    // attackQueued fires on every mousedown/KeyJ regardless of which
+    // weapon is out (see createInputState — it has no notion of equipped
+    // weapon at all); the sword's own instant-swing behavior below is
+    // simply skipped while the bow is equipped instead, and mouseHeld
+    // drives the bow's own charge/release cycle in its own block further
+    // down. This is deliberately the ONLY thing gating attack by weapon —
+    // everything else about the sword (tryAttack, cooldown, combo state)
+    // is completely unchanged from before the bow existed.
+    if (rig.equippedWeapon === "sword") {
+      if (attack && matchOver) {
+        status.textContent = "Time's up — combat's over.";
+      } else if (attack && isInvulnerable) {
+        status.textContent = "Still preparing — can't attack yet…";
+      } else if (attack && !playerStunned) {
+        const started = tryAttack(rig, now);
+        if (!started) status.textContent = "Sword's still on cooldown…";
+        else {
+          status.textContent = "Swing!";
+          socket.sendAttackStart();
+        }
+      }
+    } else {
+      // Bow — mouseHeld starts/continues a draw; releasing it always
+      // fires (see releaseBowDraw's own comment), mapping however long it
+      // was held into an arrow speed. canAct's own matchOver/invulnerable/
+      // stunned/dead checks gate *starting* a new draw the same way the
+      // sword's own attack handling above does — but never cancel a draw
+      // already in progress, so e.g. a parry landing mid-draw doesn't
+      // leave the bow silently stuck at drawn.
+      if (mouseHeld && !rig.bowDrawing && canAct && now >= bowCooldownUntil) {
+        startBowDraw(rig, now);
+      } else if (!mouseHeld && rig.bowDrawing) {
+        const { speed } = releaseBowDraw(rig, now, BOW_MIN_ARROW_SPEED, BOW_MAX_ARROW_SPEED);
+        bowCooldownUntil = now + BOW_COOLDOWN_MS;
+        fireArrow(speed);
+        status.textContent = "Loosed!";
       }
     }
 
     if (isDead) updateDeathFall(rig, now);
-    else updatePlayerVisual(rig, now, isMoving, dt);
+    else updatePlayerVisual(rig, now, isMoving, dt, aimElevation);
     updateShieldVisual(rig, isInvulnerable, now);
 
     if (smoke && matchOver) {
@@ -964,10 +1354,14 @@ function mount(el, ctx) {
     }
     const smokeFrac = Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS);
     const dashFrac = Math.max(0, (dashCooldownUntil - now) / DASH_COOLDOWN_MS);
+    const bowInfo = rig.bowDrawing
+      ? { charging: true, frac: Math.min(1, (now - rig.bowDrawStartAt - BOW_MIN_DRAW_MS) / (BOW_MAX_DRAW_MS - BOW_MIN_DRAW_MS)) }
+      : { charging: false, frac: Math.max(0, (bowCooldownUntil - now) / BOW_COOLDOWN_MS) };
     cooldownHud.update(
       rig.comboState === "cooldown" ? Math.max(0, 1 - (now - rig.stateEnteredAt) / ATTACK_COOLDOWN_MS) : 0,
       smokeFrac,
       dashFrac,
+      bowInfo,
     );
     smokeIcon.update(smokeFrac, SMOKE_COOLDOWN_MS);
     dashIcon.update(dashFrac, DASH_COOLDOWN_MS);
@@ -989,7 +1383,7 @@ function mount(el, ctx) {
     const peerEase = 1 - Math.exp(-PEER_EASE_RATE * dt);
     for (const peer of peers.values()) {
       if (peer.rig.isDead) updateDeathFall(peer.rig, now);
-      else updatePlayerVisual(peer.rig, now, peer.isMoving, dt);
+      else updatePlayerVisual(peer.rig, now, peer.isMoving, dt, peer.aimElevation);
       updateShieldVisual(peer.rig, now < peer.invulnerableUntil, now);
       peer.rig.group.position.x += (peer.targetX - peer.rig.group.position.x) * peerEase;
       peer.rig.group.position.y += (peer.targetY - peer.rig.group.position.y) * peerEase;
@@ -1011,7 +1405,17 @@ function mount(el, ctx) {
     if (now - lastNetworkTickAt >= NETWORK_TICK_MS) {
       lastNetworkTickAt = now;
       const bladePoints = rig.isActiveSwing ? getSwordWorldSamplePoints(rig) : null;
-      socket.sendPosition(physics.x, physics.y, physics.z, facingAngle, rig.isActiveSwing, bladePoints);
+      socket.sendPosition(
+        physics.x,
+        physics.y,
+        physics.z,
+        facingAngle,
+        rig.isActiveSwing,
+        bladePoints,
+        rig.equippedWeapon,
+        aimElevation,
+        rig.bowDrawing,
+      );
     }
 
     if (playerWasActive && !rig.isActiveSwing) {
@@ -1034,21 +1438,49 @@ function mount(el, ctx) {
     const orbitX = Math.sin(facingAngle) * Math.cos(effectivePitch);
     const orbitY = Math.sin(effectivePitch);
     const orbitZ = Math.cos(facingAngle) * Math.cos(effectivePitch);
+    // Aiming swaps to a closer, over-the-shoulder, near-eye-level framing —
+    // see AIM_CAMERA_DISTANCE/AIM_SIDE_OFFSET/AIM_PIVOT_HEIGHT_FRAC's own
+    // comments — but only while actively DRAWING (rig.bowDrawing), not
+    // just having the bow equipped; equipping it alone looks and feels
+    // exactly like the sword until the mouse is actually held down.
+    // aimBlend eases smoothly between the two framings (and the reticle's
+    // own opacity, see bowReticle.setBlend) rather than snapping instantly
+    // on press/release. The camera position itself still orbits the
+    // (possibly raised) pivot; only the LOOKAT target gets the sideways
+    // nudge, which is what actually pushes the character's own silhouette
+    // off-center rather than just panning the whole view.
+    const aimTarget = rig.bowDrawing ? 1 : 0;
+    aimBlend += (aimTarget - aimBlend) * (1 - Math.exp(-AIM_BLEND_RATE * dt));
+    bowReticle.setBlend(aimBlend);
     const pivotX = physics.x;
-    const pivotY = physics.y + PLAYER_HEIGHT * 0.6;
+    const pivotY = physics.y + PLAYER_HEIGHT * (0.6 + (AIM_PIVOT_HEIGHT_FRAC - 0.6) * aimBlend);
     const pivotZ = physics.z;
+    const cameraDistance = CAMERA_DISTANCE + (AIM_CAMERA_DISTANCE - CAMERA_DISTANCE) * aimBlend;
+    const aimRightX = -Math.cos(facingAngle);
+    const aimRightZ = Math.sin(facingAngle);
+    const lookAtX = pivotX + aimRightX * AIM_SIDE_OFFSET * aimBlend;
+    const lookAtZ = pivotZ + aimRightZ * AIM_SIDE_OFFSET * aimBlend;
 
-    const desiredCamX = pivotX - orbitX * CAMERA_DISTANCE;
-    const desiredCamY = pivotY + orbitY * CAMERA_DISTANCE;
-    const desiredCamZ = pivotZ - orbitZ * CAMERA_DISTANCE;
+    const desiredCamX = pivotX - orbitX * cameraDistance;
+    const desiredCamY = pivotY + orbitY * cameraDistance;
+    const desiredCamZ = pivotZ - orbitZ * cameraDistance;
     camPos.x += (desiredCamX - camPos.x) * CAMERA_DAMPING;
     camPos.y += (desiredCamY - camPos.y) * CAMERA_DAMPING;
     camPos.z += (desiredCamZ - camPos.z) * CAMERA_DAMPING;
-    camLookAt.x += (pivotX - camLookAt.x) * CAMERA_DAMPING;
+    camLookAt.x += (lookAtX - camLookAt.x) * CAMERA_DAMPING;
     camLookAt.y += (pivotY - camLookAt.y) * CAMERA_DAMPING;
-    camLookAt.z += (pivotZ - camLookAt.z) * CAMERA_DAMPING;
+    camLookAt.z += (lookAtZ - camLookAt.z) * CAMERA_DAMPING;
     camera.position.copy(camPos);
     camera.lookAt(camLookAt);
+    // LOCAL rig only, never a peer's — see setRigOpacity's own comment on
+    // why: a zoomed-in over-the-shoulder bow camera can put YOUR OWN body
+    // between the camera and whatever you're aiming at, but another
+    // player's body isn't blocking anything on THEIR OWN screen the same
+    // way, so there's nothing to fix on peer.rig (or the practice dummy)
+    // regardless of what weapon they're holding. Tied directly to aimBlend
+    // (not a hard equipped/not-equipped switch) so it fades in/out smoothly
+    // in lockstep with the camera and reticle instead of popping.
+    setRigOpacity(rig, 1 - (1 - AIM_LOCAL_OPACITY) * aimBlend);
 
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
@@ -1065,6 +1497,14 @@ function mount(el, ctx) {
     for (let i = bloodEffects.length - 1; i >= 0; i--) {
       if (!bloodEffects[i].update(dt)) bloodEffects.splice(i, 1);
     }
+    // Real removal is driven by "arrow_expired" (see despawnArrow) — this
+    // update()===false path is only the safety-lifetime backstop (see
+    // createArrowVisual's own comment) for a dropped message; despawnArrow
+    // itself already no-ops safely if a late arrow_expired still shows up
+    // for an id this already pruned.
+    for (const [arrowId, arrow] of arrows) {
+      if (!arrow.update(dt)) despawnArrow(arrowId);
+    }
 
     renderer.render(scene, camera);
     rafId = requestAnimationFrame(frame);
@@ -1076,6 +1516,7 @@ function mount(el, ctx) {
     input.dispose();
     socket.dispose();
     for (const userId of Array.from(peers.keys())) removePeer(userId);
+    for (const arrow of arrows.values()) disposeArrowVisual(scene, arrow);
     disposeRig(rig);
     // A huge dt forces update() straight past its own lifetime, which is
     // what actually removes it from the scene and disposes its
@@ -1117,7 +1558,7 @@ function mountPractice(el) {
   status.style.fontSize = "12px";
   status.style.margin = "0 0 6px 0";
   status.textContent =
-    "Practice mode — the dummy attacks on its own timer so you can drill parries. WASD to move/strafe, arrow keys (or M for mouse-look) to look around, Space to jump, click or J to swing, Shift to dash.";
+    "Practice mode — the dummy attacks on its own timer so you can drill parries. WASD to move/strafe, arrow keys (or M for mouse-look) to look around, Space to jump, click or J to swing, Q to switch sword/bow, Shift to dash.";
   wrap.appendChild(status);
 
   const mouseLookStatus = document.createElement("p");
@@ -1152,6 +1593,8 @@ function mountPractice(el) {
   canvasWrap.appendChild(smokeIcon.el);
   const dashIcon = buildSkillCanvasIcon("💫", 48);
   canvasWrap.appendChild(dashIcon.el);
+  const bowReticle = buildBowReticle();
+  canvasWrap.appendChild(bowReticle.el);
 
   wrap.appendChild(canvasWrap);
 
@@ -1167,7 +1610,7 @@ function mountPractice(el) {
   controlsHelp.style.color = "#a3a3a3";
   controlsHelp.style.lineHeight = "1.5";
   controlsHelp.innerHTML =
-    "<strong>Controls</strong> — WASD: move/strafe &nbsp;•&nbsp; Arrow keys: look &nbsp;•&nbsp; M: toggle mouse-look &nbsp;•&nbsp; Space: jump &nbsp;•&nbsp; Click or J: swing sword &nbsp;•&nbsp; Shift: dash &nbsp;•&nbsp; F: smoke skill";
+    "<strong>Controls</strong> — WASD: move/strafe &nbsp;•&nbsp; Arrow keys: look &nbsp;•&nbsp; M: toggle mouse-look &nbsp;•&nbsp; Space: jump &nbsp;•&nbsp; Click or J: swing sword / fire bow &nbsp;•&nbsp; Q: switch sword/bow &nbsp;•&nbsp; Hold click with the bow out: draw — longer hold flies faster &nbsp;•&nbsp; Shift: dash &nbsp;•&nbsp; F: smoke skill";
   wrap.appendChild(controlsHelp);
 
   el.appendChild(wrap);
@@ -1196,12 +1639,28 @@ function mountPractice(el) {
   let pitchAngle = 0;
   const camPos = new THREE.Vector3(SPAWN.x, SPAWN.y + PLAYER_HEIGHT, SPAWN.z + CAMERA_DISTANCE);
   const camLookAt = new THREE.Vector3(SPAWN.x, SPAWN.y, SPAWN.z);
+  // Reused every frame while aiming (see fireArrow's own comment on why
+  // camera.getWorldDirection() — not a hand-rebuilt angle — is the one
+  // true aim direction) rather than allocating a fresh Vector3 every frame.
+  const aimDirScratch = new THREE.Vector3();
 
-  const input = createInputState(canvas, turnButtons.state, (locked) => {
-    mouseLookStatus.textContent = locked
-      ? "Mouse-look: ON (press M to disable)"
-      : "Mouse-look: off (press M to try enabling it)";
-  });
+  const input = createInputState(
+    canvas,
+    turnButtons.state,
+    (locked) => {
+      mouseLookStatus.textContent = locked
+        ? "Mouse-look: ON (press M to disable)"
+        : "Mouse-look: off (press M to try enabling it)";
+    },
+    () => {
+      if (rig.isActiveSwing) return;
+      switchEquippedWeapon(rig);
+      status.textContent =
+        rig.equippedWeapon === "bow" ? "Bow equipped. Hold click to draw, release to fire." : "Sword equipped.";
+      if (rig.equippedWeapon === "bow") canvas.requestPointerLock();
+      else if (document.pointerLockElement === canvas) document.exitPointerLock();
+    },
+  );
   let lastWidth = 0;
   let lastHeight = 0;
   let lastFrameTime = performance.now();
@@ -1221,7 +1680,13 @@ function mountPractice(el) {
   let hitsLanded = 0;
   let timesHit = 0;
   let smokeCooldownUntil = 0;
+  let bowCooldownUntil = 0;
+  let aimBlend = 0;
   const bloodEffects = [];
+  // No server here, so arrows are id-less — an array works fine (unlike
+  // the real match's Map keyed by a server-assigned arrowId), pruned by
+  // the same update()===false convention as bloodEffects.
+  const arrows = [];
   const BLOOD_SPRAY_HEIGHT = 1.0;
 
   function respawnPlayer(now) {
@@ -1293,7 +1758,8 @@ function mountPractice(el) {
     const dt = Math.min(0.1, (now - lastFrameTime) / 1000);
     lastFrameTime = now;
 
-    const { inputForward, inputStrafe, turn, pitchTurn, mouseTurnDelta, mousePitchDelta, jump, attack, dash, smoke } = input.read();
+    const { inputForward, inputStrafe, turn, pitchTurn, mouseTurnDelta, mousePitchDelta, jump, attack, dash, smoke, mouseHeld } =
+      input.read();
 
     scoreEl.textContent = `Hits landed: ${hitsLanded} — Times you've been hit: ${timesHit}`;
 
@@ -1378,12 +1844,39 @@ function mountPractice(el) {
     }
 
     rig.group.position.set(physics.x, physics.y, physics.z);
-    if (!isDead) rig.group.rotation.y = facingAngle;
-
-    if (attack && !playerStunned) {
-      const started = tryAttack(rig, now);
-      if (!started) status.textContent = "Sword's still on cooldown…";
-      else status.textContent = "Swing!";
+    // aimElevation feeds updatePlayerVisual below (nods the head, tilts
+    // the bow) — see mount()'s own identical block for the full reasoning.
+    let aimElevation = 0;
+    if (!isDead) {
+      if (rig.equippedWeapon === "bow") {
+        const dir = camera.getWorldDirection(aimDirScratch);
+        rig.group.rotation.y = Math.atan2(dir.x, dir.z);
+        aimElevation = Math.asin(Math.max(-1, Math.min(1, dir.y)));
+      } else {
+        rig.group.rotation.y = facingAngle;
+      }
+    }
+    if (rig.equippedWeapon === "sword") {
+      if (attack && !playerStunned) {
+        const started = tryAttack(rig, now);
+        if (!started) status.textContent = "Sword's still on cooldown…";
+        else status.textContent = "Swing!";
+      }
+    } else {
+      if (mouseHeld && !rig.bowDrawing && !playerStunned && now >= bowCooldownUntil) {
+        startBowDraw(rig, now);
+      } else if (!mouseHeld && rig.bowDrawing) {
+        const { speed } = releaseBowDraw(rig, now, BOW_MIN_ARROW_SPEED, BOW_MAX_ARROW_SPEED);
+        bowCooldownUntil = now + BOW_COOLDOWN_MS;
+        // Same reasoning as the real match's own fireArrow — fired from the
+        // camera's own eye line (not the visual bow's hand, off to the
+        // character's side) so it actually flies dead-center under the
+        // reticle instead of visibly parallax-drifting to one side.
+        const dir = camera.getWorldDirection(aimDirScratch);
+        const origin = camera.position.clone().addScaledVector(dir, ARROW_ORIGIN_FORWARD_OFFSET);
+        arrows.push(createArrowVisual(scene, origin.x, origin.y, origin.z, dir.x * speed, dir.y * speed, dir.z * speed));
+        status.textContent = "Loosed!";
+      }
     }
     if (smoke && !playerStunned && now >= smokeCooldownUntil) {
       smokeCooldownUntil = now + SMOKE_COOLDOWN_MS;
@@ -1394,16 +1887,20 @@ function mountPractice(el) {
     }
     const smokeFrac = Math.max(0, (smokeCooldownUntil - now) / SMOKE_COOLDOWN_MS);
     const dashFrac = Math.max(0, (dashCooldownUntil - now) / DASH_COOLDOWN_MS);
+    const bowInfo = rig.bowDrawing
+      ? { charging: true, frac: Math.min(1, (now - rig.bowDrawStartAt - BOW_MIN_DRAW_MS) / (BOW_MAX_DRAW_MS - BOW_MIN_DRAW_MS)) }
+      : { charging: false, frac: Math.max(0, (bowCooldownUntil - now) / BOW_COOLDOWN_MS) };
     cooldownHud.update(
       rig.comboState === "cooldown" ? Math.max(0, 1 - (now - rig.stateEnteredAt) / ATTACK_COOLDOWN_MS) : 0,
       smokeFrac,
       dashFrac,
+      bowInfo,
     );
     smokeIcon.update(smokeFrac, SMOKE_COOLDOWN_MS);
     dashIcon.update(dashFrac, DASH_COOLDOWN_MS);
 
     if (isDead) updateDeathFall(rig, now);
-    else updatePlayerVisual(rig, now, isMoving, dt);
+    else updatePlayerVisual(rig, now, isMoving, dt, aimElevation);
 
     // Dummy: always swings on its own timer (not conditional on the
     // player's range/facing) so parry timing can be drilled reliably,
@@ -1478,6 +1975,42 @@ function mountPractice(el) {
       }
     }
 
+    // Arrows — a plain per-frame point check against the dummy's current
+    // position (no sub-stepping/segment sweep like main.py's own
+    // _check_arrow_hit), since this is a private sandbox against one
+    // stationary-ish target, not something that needs to resist a
+    // malicious client the way the real match's server-side check does.
+    for (let i = arrows.length - 1; i >= 0; i--) {
+      const arrow = arrows[i];
+      const stillAlive = arrow.update(dt);
+      const pos = arrow.mesh.position;
+      let landed = pos.y <= 0;
+      if (!arrow.hasHit && !dummyDead) {
+        const dx = pos.x - dummy.group.position.x;
+        const dz = pos.z - dummy.group.position.z;
+        if (Math.hypot(dx, dz) <= PRACTICE_HIT_RADIUS && pos.y >= dummy.group.position.y && pos.y <= dummy.group.position.y + PLAYER_HEIGHT + 0.2) {
+          arrow.hasHit = true;
+          landed = true;
+          hitsLanded++;
+          startDeathFall(dummy, now);
+          const headshot = pos.y >= dummy.group.position.y + HEAD_Y_MIN;
+          if (headshot) triggerDecapitation(dummy, pos.x, pos.z, "#ef4444");
+          else bloodEffects.push(spawnBloodSpray(scene, dummy.group.position.x, dummy.group.position.y + BLOOD_SPRAY_HEIGHT, dummy.group.position.z));
+          dummyDeadUntil = now + PRACTICE_RESPAWN_MS;
+          status.textContent = headshot ? "Headshot!" : "Hit!";
+          setTimeout(() => {
+            resetAfterRespawn(dummy, performance.now());
+            dummy.group.position.set(DUMMY_POS.x, DUMMY_POS.y, DUMMY_POS.z);
+            dummyNextAttackAt = performance.now() + DUMMY_ATTACK_MIN_MS;
+          }, PRACTICE_RESPAWN_MS);
+        }
+      }
+      if (!stillAlive || landed) {
+        disposeArrowVisual(scene, arrow);
+        arrows.splice(i, 1);
+      }
+    }
+
     if (playerWasActive && !rig.isActiveSwing) {
       status.textContent = "Swing finished.";
     }
@@ -1487,21 +2020,41 @@ function mountPractice(el) {
     const orbitX = Math.sin(facingAngle) * Math.cos(effectivePitch);
     const orbitY = Math.sin(effectivePitch);
     const orbitZ = Math.cos(facingAngle) * Math.cos(effectivePitch);
+    // See mount()'s own identical block for the full reasoning — aiming
+    // only kicks in while actively DRAWING (rig.bowDrawing), not just
+    // equipped, easing smoothly (aimBlend) rather than snapping instantly.
+    const aimTarget = rig.bowDrawing ? 1 : 0;
+    aimBlend += (aimTarget - aimBlend) * (1 - Math.exp(-AIM_BLEND_RATE * dt));
+    bowReticle.setBlend(aimBlend);
     const pivotX = physics.x;
-    const pivotY = physics.y + PLAYER_HEIGHT * 0.6;
+    const pivotY = physics.y + PLAYER_HEIGHT * (0.6 + (AIM_PIVOT_HEIGHT_FRAC - 0.6) * aimBlend);
     const pivotZ = physics.z;
+    const cameraDistance = CAMERA_DISTANCE + (AIM_CAMERA_DISTANCE - CAMERA_DISTANCE) * aimBlend;
+    const aimRightX = -Math.cos(facingAngle);
+    const aimRightZ = Math.sin(facingAngle);
+    const lookAtX = pivotX + aimRightX * AIM_SIDE_OFFSET * aimBlend;
+    const lookAtZ = pivotZ + aimRightZ * AIM_SIDE_OFFSET * aimBlend;
 
-    const desiredCamX = pivotX - orbitX * CAMERA_DISTANCE;
-    const desiredCamY = pivotY + orbitY * CAMERA_DISTANCE;
-    const desiredCamZ = pivotZ - orbitZ * CAMERA_DISTANCE;
+    const desiredCamX = pivotX - orbitX * cameraDistance;
+    const desiredCamY = pivotY + orbitY * cameraDistance;
+    const desiredCamZ = pivotZ - orbitZ * cameraDistance;
     camPos.x += (desiredCamX - camPos.x) * CAMERA_DAMPING;
     camPos.y += (desiredCamY - camPos.y) * CAMERA_DAMPING;
     camPos.z += (desiredCamZ - camPos.z) * CAMERA_DAMPING;
-    camLookAt.x += (pivotX - camLookAt.x) * CAMERA_DAMPING;
+    camLookAt.x += (lookAtX - camLookAt.x) * CAMERA_DAMPING;
     camLookAt.y += (pivotY - camLookAt.y) * CAMERA_DAMPING;
-    camLookAt.z += (pivotZ - camLookAt.z) * CAMERA_DAMPING;
+    camLookAt.z += (lookAtZ - camLookAt.z) * CAMERA_DAMPING;
     camera.position.copy(camPos);
     camera.lookAt(camLookAt);
+    // LOCAL rig only, never a peer's — see setRigOpacity's own comment on
+    // why: a zoomed-in over-the-shoulder bow camera can put YOUR OWN body
+    // between the camera and whatever you're aiming at, but another
+    // player's body isn't blocking anything on THEIR OWN screen the same
+    // way, so there's nothing to fix on peer.rig (or the practice dummy)
+    // regardless of what weapon they're holding. Tied directly to aimBlend
+    // (not a hard equipped/not-equipped switch) so it fades in/out smoothly
+    // in lockstep with the camera and reticle instead of popping.
+    setRigOpacity(rig, 1 - (1 - AIM_LOCAL_OPACITY) * aimBlend);
 
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
@@ -1528,6 +2081,7 @@ function mountPractice(el) {
     disposeRig(rig);
     disposeRig(dummy);
     for (const effect of bloodEffects) effect.update(1000);
+    for (const arrow of arrows) disposeArrowVisual(scene, arrow);
     renderer.dispose();
   };
 }

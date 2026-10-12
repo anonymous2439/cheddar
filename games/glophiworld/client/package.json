@@ -1,0 +1,15 @@
+{
+  "name": "cheddar-game-glophiworld-client",
+  "version": "0.1.0",
+  "description": "Glophiworld — real-time-combat sibling of Glophimon (same world/NPCs/persistence, wild encounters happen live in the open world instead of a turn-based battle screen), vendored into the Cheddar extension.",
+  "private": true,
+  "scripts": {
+    "build": "bash build.sh"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.1"
+  }
+}

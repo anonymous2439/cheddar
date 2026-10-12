@@ -38,6 +38,70 @@ function box(width, depth, length, x, y, color) {
   return mesh;
 }
 
+// A flat smiley decal for the head's own local +Z face — the model's own
+// "front" (facingAngle 0 turns the whole rig to face world +Z; see game.js's
+// local.facingAngle/atan2 convention and how box()'s "depth" param already
+// treats Z as the front-to-back axis for every other limb). A real 3D plane
+// parented to the head, not a camera-facing Sprite (like the name label
+// below) — the whole point is that it has to rotate WITH the model so
+// orbiting the Pose Designer's preview camera around it actually reveals
+// which side is front, instead of always facing the viewer regardless.
+export function buildFaceMarker() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  ctx.strokeStyle = "#000000";
+  ctx.fillStyle = "#000000";
+  ctx.lineWidth = 4;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.arc(22, 26, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(42, 26, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(32, 28, 16, 0.15 * Math.PI, 0.85 * Math.PI);
+  ctx.stroke();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false });
+  const marker = new THREE.Mesh(new THREE.PlaneGeometry(HEAD_SIZE * 0.85, HEAD_SIZE * 0.85), material);
+  marker.position.z = HEAD_SIZE / 2 + 0.002; // just proud of the head's own front face, avoiding z-fighting
+  marker.renderOrder = 1;
+  return marker;
+}
+
+// The head's local -Z face — opposite buildFaceMarker's own +Z placement.
+// Deliberately not another face (a plain dot, in a color that reads as
+// "the other one," not a second smiley) — the Pose Designer's own Body
+// Rotation slider turns the whole head right along with the body, so the
+// front smiley can end up facing away from the camera with nothing telling
+// you it's now back there. With both markers, whichever one you're
+// currently looking at always tells you the orientation outright, with no
+// need to orbit the camera around hunting for the smiley.
+export function buildBackMarker() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ef4444";
+  ctx.beginPath();
+  ctx.arc(32, 32, 20, 0, Math.PI * 2);
+  ctx.fill();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false });
+  const marker = new THREE.Mesh(new THREE.PlaneGeometry(HEAD_SIZE * 0.85, HEAD_SIZE * 0.85), material);
+  marker.position.z = -(HEAD_SIZE / 2 + 0.002);
+  marker.rotation.y = Math.PI; // flips its normal to face outward (-Z), not into the head
+  marker.renderOrder = 1;
+  return marker;
+}
+
 const NAME_LABEL_FONT = "bold 13px sans-serif"; // was 8px — hard to read at a glance, especially wild Glophimon's Lv.N suffix
 const NAME_LABEL_HEIGHT = 20;
 const NAME_LABEL_PADDING = 5;

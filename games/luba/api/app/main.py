@@ -103,6 +103,45 @@ COMBO_WINDOW_S = 3.0
 SLASH2_DURATION_S = 0.150
 ATTACK_COOLDOWN_S = 1.0
 
+# Bow — the second weapon (see games/luba/client/src/player.js's own
+# switchEquippedWeapon/startBowDraw/releaseBowDraw). Unlike the sword, an
+# arrow is a real server-simulated projectile, not a client-reported swept
+# blade position — it travels far enough, fast enough, and lives long
+# enough that trusting a client's own claimed hit (the sword's model) would
+# be trivial to abuse, and a single per-tick point-in-range check (like the
+# melee one above) would let a fast arrow tunnel clean through a target
+# between position updates. So the server owns the whole flight: every
+# active arrow is stepped on its own fixed-rate loop below
+# (_run_arrow_tick), independent of any player's own websocket messages.
+#
+# 20Hz is plenty for a ballistic arc that only needs to look right and land
+# within ARROW_HIT_RADIUS of a target — it doesn't need render-frame
+# precision the way the client's own visual copy does.
+ARROW_TICK_S = 0.05
+# Its own gravity constant, not physics.js's player GRAVITY=30 — a flatter,
+# more game-y arc reads better for something you're aiming at a distance
+# than a heavy, fast-dropping arrow would.
+ARROW_GRAVITY = 12.0
+# Must match game.js's own BOW_MIN_ARROW_SPEED/BOW_MAX_ARROW_SPEED — draw
+# duration there maps 1:1 onto this same range, and the speed a client
+# reports is clamped into it here regardless, so a modified client can
+# never claim a faster arrow than a full, legitimate draw would produce.
+MIN_ARROW_SPEED = 14.0
+MAX_ARROW_SPEED = 34.0
+# Safety cap independent of hitting the ground (see the tick loop) — covers
+# a shot fired flat enough, or steep enough upward, that it would otherwise
+# never cross y<=0 within a reasonable time.
+ARROW_MAX_LIFETIME_S = 4.0
+# Tighter than the sword's own HIT_RADIUS (0.5) — an arrow is a precise
+# projectile, not a wide blade sweep, and reads as "skill-based" only if a
+# clean miss can actually miss.
+ARROW_HIT_RADIUS = 0.4
+# Backstop between shots — the client's own bow cooldown (game.js's
+# BOW_COOLDOWN_MS) is the primary gate; this just stops a modified client
+# from spamming fire_arrow messages faster than a real draw/release cycle
+# could ever produce.
+ARROW_COOLDOWN_S = 0.25
+
 
 @dataclass
 class PlayerState:
@@ -137,6 +176,34 @@ class PlayerState:
     # gate (same trust model as the sword's cooldown), this just stops a
     # modified client from spamming it.
     smoke_next_allowed_at: float = 0.0
+    # Bow cooldown backstop — see ARROW_COOLDOWN_S's own comment.
+    next_allowed_arrow_at: float = 0.0
+    # Per-player counter used to build this player's own arrow ids
+    # (f"{user_id}-{arrow_seq}") — simple, unique within a room without a
+    # global counter or randomness, since ids only ever need to be unique
+    # per-room for the lifetime of one arrow.
+    arrow_seq: int = 0
+    # Purely cosmetic (relayed to peers so they can see this player
+    # actually holding/aiming a bow — see the "position" handler and its
+    # own peer_position broadcast) — never trusted for anything that
+    # affects hit resolution, which stays keyed entirely off fire_arrow's
+    # own reported origin/direction regardless of what this says.
+    equipped_weapon: str = "sword"
+    aim_elevation: float = 0.0
+    is_drawing_bow: bool = False
+
+
+@dataclass
+class ArrowState:
+    id: str
+    owner_id: int
+    x: float
+    y: float
+    z: float
+    vx: float
+    vy: float
+    vz: float
+    spawned_at: float
 
 
 class LubaRoom:
@@ -148,6 +215,7 @@ class LubaRoom:
     def __init__(self, lobby_id: int, duration_s: float) -> None:
         self.lobby_id = lobby_id
         self.players: dict[int, PlayerState] = {}
+        self.arrows: dict[str, ArrowState] = {}
         self.duration_s = duration_s
         # Room creation (the first player's websocket connecting) is what
         # actually starts the clock — close enough to "match start" given
@@ -190,6 +258,100 @@ async def _run_match_timer(room: LubaRoom) -> None:
     await room.broadcast({"type": "match_over", "winnerId": None if is_tie else winner_id, "winnerKills": winner_kills, "isTie": is_tie})
 
 
+def _check_arrow_hit(room: LubaRoom, arrow: ArrowState, prev_x: float, prev_y: float, prev_z: float, now: float) -> tuple[PlayerState, bool] | None:
+    """Sub-samples the segment the arrow just moved along this tick (not
+    just its new endpoint) — same "check discrete points along the path,
+    not just the current position" idea _check_hit above uses for the
+    sword's own swept blade, just applied to a segment computed from the
+    arrow's own last two positions instead of a rig's animated blade
+    points. 4 sub-steps is comfortably tighter than ARROW_HIT_RADIUS given
+    how far even the fastest arrow (MAX_ARROW_SPEED) travels in one
+    ARROW_TICK_S tick."""
+    steps = 4
+    for i in range(1, steps + 1):
+        t = i / steps
+        sx = prev_x + (arrow.x - prev_x) * t
+        sy = prev_y + (arrow.y - prev_y) * t
+        sz = prev_z + (arrow.z - prev_z) * t
+        for other in room.players.values():
+            if other.user_id == arrow.owner_id or not other.alive or now < other.invulnerable_until:
+                continue
+            dx = sx - other.x
+            dz = sz - other.z
+            horiz = (dx * dx + dz * dz) ** 0.5
+            if horiz <= ARROW_HIT_RADIUS and other.y <= sy <= other.y + PLAYER_HEIGHT + 0.2:
+                return other, sy >= other.y + HEAD_Y_MIN
+    return None
+
+
+async def _apply_arrow_hit(room: LubaRoom, arrow: ArrowState, target: PlayerState, is_headshot: bool) -> None:
+    """Same death broadcast shape _resolve_blade_points' own "hit" branch
+    sends — reusing it means every client's existing onDeathMessage/
+    decapitation/blood-spray/respawn handling already works for an arrow
+    kill with zero new client code, no arrow-specific death path needed.
+    No parry equivalent for arrows — an arrow always resolves as a hit,
+    never a clash, regardless of what the target was doing."""
+    owner = room.players.get(arrow.owner_id)
+    if owner is None or not target.alive:
+        return
+    target.alive = False
+    owner.kills += 1
+    hdx = target.x - arrow.x
+    hdz = target.z - arrow.z
+    hdist = (hdx * hdx + hdz * hdz) ** 0.5 or 1.0
+    await room.broadcast(
+        {
+            "type": "death",
+            "userId": target.user_id,
+            "cause": "hit",
+            "attackerId": owner.user_id,
+            "attackerKills": owner.kills,
+            "isHeadshot": is_headshot,
+            "headPushX": hdx / hdist,
+            "headPushY": 1.0,
+            "headPushZ": hdz / hdist,
+        }
+    )
+    asyncio.create_task(_schedule_respawn(room, target))
+
+
+async def _run_arrow_tick(room: LubaRoom) -> None:
+    """One continuous loop per room, independent of any player's own
+    websocket messages — see ARROW_TICK_S's own comment for why this needs
+    to be a real simulation loop rather than a per-message check the way
+    the sword's hit resolution is. Exits once this room is replaced/torn
+    down (same staleness check _run_match_timer uses) or the match ends —
+    arrows already in flight when the match ends just silently stop being
+    tracked rather than being explicitly expired, since every client's own
+    matchOver flag already stops it from mattering visually within a
+    moment regardless."""
+    while True:
+        await asyncio.sleep(ARROW_TICK_S)
+        if _rooms.get(room.lobby_id) is not room or room.ended:
+            return
+        if not room.arrows:
+            continue
+        now = time.monotonic()
+        expired_ids: list[str] = []
+        for arrow in list(room.arrows.values()):
+            prev_x, prev_y, prev_z = arrow.x, arrow.y, arrow.z
+            arrow.vy -= ARROW_GRAVITY * ARROW_TICK_S
+            arrow.x += arrow.vx * ARROW_TICK_S
+            arrow.y += arrow.vy * ARROW_TICK_S
+            arrow.z += arrow.vz * ARROW_TICK_S
+            hit = _check_arrow_hit(room, arrow, prev_x, prev_y, prev_z, now)
+            if hit is not None:
+                target, is_headshot = hit
+                await _apply_arrow_hit(room, arrow, target, is_headshot)
+                expired_ids.append(arrow.id)
+                continue
+            if arrow.y <= 0 or now - arrow.spawned_at >= ARROW_MAX_LIFETIME_S:
+                expired_ids.append(arrow.id)
+        for arrow_id in expired_ids:
+            room.arrows.pop(arrow_id, None)
+            await room.broadcast({"type": "arrow_expired", "arrowId": arrow_id})
+
+
 async def _get_room(lobby_id: int) -> LubaRoom:
     async with _rooms_guard:
         room = _rooms.get(lobby_id)
@@ -198,6 +360,7 @@ async def _get_room(lobby_id: int) -> LubaRoom:
             room = LubaRoom(lobby_id, duration_s)
             _rooms[lobby_id] = room
             asyncio.create_task(_run_match_timer(room))
+            asyncio.create_task(_run_arrow_tick(room))
         return room
 
 
@@ -390,6 +553,8 @@ async def luba_ws(websocket: WebSocket, lobby_id: int, token: str | None = None)
                     "facing": p.facing,
                     "alive": p.alive,
                     "kills": p.kills,
+                    "equippedWeapon": p.equipped_weapon,
+                    "aimElevation": p.aim_elevation,
                 }
                 for p in room.players.values()
                 if p.user_id != user_id
@@ -409,6 +574,18 @@ async def luba_ws(websocket: WebSocket, lobby_id: int, token: str | None = None)
                 me.is_active_swing = bool(msg.get("isActiveSwing"))
                 if me.is_active_swing:
                     me.active_swing_until = now + PARRY_GRACE_S
+                # Cosmetic-only (see PlayerState's own comment) — validated
+                # just enough that a malformed/malicious value can't corrupt
+                # what every OTHER client renders for this player, same
+                # "trust but sanitize" level the rest of this handler
+                # already applies to facing/isActiveSwing.
+                equipped_weapon = msg.get("equippedWeapon")
+                me.equipped_weapon = equipped_weapon if equipped_weapon in ("sword", "bow") else "sword"
+                try:
+                    me.aim_elevation = max(-1.6, min(1.6, float(msg.get("aimElevation", 0.0))))
+                except (TypeError, ValueError):
+                    me.aim_elevation = 0.0
+                me.is_drawing_bow = bool(msg.get("isDrawingBow"))
                 await room.broadcast(
                     {
                         "type": "peer_position",
@@ -419,6 +596,9 @@ async def luba_ws(websocket: WebSocket, lobby_id: int, token: str | None = None)
                         "facing": me.facing,
                         # Lets other clients locally mirror the swing
                         "isActiveSwing": me.is_active_swing,
+                        "equippedWeapon": me.equipped_weapon,
+                        "aimElevation": me.aim_elevation,
+                        "isDrawingBow": me.is_drawing_bow,
                     },
                     exclude_user_id=user_id,
                 )
@@ -458,6 +638,61 @@ async def luba_ws(websocket: WebSocket, lobby_id: int, token: str | None = None)
                             "y": me.y,
                             "z": me.z,
                             "durationMs": SMOKE_DURATION_MS,
+                        }
+                    )
+
+            elif msg_type == "fire_arrow":
+                # Same restriction set the sword's own attack_start/position
+                # handlers already enforce (alive, not stunned, not still in
+                # the post-respawn prepare window) plus its own cooldown
+                # backstop — see ARROW_COOLDOWN_S. The client is expected to
+                # already gate all of this itself (see game.js's own
+                # isInvulnerable/playerStunned/matchOver checks before ever
+                # sending fire_arrow); this is the same not-the-primary-gate
+                # backstop role _may_start_swing plays for the sword.
+                if (
+                    not room.ended
+                    and me.alive
+                    and now >= me.stunned_until
+                    and now >= me.invulnerable_until
+                    and now >= me.next_allowed_arrow_at
+                ):
+                    me.next_allowed_arrow_at = now + ARROW_COOLDOWN_S
+                    speed = max(MIN_ARROW_SPEED, min(MAX_ARROW_SPEED, float(msg.get("speed", MIN_ARROW_SPEED))))
+                    dir_x, dir_y, dir_z = float(msg["dirX"]), float(msg["dirY"]), float(msg["dirZ"])
+                    dir_len = (dir_x * dir_x + dir_y * dir_y + dir_z * dir_z) ** 0.5 or 1.0
+                    arrow_id = f"{user_id}-{me.arrow_seq}"
+                    me.arrow_seq += 1
+                    arrow = ArrowState(
+                        id=arrow_id,
+                        owner_id=user_id,
+                        x=float(msg["originX"]),
+                        y=float(msg["originY"]),
+                        z=float(msg["originZ"]),
+                        vx=(dir_x / dir_len) * speed,
+                        vy=(dir_y / dir_len) * speed,
+                        vz=(dir_z / dir_len) * speed,
+                        spawned_at=now,
+                    )
+                    room.arrows[arrow_id] = arrow
+                    # vx/vy/vz broadcast directly (already direction*speed)
+                    # rather than separate dir+speed — clients replay the
+                    # exact same position += v*dt; v.y -= ARROW_GRAVITY*dt
+                    # step this tick loop uses (see game.js's own
+                    # ARROW_GRAVITY_CLIENT, kept in sync with the constant
+                    # above), so the visual arrow tracks what the server is
+                    # actually simulating instead of drifting from it.
+                    await room.broadcast(
+                        {
+                            "type": "arrow_spawned",
+                            "arrowId": arrow_id,
+                            "ownerId": user_id,
+                            "x": arrow.x,
+                            "y": arrow.y,
+                            "z": arrow.z,
+                            "vx": arrow.vx,
+                            "vy": arrow.vy,
+                            "vz": arrow.vz,
                         }
                     )
 

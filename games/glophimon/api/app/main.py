@@ -27,9 +27,14 @@ import chess
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from jose import jwt as jose_jwt
+from pydantic import ValidationError
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
+from starlette.concurrency import run_in_threadpool
 
+from app.chess_ai import compute_ai_move
+from app.dama_ai import apply_dama_move, has_no_legal_moves
+from app.dama_ai import compute_ai_move as compute_dama_ai_move
 from app.combat_data import MOVE_BY_KEY, SPECIES, SPECIES_BY_KEY
 from app.config import settings
 from app.db import Base, SessionLocal, engine
@@ -49,6 +54,8 @@ from app.schemas import (
     BattleResultOut,
     BattleResultParticipant,
     BattleResultRequest,
+    CameraFocusOverrideUpdate,
+    CameraOverrideUpdate,
     CatchRequest,
     CharacterCreate,
     CharacterOut,
@@ -63,6 +70,7 @@ from app.schemas import (
     KarirsStateOut,
     OwnedGlophimonOut,
     OwnedOut,
+    PoseOverrideUpdate,
     ShopBuyCreate,
     SpeciesOut,
     StarterCreate,
@@ -177,11 +185,11 @@ def _inventory_out(row: GlophimonInventory) -> InventoryOut:
 
 class Connection:
     __slots__ = (
-        "user_id", "display_name", "appearance", "websocket", "x", "z", "facing", "last_saved_at", "starter_level", "last_chat_at",
+        "user_id", "display_name", "appearance", "websocket", "x", "z", "facing", "floor", "last_saved_at", "starter_level", "last_chat_at",
     )
 
     def __init__(
-        self, user_id: int, display_name: str, appearance: dict, websocket: WebSocket, x: float, z: float, facing: float, starter_level: int
+        self, user_id: int, display_name: str, appearance: dict, websocket: WebSocket, x: float, z: float, facing: float, floor: int, starter_level: int
     ) -> None:
         self.user_id = user_id
         self.display_name = display_name
@@ -190,6 +198,13 @@ class Connection:
         self.x = x
         self.z = z
         self.facing = facing
+        # Which Glophics floor this connection's own character is currently
+        # on (0 = ground) — see GlophimonCharacter.floor's own docstring
+        # and game.js's own GLOPHICS_FLOORS. Updated from the client's own
+        # "position" messages exactly like x/z/facing, relayed to every
+        # other connected client the same way, and persisted the same way
+        # too (see persist_position below).
+        self.floor = floor
         self.last_saved_at = time.monotonic()
         # Global chat's own simple per-connection throttle (see world_ws's
         # "chat" branch) — 0.0 so the very first message is never rate
@@ -221,17 +236,33 @@ async def broadcast(payload: dict, exclude: WebSocket | None = None) -> None:
             pass  # its own receive loop's disconnect handling will clean it up
 
 
-async def send_to(user_id: int, payload: dict) -> None:
+async def send_to(user_id: int, payload: dict) -> bool:
     # The one targeted (not broadcast) send in this file — used by the Luba
-    # lobby system below, where an invite/kick/close only ever concerns one
-    # specific other connected player, never everyone.
+    # lobby system and PVP invites below, where an invite/kick/close only
+    # ever concerns one specific other connected player, never everyone.
+    # Returns whether the send actually landed. This used to swallow both
+    # a missing-connection and a failed-write silently and return nothing —
+    # fine for most callers, but the PVP invite handler needs to know when
+    # delivery to the target actually failed (a stale/half-closed socket
+    # whose owning connection's own receive loop hasn't noticed yet), since
+    # otherwise the invite vanished with the inviter never told and the
+    # target never seeing anything. A failed write here means that
+    # connection is already dead, so we drop it from `connections`
+    # immediately (guarded by identity, in case the same user_id already
+    # reconnected with a fresh Connection in the meantime) rather than
+    # waiting for its own receive loop's disconnect handling to catch up —
+    # otherwise every send_to for this user_id would keep failing the same
+    # silent way until that happens.
     conn = connections.get(user_id)
     if conn is None:
-        return
+        return False
     try:
         await conn.websocket.send_json(payload)
+        return True
     except Exception:
-        pass  # its own receive loop's disconnect handling will clean it up
+        if connections.get(user_id) is conn:
+            connections.pop(user_id, None)
+        return False
 
 
 # --- Shared wild Glophimon population ------------------------------------
@@ -251,11 +282,11 @@ async def send_to(user_id: int, payload: dict) -> None:
 # cue), while the engaging player doesn't render it as an ambient spawn at
 # all any more — it's now the dedicated rig inside their own battle scene.
 # Tuned against the actual wild-spawn roll rate, not picked by feel: the
-# shared world holds WILD_SPAWN_TARGET_COUNT=24 wild Glophimon at once, each
+# shared world holds WILD_SPAWN_TARGET_COUNT=40 wild Glophimon at once, each
 # living an average of (WILD_LIFETIME_MIN_S+WILD_LIFETIME_MAX_S)/2=60s before
-# despawning and rolling a replacement — that's ~24/60=0.4 rolls/sec
-# server-wide, or ~242,000 rolls/week. legendary=0.0004 -> ~1 expected
-# legendary spawn/week; rare=0.0019 -> ~1 expected rare spawn every ~1.5
+# despawning and rolling a replacement — that's ~40/60=0.67 rolls/sec
+# server-wide, or ~403,200 rolls/week. legendary=0.0004 -> ~1.6 expected
+# legendary spawns/week; rare=0.0019 -> ~1 expected rare spawn every ~0.9
 # days. Both are *expected* counts, not guarantees — real spawns are still
 # independent random rolls, so some weeks/days will have none and some will
 # have several.
@@ -299,6 +330,48 @@ KARIRS_FIELD_X = 28.0
 KARIRS_FIELD_Z = -28.0
 KARIRS_FIELD_HALF = 7.0
 KARIRS_NO_SPAWN_HALF = KARIRS_FIELD_HALF + TOWN_NO_SPAWN_MARGIN
+
+# The racetrack rendered just south of the field itself (see the client's
+# own KARIRS_TRACK_* constants/buildKarirsTrack) — open ground, no walls of
+# its own, so it needs its own explicit exclusion rather than picking one
+# up for free from _build_area_wall_boxes/TOWN_WALL_BOXES below. Must match
+# the client's own KARIRS_TRACK_* values exactly.
+KARIRS_TRACK_LANE_COUNT = 4
+KARIRS_TRACK_LANE_SPACING = 2.4
+KARIRS_TRACK_START_Z = KARIRS_FIELD_Z - KARIRS_FIELD_HALF - 3.0
+KARIRS_TRACK_LENGTH = 30.0
+KARIRS_TRACK_FINISH_Z = KARIRS_TRACK_START_Z - KARIRS_TRACK_LENGTH
+KARIRS_TRACK_WIDTH = KARIRS_TRACK_LANE_COUNT * KARIRS_TRACK_LANE_SPACING + 2.0
+# A no-spawn margin around the track's own footprint, same TOWN_NO_SPAWN_MARGIN
+# every other walled area already uses for "don't spawn right on top of
+# it" — the track has no walls to hide a spawn point behind, so this is
+# what actually keeps a wild from popping into existence on the finish line.
+KARIRS_TRACK_NO_SPAWN_HALF_WIDTH = KARIRS_TRACK_WIDTH / 2 + TOWN_NO_SPAWN_MARGIN
+KARIRS_TRACK_NO_SPAWN_MAX_Z = KARIRS_TRACK_START_Z + TOWN_NO_SPAWN_MARGIN
+KARIRS_TRACK_NO_SPAWN_MIN_Z = KARIRS_TRACK_FINISH_Z - TOWN_NO_SPAWN_MARGIN
+
+
+def _is_inside_karirs_track(x: float, z: float) -> bool:
+    """The track's own bare rectangle, no door-gapped wall-box thing like
+    is_inside_town_walls below — it's open ground with no walls at all, so
+    a wild has to be kept out of the whole footprint directly, not just its
+    (nonexistent) perimeter. Used for BOTH movement-blocking (see
+    _wild_tick, with no margin — right up to the actual track edge is
+    fine to walk beside) and, via the margin-padded variant just below, for
+    spawn exclusion."""
+    return KARIRS_FIELD_X - KARIRS_TRACK_WIDTH / 2 <= x <= KARIRS_FIELD_X + KARIRS_TRACK_WIDTH / 2 and (
+        KARIRS_TRACK_FINISH_Z <= z <= KARIRS_TRACK_START_Z
+    )
+
+
+def _is_near_karirs_track(x: float, z: float) -> bool:
+    """Same rectangle as _is_inside_karirs_track, padded by
+    TOWN_NO_SPAWN_MARGIN on every side — see KARIRS_TRACK_NO_SPAWN_HALF_WIDTH/
+    MIN_Z/MAX_Z's own comment. Spawn-exclusion only; movement blocking uses
+    the tighter, unpadded rectangle instead."""
+    return KARIRS_FIELD_X - KARIRS_TRACK_NO_SPAWN_HALF_WIDTH <= x <= KARIRS_FIELD_X + KARIRS_TRACK_NO_SPAWN_HALF_WIDTH and (
+        KARIRS_TRACK_NO_SPAWN_MIN_Z <= z <= KARIRS_TRACK_NO_SPAWN_MAX_Z
+    )
 
 # The Luba lobby area's own footprint — same wall layout, mirrored
 # diagonally opposite the Karirs field across the origin so neither it nor
@@ -404,7 +477,7 @@ def is_inside_town_walls(x: float, z: float) -> bool:
     return any(min_x <= x <= max_x and min_z <= z <= max_z for min_x, max_x, min_z, max_z in TOWN_WALL_BOXES)
 
 
-WILD_SPAWN_TARGET_COUNT = 24
+WILD_SPAWN_TARGET_COUNT = 40
 WILD_TICK_INTERVAL_S = 0.15
 WILD_LIFETIME_MIN_S = 40.0
 WILD_LIFETIME_MAX_S = 80.0
@@ -465,6 +538,122 @@ class WildSpawn:
 wild_spawns: dict[int, WildSpawn] = {}
 _next_wild_id = 1
 
+# Full spectator mode for wild battles — battling_user_id -> the latest full
+# snapshot of that fight, exactly as the battling client itself last
+# narrated it (see _handle_wild_battle_message below). Unlike wild_spawns
+# (genuinely server-owned) the fight *contents* here are still entirely
+# client-side/non-authoritative — the wild's stats, moves, HP, turn order
+# and RNG are all simulated locally by the battling player's own client
+# (games/glophimon/client's own startWildBattle/resolvePlayerAttack/
+# resolveWildAttack), exactly like it always has been. This dict doesn't
+# change that trust model at all; it just gives every OTHER connected
+# player visibility into a fight already happening, the same way position
+# broadcasts let everyone see where everyone else is standing without the
+# server ever validating *how* they got there. Always a full snapshot, not
+# a delta — see wild_battle_start/_update's own broadcast below — so any
+# client (including one that only just connected, see world_ws's own
+# wild_battle_roster send) can render a spectated battle from a single
+# message with no history to reconcile. Popped on wild_battle_end or on
+# disconnect (see world_ws's own finally block) — a battle with no entry
+# here just means nobody's spectating anything for that user right now.
+active_wild_battles: dict[int, dict] = {}
+
+
+# --- Floor 2 cinema: shared projectionist role + screen URL -------------
+# Mirrors game.js's own CINEMA_SCREEN_FLOOR_INDEX (= GLOPHICS_FLOORS[0].index,
+# currently 1) — kept as a plain server-side constant rather than importing
+# anything from the client, same as every other cross-referenced-by-comment
+# constant in this file. Used to re-check "is this connection actually
+# standing in the cinema right now" server-side rather than trusting
+# whatever the client claims (see _handle_cinema_message's own
+# cinema_claim_projectionist branch), and to detect the projectionist
+# walking away from the floor entirely (see world_ws's own "position"
+# branch below).
+CINEMA_FLOOR_INDEX = 1
+# Same default the client used to hardcode as CINEMA_YOUTUBE_EMBED_URL
+# before this feature existed — kept identical so a fresh server boot (or
+# a server restart mid-session, which clears this in-memory state exactly
+# like active_wild_battles) falls back to the same placeholder video rather
+# than an empty screen.
+CINEMA_DEFAULT_SCREEN_URL = (
+    "https://www.youtube.com/embed/dQw4w9WgXcQ?autoplay=1&mute=1&loop=1&playlist=dQw4w9WgXcQ&controls=0&enablejsapi=1"
+)
+# {"user_id": int, "display_name": str} for whoever currently holds the
+# projectionist role, or None if it's vacant. In-memory shared world state,
+# not per-account persisted state — exactly like active_wild_battles, this
+# resets on server restart, which is fine (no worse than any other live
+# connection state getting dropped on a restart).
+cinema_projectionist: dict | None = None
+# The current shared screen content for floor 2's cinema — starts at the
+# same placeholder every client used to hardcode, changeable at runtime
+# only by whoever currently holds cinema_projectionist (see
+# _handle_cinema_message's own cinema_set_url branch).
+cinema_screen_url: str = CINEMA_DEFAULT_SCREEN_URL
+# Basic string-level sanity bound on a projectionist-submitted URL — not a
+# real max URL length limit (browsers/servers tolerate much longer), just
+# enough to reject someone pasting something absurd. Deliberately no
+# fetch/HEAD request to validate the URL actually resolves to anything —
+# that would mean this server making an outbound request to a URL supplied
+# by a client, which is a textbook SSRF risk for essentially no benefit
+# (an iframe that fails to load is a harmless dead screen, not a security
+# problem).
+CINEMA_URL_MAX_LENGTH = 500
+
+
+def _is_valid_cinema_url(url: str) -> bool:
+    return isinstance(url, str) and 0 < len(url) <= CINEMA_URL_MAX_LENGTH and (url.startswith("http://") or url.startswith("https://"))
+
+
+async def _cinema_release_if_projectionist(user_id: int) -> None:
+    """Shared by both places the projectionist role can be involuntarily
+    vacated — the player walking off floor 2 (world_ws's own "position"
+    branch) and the player disconnecting outright (world_ws's own finally
+    block) — same "one clearing helper, two call sites" shape
+    _chess_disconnect_cleanup already uses elsewhere in this file."""
+    global cinema_projectionist
+    if cinema_projectionist is not None and cinema_projectionist["user_id"] == user_id:
+        cinema_projectionist = None
+        await broadcast({"type": "cinema_projectionist_state", "projectionist": None})
+
+
+async def _handle_cinema_message(user_id: int, conn: "Connection", msg: dict) -> None:
+    """Floor 2 cinema's own message handler — dispatched from world_ws for
+    every cinema_* type, the same "one handler per feature, matched by
+    prefix" shape _handle_wild_battle_message/_handle_pvp_message already
+    use. Both branches re-validate everything server-side rather than
+    trusting the client's own optimistic UI state, the same "never trust a
+    client claiming a role/position it might not actually have" pattern the
+    wild-battle-engage and PVP-invite handlers already follow."""
+    global cinema_projectionist, cinema_screen_url
+    msg_type = msg.get("type")
+
+    if msg_type == "cinema_claim_projectionist":
+        if conn.floor != CINEMA_FLOOR_INDEX:
+            await send_to(user_id, {"type": "cinema_error", "reason": "not_in_cinema"})
+            return
+        if cinema_projectionist is not None:
+            await send_to(user_id, {"type": "cinema_error", "reason": "already_taken"})
+            return
+        cinema_projectionist = {"user_id": user_id, "display_name": conn.display_name}
+        # Not excluding the claimer's own socket, unlike most other
+        # broadcasts in this file — they need this same confirmation back
+        # (it's what flips their own Usher popup from the hiring pitch to
+        # the URL-change controls), not just everyone else.
+        await broadcast({"type": "cinema_projectionist_state", "projectionist": cinema_projectionist})
+        return
+
+    if msg_type == "cinema_set_url":
+        if cinema_projectionist is None or cinema_projectionist["user_id"] != user_id:
+            await send_to(user_id, {"type": "cinema_error", "reason": "not_projectionist"})
+            return
+        url = str(msg.get("url", "")).strip()
+        if not _is_valid_cinema_url(url):
+            await send_to(user_id, {"type": "cinema_error", "reason": "invalid_url"})
+            return
+        cinema_screen_url = url
+        await broadcast({"type": "cinema_screen_state", "url": cinema_screen_url})
+        return
+
 
 def _random_wild_spawn_point() -> tuple[float, float]:
     # Rejection-sampled so a wild never spawns inside (or right up against)
@@ -484,6 +673,8 @@ def _random_wild_spawn_point() -> tuple[float, float]:
         # generously-sized circle is a cheap, sufficient approximation for
         # a rejection-sampling no-spawn zone).
         if math.hypot(x - TAMBAYAN_X, z - TAMBAYAN_Z) < TAMBAYAN_RADIUS + TOWN_NO_SPAWN_MARGIN:
+            continue
+        if _is_near_karirs_track(x, z):
             continue
         return x, z
 
@@ -583,9 +774,17 @@ async def _wild_tick(dt: float, now: float) -> None:
             step = speed * dt
             next_x = min(WORLD_ARENA_HALF_X, max(-WORLD_ARENA_HALF_X, wild.x + nx * step))
             next_z = min(WORLD_ARENA_HALF_Z, max(-WORLD_ARENA_HALF_Z, wild.z + nz * step))
-            if not is_inside_town_walls(next_x, wild.z) and not _is_inside_tambayan_walls(next_x, wild.z):
+            if (
+                not is_inside_town_walls(next_x, wild.z)
+                and not _is_inside_tambayan_walls(next_x, wild.z)
+                and not _is_inside_karirs_track(next_x, wild.z)
+            ):
                 wild.x = next_x
-            if not is_inside_town_walls(wild.x, next_z) and not _is_inside_tambayan_walls(wild.x, next_z):
+            if (
+                not is_inside_town_walls(wild.x, next_z)
+                and not _is_inside_tambayan_walls(wild.x, next_z)
+                and not _is_inside_karirs_track(wild.x, next_z)
+            ):
                 wild.z = next_z
             wild.facing = math.atan2(nx, nz)
 
@@ -687,6 +886,55 @@ async def wild_caught(wild_id: int, user_id: int = Depends(get_current_user_id))
     requester = connections.get(user_id)
     await broadcast({"type": "wild_despawn", "id": wild_id}, exclude=requester.websocket if requester else None)
     return {"ok": True}
+
+
+async def _handle_wild_battle_message(user_id: int, conn: "Connection", msg: dict) -> None:
+    """Full spectator mode's own message handler — dispatched from world_ws
+    for every wild_battle_* type, same "one handler per feature, matched by
+    prefix" shape _handle_luba_message/_handle_pvp_message already use.
+    Deliberately does no validation of the snapshot's own contents beyond
+    what's needed to key/route it: the wild fight itself is still entirely
+    client-side/non-authoritative (see active_wild_battles' own docstring),
+    so this is just relaying whatever the battling client already computed
+    locally, the exact same trust level a bare "position" message already
+    gets. wild_battle_start and wild_battle_update are handled identically
+    on purpose — the client only distinguishes them for its own log-reading
+    clarity (start vs. an in-progress change), the server doesn't care which
+    one it was since both just replace the whole stored snapshot outright.
+    """
+    msg_type = msg.get("type")
+
+    if msg_type in ("wild_battle_start", "wild_battle_update"):
+        # Pulled out field-by-field (rather than trusting the whole `msg`
+        # dict wholesale) so a stray extra key the client happens to send
+        # (e.g. its own "type") never leaks into the stored snapshot or the
+        # rebroadcast payload below — every key here must match game.js's
+        # own buildBattleSnapshot exactly, both what it sends and what
+        # onSocketMessage's own wild_battle_state handler reads back.
+        snapshot = {
+            "wild_id": msg.get("wild_id"),
+            "wild_species_key": msg.get("wild_species_key"),
+            "wild_level": msg.get("wild_level"),
+            "wild_hp": msg.get("wild_hp"),
+            "wild_max_hp": msg.get("wild_max_hp"),
+            "x": msg.get("x"),
+            "z": msg.get("z"),
+            "facing_angle": msg.get("facing_angle"),
+            "player_team": msg.get("player_team") or [],
+            "active_anim": msg.get("active_anim"),
+        }
+        active_wild_battles[user_id] = snapshot
+        await broadcast({"type": "wild_battle_state", "by_user_id": user_id, **snapshot}, exclude=conn.websocket)
+        return
+
+    if msg_type == "wild_battle_end":
+        # Popped unconditionally (not just when present) — the battling
+        # client sends this exactly once per real (server-tracked) battle,
+        # right as its own endBattle() tears the fight down, so there's
+        # nothing to guard against double-sends being harmful either way.
+        active_wild_battles.pop(user_id, None)
+        await broadcast({"type": "wild_battle_end", "by_user_id": user_id}, exclude=conn.websocket)
+        return
 
 
 # --- The Karirs field --------------------------------------------------
@@ -984,8 +1232,130 @@ def _character_out(row: GlophimonCharacter) -> CharacterOut:
         x=row.x,
         z=row.z,
         facing=row.facing,
+        floor=row.floor,
         current_hp=row.current_hp,
+        pose_overrides=row.pose_overrides or {},
+        camera_overrides=row.camera_overrides or {},
     )
+
+
+# The only 6 pose slots the client's own Pose Designer offers — see
+# game.js's own POSE_DESIGNER_PARTS/mount() and character.js's pose
+# functions. Enforced here too (not just in the client's own <select>) so a
+# stray/hand-crafted request can't wedge in an arbitrary key the client-side
+# playback dispatch would never recognize anyway.
+POSE_OVERRIDE_SLOTS = {"idle", "walk", "ready", "attack", "defend", "cast"}
+
+
+@app.put("/me/pose-overrides/{pose_name}", response_model=CharacterOut)
+def save_pose_override(pose_name: str, body: PoseOverrideUpdate, user_id: int = Depends(get_current_user_id)):
+    if pose_name not in POSE_OVERRIDE_SLOTS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown pose slot")
+    db = SessionLocal()
+    try:
+        row = db.get(GlophimonCharacter, user_id)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No character yet")
+        # Reassigned wholesale (not mutated in place) — SQLAlchemy only
+        # detects a JSON column's own dirty state on assignment, not on
+        # mutating a dict it already handed back from a previous read.
+        overrides = dict(row.pose_overrides or {})
+        overrides[pose_name] = {"keyframes": body.keyframes}
+        row.pose_overrides = overrides
+        db.commit()
+        db.refresh(row)
+        return _character_out(row)
+    finally:
+        db.close()
+
+
+@app.delete("/me/pose-overrides/{pose_name}", response_model=CharacterOut)
+def reset_pose_override(pose_name: str, user_id: int = Depends(get_current_user_id)):
+    if pose_name not in POSE_OVERRIDE_SLOTS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown pose slot")
+    db = SessionLocal()
+    try:
+        row = db.get(GlophimonCharacter, user_id)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No character yet")
+        overrides = dict(row.pose_overrides or {})
+        overrides.pop(pose_name, None)
+        row.pose_overrides = overrides
+        db.commit()
+        db.refresh(row)
+        return _character_out(row)
+    finally:
+        db.close()
+
+
+# The client's own Camera Designer offers 3 reset/orbit slots (the original
+# "nothing focused" wide framing per battle type) plus 4 focus-camera slots
+# now, all belonging to the wild battle only — see game.js's own
+# CAMERA_OVERRIDE_SLOTS/focusWildCameraOnRig and mount(). Kept as two
+# separate sets (rather than one combined CAMERA_OVERRIDE_SLOTS, which is
+# still their union for the membership check both the PUT and DELETE
+# handlers need) so save_camera_override below knows which of the two
+# request shapes — CameraOverrideUpdate vs CameraFocusOverrideUpdate — a
+# given slot_name's body must validate against. Enforced here too, same
+# reasoning as POSE_OVERRIDE_SLOTS above, so a stray request can't wedge in
+# an arbitrary key none of the real per-frame battle camera code would ever
+# actually read.
+ORBIT_CAMERA_SLOTS = {"wild", "team", "pvp"}
+FOCUS_CAMERA_SLOTS = {"wild_decide_defend", "wild_declare", "wild_attack_scene", "wild_defend_scene"}
+CAMERA_OVERRIDE_SLOTS = ORBIT_CAMERA_SLOTS | FOCUS_CAMERA_SLOTS
+
+
+@app.put("/me/camera-overrides/{slot_name}", response_model=CharacterOut)
+def save_camera_override(slot_name: str, body: dict, user_id: int = Depends(get_current_user_id)):
+    if slot_name not in CAMERA_OVERRIDE_SLOTS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown camera slot")
+    # FastAPI can't pick a request-body model per path parameter at route-
+    # declaration time, so this takes the raw dict and validates it by hand
+    # against whichever of the two real shapes this slot_name belongs to —
+    # still real Field(ge=..., le=...) bounds either way (see
+    # CameraOverrideUpdate/CameraFocusOverrideUpdate in schemas.py), just
+    # picked here instead of in the signature.
+    model = CameraOverrideUpdate if slot_name in ORBIT_CAMERA_SLOTS else CameraFocusOverrideUpdate
+    try:
+        validated = model(**body)
+    except ValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+    db = SessionLocal()
+    try:
+        row = db.get(GlophimonCharacter, user_id)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No character yet")
+        # Reassigned wholesale (not mutated in place) — same reasoning as
+        # save_pose_override above: SQLAlchemy only detects a JSON column's
+        # own dirty state on assignment, never on mutating a dict it already
+        # handed back from a previous read.
+        overrides = dict(row.camera_overrides or {})
+        overrides[slot_name] = validated.model_dump()
+        row.camera_overrides = overrides
+        db.commit()
+        db.refresh(row)
+        return _character_out(row)
+    finally:
+        db.close()
+
+
+@app.delete("/me/camera-overrides/{slot_name}", response_model=CharacterOut)
+def reset_camera_override(slot_name: str, user_id: int = Depends(get_current_user_id)):
+    if slot_name not in CAMERA_OVERRIDE_SLOTS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown camera slot")
+    db = SessionLocal()
+    try:
+        row = db.get(GlophimonCharacter, user_id)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No character yet")
+        overrides = dict(row.camera_overrides or {})
+        overrides.pop(slot_name, None)
+        row.camera_overrides = overrides
+        db.commit()
+        db.refresh(row)
+        return _character_out(row)
+    finally:
+        db.close()
 
 
 # The player's own trainer HP, shared by every battle type (wild and the
@@ -2079,10 +2449,21 @@ async def _handle_pvp_message(user_id: int, conn: "Connection", msg: dict) -> No
         pvp_invites[invite_id] = PvpInvite(invite_id, user_id, target_id)
         _user_pending_pvp_invite[user_id] = invite_id
         _user_pending_pvp_invite[target_id] = invite_id
-        await send_to(target_id, {
+        delivered = await send_to(target_id, {
             "type": "pvp_invite_received", "invite_id": invite_id,
             "from_user_id": user_id, "from_display_name": conn.display_name,
         })
+        if not delivered:
+            # target_conn looked alive a few lines up, but send_to re-fetches
+            # connections fresh and it just failed for real (see send_to's
+            # own comment) — don't leave a phantom invite around that the
+            # target can now never respond to and the inviter would
+            # otherwise just wait on forever with no feedback.
+            del pvp_invites[invite_id]
+            del _user_pending_pvp_invite[user_id]
+            _user_pending_pvp_invite.pop(target_id, None)
+            await send_to(user_id, {"type": "pvp_error", "reason": "target_unreachable"})
+            return
         await send_to(user_id, {
             "type": "pvp_invite_sent", "invite_id": invite_id,
             "to_user_id": target_id, "to_display_name": target_conn.display_name,
@@ -2164,14 +2545,30 @@ def _chess_outcome_reason(termination: "chess.Termination") -> str:
 
 # How long a finished game's board keeps showing its final position (so
 # players/spectators actually get to see the result) before the table
-# clears itself for a new game — see _reset_chess_board_after_delay. With
-# no reset at all, a finished board would stay stuck forever with no way
-# to host a new game on it.
-CHESS_BOARD_RESET_DELAY_S = 15.0
+# clears itself for a new game — see _reset_chess_board_after_delay and
+# (now shared with Dama, which hosts on the same two tables — see
+# DamaBoardState's own comment) _reset_dama_board_after_delay. With no
+# reset at all, a finished board would stay stuck forever with no way to
+# host a new game on it.
+BOARD_RESET_DELAY_S = 15.0
 
 # How long a player has to return to Tambayan after wandering off mid-game
 # before they're auto-resigned — see _check_chess_away/_chess_away_timeout.
 CHESS_LEAVE_GRACE_S = 30.0
+
+# The third table — a standing AI match, always available, no opponent to
+# wait for (see chess_ai_start/dama_ai_start below). Game-agnostic id (not
+# AI_CHESS_BOARD_ID any more) since Phase 3 made this table dual-purpose —
+# the host now picks Chess (Stockfish) or Dama (this project's own
+# minimax/alpha-beta search, see dama_ai.py) fresh each time, same as boards
+# 1/2 already let the host pick Chess or Dama. One fixed skill level for
+# Stockfish rather than exposing a picker — not asked for; matches the main
+# Cheddar Chess game's own default "vs AI" skill. Dama's own AI has no
+# equivalent skill level (see dama_ai.py's fixed think-time budget instead).
+AI_BOARD_ID = 3
+STOCKFISH_NAME = "Stockfish"
+DAMA_AI_NAME = "Dama AI"
+AI_SKILL_LEVEL = 10
 
 
 class ChessBoardState:
@@ -2180,6 +2577,7 @@ class ChessBoardState:
         "white_user_id", "white_display_name",
         "black_user_id", "black_display_name",
         "board", "move_history", "outcome",
+        "draw_offered_by", "undo_requested_by",
     )
 
     def __init__(self, board_id: int) -> None:
@@ -2197,11 +2595,225 @@ class ChessBoardState:
         self.board: chess.Board | None = None
         self.move_history: list[str] = []
         self.outcome: dict | None = None  # {"winner_user_id": int|None, "reason": str}
+        # A draw offer or undo request from one player, awaiting the other's
+        # response (see chess_draw_offer/chess_undo_request below) — at most
+        # one of these two is ever non-None at a time (each request handler
+        # itself refuses to start a second kind while one's already pending),
+        # so the client never has to reconcile overlapping prompts.
+        self.draw_offered_by: int | None = None
+        self.undo_requested_by: int | None = None
 
 
-# Always exactly 2, fixed ids — no dynamic creation, matching the two
+# Always exactly 3, fixed ids — no dynamic creation, matching the three
 # physical tables built client-side (see CHESS_BOARD_1_X/Z etc., game.js).
-chess_boards: dict[int, ChessBoardState] = {1: ChessBoardState(1), 2: ChessBoardState(2)}
+# Board 3 is the standing AI table (see AI_BOARD_ID).
+chess_boards: dict[int, ChessBoardState] = {1: ChessBoardState(1), 2: ChessBoardState(2), 3: ChessBoardState(3)}
+
+
+# Dama (Phase 2 — see this game's own plan file) shares physical tables 1
+# and 2 with Chess rather than getting its own separate board: the host
+# picks Chess or Dama fresh each time they host an empty one (see
+# dama_host_request / chess_host_request's own board-free check below).
+# Deliberately its OWN parallel state/message set, not a generalization of
+# ChessBoardState — same "give it its own thing" reasoning as Chessdom's
+# original build, the Stockfish board, and Tambayan's own pentagon geometry
+# all already followed this session, rather than risk the working Chess
+# boards by bending their code to cover a second, differently-shaped game.
+#
+# board is a plain 8x8 list of rows, each cell either None or
+# {"side": "white"|"black", "king": bool} — exactly the shape the client's
+# own dama.js already produces/consumes. Move *legality* is validated
+# entirely client-side (dama.js, already covered by its own Phase 1 tests);
+# this server is authoritative only over turn order, who's allowed to move,
+# and the resulting board state each move actually produces — the same
+# trust level this project's other client-authoritative systems (movement,
+# GL Sims World, Luba) already use, and a deliberate scope choice for this
+# phase given there's no Python equivalent of python-chess to lean on here.
+class DamaBoardState:
+    __slots__ = (
+        "id", "status", "host_id", "host_display_name",
+        "white_user_id", "white_display_name",
+        "black_user_id", "black_display_name",
+        "board", "side_to_move", "move_history", "outcome",
+        "draw_offered_by", "undo_requested_by", "undo_accept_pending_for", "last_move",
+    )
+
+    def __init__(self, board_id: int) -> None:
+        self.id = board_id
+        self.reset()
+
+    def reset(self) -> None:
+        self.status = "empty"  # "empty" | "waiting" | "in_progress"
+        self.host_id: int | None = None
+        self.host_display_name: str | None = None
+        self.white_user_id: int | None = None
+        self.white_display_name: str | None = None
+        self.black_user_id: int | None = None
+        self.black_display_name: str | None = None
+        self.board: list[list[dict | None]] | None = None
+        self.side_to_move = "white"
+        self.move_history: list[str] = []
+        self.outcome: dict | None = None  # {"winner_user_id": int|None, "reason": str}
+        # Same "at most one pending at a time" shape as ChessBoardState's own
+        # pair — see that class's own comment.
+        self.draw_offered_by: int | None = None
+        self.undo_requested_by: int | None = None
+        # Dama stays client-authoritative even for undo (see this class's
+        # own comment on why Dama trusts the acting client's board rather
+        # than re-deriving moves itself): once the *other* player accepts an
+        # undo request, this holds the *requester's* own user_id so their
+        # client — the only one that still has the pre-move board in memory
+        # (see game.js's own activeDamaMatch.lastTurnSnapshot) — knows to
+        # send it back via dama_undo_commit, and so the server can verify
+        # that's really who's sending it.
+        self.undo_accept_pending_for: int | None = None
+        # {"from": [row, col], "to": [row, col]} | None — the last full
+        # turn's own start/end squares, for the client's own highlight (see
+        # dama_move's own last_move — set fresh by the ACTING client itself
+        # since the server never derives Dama moves on its own).
+        self.last_move: dict | None = None
+
+
+# Same physical ids as chess_boards — see the class comment above for why
+# this shares tables with Chess instead of getting its own. Board 3 (the
+# standing AI table, see AI_BOARD_ID) is included here too as of Phase 3 —
+# it's dual-purpose now, so it needs to be trackable as a Dama board exactly
+# like 1/2 already are, alongside its existing chess_boards[3] entry.
+dama_boards: dict[int, DamaBoardState] = {1: DamaBoardState(1), 2: DamaBoardState(2), 3: DamaBoardState(3)}
+
+
+def _create_initial_dama_board() -> list[list[dict | None]]:
+    board: list[list[dict | None]] = [[None] * 8 for _ in range(8)]
+    for row in range(8):
+        for col in range(8):
+            if (row + col) % 2 != 1:
+                continue  # dark squares only
+            if row <= 2:
+                board[row][col] = {"side": "black", "king": False}
+            elif row >= 5:
+                board[row][col] = {"side": "white", "king": False}
+    return board
+
+
+# The two host-able tables (1 and 2) are shared between Chess and Dama —
+# "free" means neither game currently has anything going on it, checked
+# here rather than each one only checking its own dict, or hosting Chess on
+# a table already mid-Dama-game (or vice versa) would silently clobber it.
+def _physical_board_free(board_id: int) -> bool:
+    chess_board = chess_boards.get(board_id)
+    dama_board = dama_boards.get(board_id)
+    return (chess_board is None or chess_board.status == "empty") and (dama_board is None or dama_board.status == "empty")
+
+
+# A board that's already decided (status still "in_progress", but outcome
+# is set) just sits there for BOARD_RESET_DELAY_S waiting on its own
+# delayed reset (see _reset_chess_board_after_delay/_reset_dama_board_
+# after_delay) — _physical_board_free alone treats that as "not free" for
+# that whole window, which is exactly what made the client's own "New
+# Game" button need to wait out that delay before it could do anything.
+# Lets either participant of THAT SAME just-finished game immediately
+# host/start a fresh one on it instead, without waiting — board.reset()
+# at each call site (not here) is what actually clears the stale result
+# before the new game's own fields get set.
+def _board_finished_for_user(board, user_id: int) -> bool:
+    return board.status == "in_progress" and board.outcome is not None and user_id in (board.white_user_id, board.black_user_id)
+
+
+def _dama_state_payload(board: DamaBoardState) -> dict:
+    return {
+        "type": "dama_state",
+        "board_id": board.id,
+        "status": board.status,
+        "host_id": board.host_id,
+        "host_display_name": board.host_display_name,
+        "white_user_id": board.white_user_id,
+        "white_display_name": board.white_display_name,
+        "black_user_id": board.black_user_id,
+        "black_display_name": board.black_display_name,
+        "board": board.board if board.board is not None else _create_initial_dama_board(),
+        "turn": board.side_to_move,
+        "move_history": board.move_history,
+        "outcome": board.outcome,
+        "draw_offered_by": board.draw_offered_by,
+        "undo_requested_by": board.undo_requested_by,
+        "undo_accept_pending_for": board.undo_accept_pending_for,
+        "last_move": board.last_move,
+    }
+
+
+async def _broadcast_dama_state(board: DamaBoardState) -> None:
+    # Broadcast to everyone, not just the two players — same reasoning as
+    # _broadcast_chess_state (nearby spectators' own click/highlight state
+    # needs to stay correct without the server tracking who's watching).
+    await broadcast(_dama_state_payload(board))
+
+
+async def _reset_dama_board_after_delay(board: DamaBoardState) -> None:
+    await asyncio.sleep(BOARD_RESET_DELAY_S)
+    if board.outcome is None:
+        return  # somehow already reset/reused — don't clobber whatever's there now
+    board.reset()
+    await _broadcast_dama_state(board)
+
+
+# The Dama AI's own "turn" on the AI board — mirrors _play_ai_move above,
+# but runs entirely in-process (dama_ai.compute_ai_move is pure Python, no
+# subprocess) rather than against a fixed skill level; still routed through
+# run_in_threadpool since it's a blocking CPU-bound search (see dama_ai.py's
+# own think-time budget). Called right after dama_ai_start whenever the
+# human drew black, and again after every one of the human's own moves in
+# dama_move below — in both cases it's already necessarily the AI's turn by
+# construction, no turn check needed here. hops is a whole turn (>1 entries
+# for a forced multi-jump chain, see dama_ai.get_full_moves), applied here in
+# one shot rather than one broadcast per hop — the human never gets to react
+# mid-chain to an AI move the way two humans do to each other's, and there's
+# no reason to give it that treatment.
+async def _play_dama_ai_move(board: DamaBoardState) -> None:
+    if board.board is None or board.outcome is not None:
+        return  # game ended (e.g. the human's own last move was a win) before this ran
+    ai_side = board.side_to_move
+    hops = await run_in_threadpool(compute_dama_ai_move, board.board, ai_side)
+    # Re-check after the (up to ~1s) search, not just before it: dama_resign
+    # has no turn check at all, so the human resigning WHILE this was
+    # computing in the background is entirely legal and already ended the
+    # game by the time control gets back here — applying a move computed
+    # against the board as it was before that would silently move a piece
+    # on top of an already-decided game and schedule a second, redundant
+    # reset.
+    if board.board is None or board.outcome is not None:
+        return
+    result_board = board.board
+    for hop in hops:
+        result_board, _ = apply_dama_move(result_board, hop)
+    board.board = result_board
+    # Same "whole turn, not just the last hop" shape the human side's own
+    # dama_move sends (see that handler's own last_move field) — spans the
+    # piece's starting square through wherever the full chain ended, so a
+    # multi-jump AI capture highlights start-to-finish rather than just its
+    # final hop. Without this, board.last_move silently stayed whatever the
+    # HUMAN's own last move was — the highlight never moved to reflect the
+    # AI's own move at all, which read as "did the AI even move?" (see this
+    # bug's own report) even though board.board itself was already correct.
+    if hops:
+        board.last_move = {"from": hops[0]["from"], "to": hops[-1]["to"], "by": ai_side}
+    board.move_history.append(f"{ai_side[0].upper()}{len(hops)}" if len(hops) > 1 else ai_side[0].upper())
+    other_side = "black" if ai_side == "white" else "white"
+    board.side_to_move = other_side
+    if has_no_legal_moves(board.board, other_side):
+        winner_id = board.white_user_id if ai_side == "white" else board.black_user_id
+        board.outcome = {"winner_user_id": winner_id, "reason": "no_moves"}
+    await _broadcast_dama_state(board)
+    if board.outcome is not None:
+        asyncio.create_task(_reset_dama_board_after_delay(board))
+
+
+def _find_dama_board_for_user(user_id: int) -> DamaBoardState | None:
+    for board in dama_boards.values():
+        if board.status == "waiting" and board.host_id == user_id:
+            return board
+        if board.status == "in_progress" and board.outcome is None and user_id in (board.white_user_id, board.black_user_id):
+            return board
+    return None
 
 
 def _chess_state_payload(board: ChessBoardState) -> dict:
@@ -2219,7 +2831,24 @@ def _chess_state_payload(board: ChessBoardState) -> dict:
         "turn": ("white" if board.board.turn else "black") if board.board is not None else "white",
         "move_history": board.move_history,
         "outcome": board.outcome,
+        "draw_offered_by": board.draw_offered_by,
+        "undo_requested_by": board.undo_requested_by,
+        "last_move": _chess_last_move(board),
     }
+
+
+# python-chess's own move_stack already IS the undo history — chess_undo_*
+# below pops it directly rather than this project keeping a parallel
+# snapshot the way Dama has to (see DamaBoardState's own comment on why
+# Dama can't do that). {"from": "e2", "to": "e4"} in algebraic notation,
+# matching what the client's own square strings already look like
+# (onChessSquareClick's own `square` values) — not a promotion suffix,
+# purely for a highlight so extra detail isn't needed.
+def _chess_last_move(board: ChessBoardState) -> dict | None:
+    if board.board is None or not board.board.move_stack:
+        return None
+    mv = board.board.move_stack[-1]
+    return {"from": chess.square_name(mv.from_square), "to": chess.square_name(mv.to_square)}
 
 
 async def _broadcast_chess_state(board: ChessBoardState) -> None:
@@ -2233,11 +2862,35 @@ async def _broadcast_chess_state(board: ChessBoardState) -> None:
 
 
 async def _reset_chess_board_after_delay(board: ChessBoardState) -> None:
-    await asyncio.sleep(CHESS_BOARD_RESET_DELAY_S)
+    await asyncio.sleep(BOARD_RESET_DELAY_S)
     if board.outcome is None:
         return  # somehow already reset/reused — don't clobber whatever's there now
     board.reset()
     await _broadcast_chess_state(board)
+
+
+# Stockfish's own "turn" on the AI board — run_in_threadpool because
+# compute_ai_move blocks the whole event loop otherwise (it spawns and waits
+# on a Stockfish subprocess). Called right after chess_ai_start whenever the
+# human drew black, and again after every one of the human's own moves in
+# chess_move below — in both cases it's already necessarily Stockfish's turn
+# by construction, no turn check needed here.
+async def _play_ai_move(board: ChessBoardState) -> None:
+    if board.board is None or board.outcome is not None:
+        return  # game ended (e.g. the human's own last move was checkmate) before this ran
+    move = await run_in_threadpool(compute_ai_move, board.board, AI_SKILL_LEVEL)
+    san = board.board.san(move)
+    board.board.push(move)
+    board.move_history.append(san)
+    result = board.board.outcome(claim_draw=True)
+    if result is not None:
+        winner_id = None
+        if result.winner is not None:
+            winner_id = board.white_user_id if result.winner else board.black_user_id
+        board.outcome = {"winner_user_id": winner_id, "reason": _chess_outcome_reason(result.termination)}
+    await _broadcast_chess_state(board)
+    if board.outcome is not None:
+        asyncio.create_task(_reset_chess_board_after_delay(board))
 
 
 def _find_chess_board_for_user(user_id: int) -> ChessBoardState | None:
@@ -2308,19 +2961,66 @@ async def _handle_chess_message(user_id: int, conn: "Connection", msg: dict) -> 
         return
 
     if msg_type == "chess_host_request":
-        if board.status != "empty":
+        # _physical_board_free, not board.status alone — boards 1/2 are
+        # shared with Dama now (see DamaBoardState's own comment), so a
+        # Dama game already running on this same table must block a fresh
+        # Chess host here too, not just another Chess one. The "New Game"
+        # button (see this game's own plan file) sends this exact same
+        # message once a match ends, so a just-finished game this user was
+        # a participant in is ALSO accepted here (see
+        # _board_finished_for_user) rather than making them wait out
+        # BOARD_RESET_DELAY_S first.
+        was_finished = _board_finished_for_user(board, user_id)
+        if not _physical_board_free(board.id) and not was_finished:
             await send_to(user_id, {"type": "chess_error", "reason": "board_not_empty"})
             return
         if not _is_inside_tambayan(conn.x, conn.z):
             await send_to(user_id, {"type": "chess_error", "reason": "not_in_tambayan"})
             return
-        if _find_chess_board_for_user(user_id) is not None:
+        if not was_finished and _find_chess_board_for_user(user_id) is not None:
             await send_to(user_id, {"type": "chess_error", "reason": "already_playing"})
             return
+        if was_finished:
+            board.reset()
         board.status = "waiting"
         board.host_id = user_id
         board.host_display_name = conn.display_name
         await _broadcast_chess_state(board)
+        return
+
+    if msg_type == "chess_ai_start":
+        if board.id != AI_BOARD_ID:
+            await send_to(user_id, {"type": "chess_error", "reason": "not_ai_board"})
+            return
+        was_finished = _board_finished_for_user(board, user_id)
+        if not _physical_board_free(board.id) and not was_finished:
+            await send_to(user_id, {"type": "chess_error", "reason": "board_not_empty"})
+            return
+        if not _is_inside_tambayan(conn.x, conn.z):
+            await send_to(user_id, {"type": "chess_error", "reason": "not_in_tambayan"})
+            return
+        if not was_finished and _find_chess_board_for_user(user_id) is not None:
+            await send_to(user_id, {"type": "chess_error", "reason": "already_playing"})
+            return
+        if was_finished:
+            board.reset()
+        board.board = chess.Board()
+        board.host_id = user_id
+        board.host_display_name = conn.display_name
+        # Random white/black against Stockfish, per the user's own spec —
+        # same coin flip chess_join_request uses between two humans. The
+        # AI's own seat keeps a null user_id (never equals a real user_id
+        # anywhere else this is compared, e.g. _find_chess_board_for_user).
+        if random.random() < 0.5:
+            board.white_user_id, board.white_display_name = user_id, conn.display_name
+            board.black_user_id, board.black_display_name = None, STOCKFISH_NAME
+        else:
+            board.white_user_id, board.white_display_name = None, STOCKFISH_NAME
+            board.black_user_id, board.black_display_name = user_id, conn.display_name
+        board.status = "in_progress"
+        await _broadcast_chess_state(board)
+        if board.white_user_id is None:
+            asyncio.create_task(_play_ai_move(board))  # Stockfish drew white — it moves first
         return
 
     if msg_type == "chess_cancel_host":
@@ -2374,6 +3074,13 @@ async def _handle_chess_message(user_id: int, conn: "Connection", msg: dict) -> 
         san = board.board.san(move)
         board.board.push(move)
         board.move_history.append(san)
+        # A fresh move retires any earlier draw offer/undo request outright
+        # — it's already too late to accept either against the position
+        # they were made against (this matches ordinary chess client
+        # behavior: making a move implicitly withdraws your own pending
+        # offer too, not just the opponent's).
+        board.draw_offered_by = None
+        board.undo_requested_by = None
         result = board.board.outcome(claim_draw=True)
         if result is not None:
             winner_id = None
@@ -2383,6 +3090,11 @@ async def _handle_chess_message(user_id: int, conn: "Connection", msg: dict) -> 
         await _broadcast_chess_state(board)
         if board.outcome is not None:
             asyncio.create_task(_reset_chess_board_after_delay(board))
+        elif board.id == AI_BOARD_ID:
+            # The human can only ever move on their own turn (checked
+            # above), so the game not being over here means it's now
+            # necessarily Stockfish's turn.
+            asyncio.create_task(_play_ai_move(board))
         return
 
     if msg_type == "chess_resign":
@@ -2394,6 +3106,79 @@ async def _handle_chess_message(user_id: int, conn: "Connection", msg: dict) -> 
         board.outcome = {"winner_user_id": winner_id, "reason": "resignation"}
         await _broadcast_chess_state(board)
         asyncio.create_task(_reset_chess_board_after_delay(board))
+        return
+
+    # Draw offer / undo request — human-vs-human boards only (never offered
+    # in the client's own UI for the AI table, but guarded here too rather
+    # than trusting that): at most one of the two ever pending at a time,
+    # enforced by each handler refusing to start one while the other (or
+    # its own kind) is already outstanding.
+    if msg_type == "chess_draw_offer":
+        if board.id == AI_BOARD_ID or board.status != "in_progress" or board.outcome is not None:
+            return
+        if user_id not in (board.white_user_id, board.black_user_id):
+            return
+        if board.draw_offered_by is not None or board.undo_requested_by is not None:
+            return
+        board.draw_offered_by = user_id
+        await _broadcast_chess_state(board)
+        return
+
+    if msg_type == "chess_draw_respond":
+        # outcome check matters here specifically: the offer could have gone
+        # stale if the OTHER player resigned (or disconnected, or ran out
+        # the away-timer) instead of ever responding to it — none of those
+        # paths clear draw_offered_by themselves, so without this a late
+        # "accept" could silently overwrite an already-decided resignation
+        # with a draw.
+        if board.draw_offered_by is None or board.draw_offered_by == user_id or board.outcome is not None:
+            return  # only the OTHER player answers their own offer
+        if user_id not in (board.white_user_id, board.black_user_id):
+            return
+        if msg.get("accept"):
+            board.outcome = {"winner_user_id": None, "reason": "draw_agreed"}
+            board.draw_offered_by = None
+            await _broadcast_chess_state(board)
+            asyncio.create_task(_reset_chess_board_after_delay(board))
+        else:
+            board.draw_offered_by = None
+            await _broadcast_chess_state(board)
+        return
+
+    if msg_type == "chess_undo_request":
+        if board.id == AI_BOARD_ID or board.status != "in_progress" or board.outcome is not None:
+            return
+        if board.board is None or not board.board.move_stack:
+            return  # nothing to undo yet
+        is_white = board.white_user_id == user_id
+        if not is_white and board.black_user_id != user_id:
+            return
+        # Only the player who just moved may ask for it back — board.turn
+        # being the OTHER color is exactly what "I just moved" means here.
+        if board.board.turn == is_white:
+            return
+        if board.draw_offered_by is not None or board.undo_requested_by is not None:
+            return
+        board.undo_requested_by = user_id
+        await _broadcast_chess_state(board)
+        return
+
+    if msg_type == "chess_undo_respond":
+        # Same stale-request guard as chess_draw_respond above.
+        if board.undo_requested_by is None or board.undo_requested_by == user_id or board.outcome is not None:
+            return
+        if user_id not in (board.white_user_id, board.black_user_id):
+            return
+        if msg.get("accept"):
+            if board.board is not None and board.board.move_stack:
+                board.board.pop()
+                if board.move_history:
+                    board.move_history.pop()
+            board.undo_requested_by = None
+            await _broadcast_chess_state(board)
+        else:
+            board.undo_requested_by = None
+            await _broadcast_chess_state(board)
         return
 
 
@@ -2417,6 +3202,300 @@ async def _chess_disconnect_cleanup(user_id: int) -> None:
     board.outcome = {"winner_user_id": winner_id, "reason": "disconnect"}
     await _broadcast_chess_state(board)
     asyncio.create_task(_reset_chess_board_after_delay(board))
+
+
+# Dama — mirrors _handle_chess_message's own request shape (host/cancel/
+# join/move/resign) closely, but dama_move trusts the *client's* own
+# already-tested dama.js rules engine for legality (see DamaBoardState's
+# own comment on why): the acting client sends the resulting board state
+# and whether its own turn continues (a mid-chain capture) or passes, and
+# this just stores + broadcasts it, the same trust level this project's
+# other client-authoritative systems already use elsewhere.
+async def _handle_dama_message(user_id: int, conn: "Connection", msg: dict) -> None:
+    msg_type = msg.get("type")
+    board = dama_boards.get(msg.get("board_id"))
+    if board is None:
+        await send_to(user_id, {"type": "dama_error", "reason": "invalid_board"})
+        return
+
+    if msg_type == "dama_host_request":
+        was_finished = _board_finished_for_user(board, user_id)
+        if not _physical_board_free(board.id) and not was_finished:
+            await send_to(user_id, {"type": "dama_error", "reason": "board_not_empty"})
+            return
+        if not _is_inside_tambayan(conn.x, conn.z):
+            await send_to(user_id, {"type": "dama_error", "reason": "not_in_tambayan"})
+            return
+        if not was_finished and (_find_dama_board_for_user(user_id) is not None or _find_chess_board_for_user(user_id) is not None):
+            await send_to(user_id, {"type": "dama_error", "reason": "already_playing"})
+            return
+        if was_finished:
+            board.reset()
+        board.status = "waiting"
+        board.host_id = user_id
+        board.host_display_name = conn.display_name
+        await _broadcast_dama_state(board)
+        return
+
+    if msg_type == "dama_ai_start":
+        if board.id != AI_BOARD_ID:
+            await send_to(user_id, {"type": "dama_error", "reason": "not_ai_board"})
+            return
+        was_finished = _board_finished_for_user(board, user_id)
+        if not _physical_board_free(board.id) and not was_finished:
+            await send_to(user_id, {"type": "dama_error", "reason": "board_not_empty"})
+            return
+        if not _is_inside_tambayan(conn.x, conn.z):
+            await send_to(user_id, {"type": "dama_error", "reason": "not_in_tambayan"})
+            return
+        if not was_finished and (_find_dama_board_for_user(user_id) is not None or _find_chess_board_for_user(user_id) is not None):
+            await send_to(user_id, {"type": "dama_error", "reason": "already_playing"})
+            return
+        if was_finished:
+            board.reset()
+        board.board = _create_initial_dama_board()
+        board.side_to_move = "white"
+        board.host_id = user_id
+        board.host_display_name = conn.display_name
+        # Random white/black against the AI, same coin flip chess_ai_start
+        # uses against Stockfish. The AI's own seat keeps a null user_id
+        # (never equals a real user_id anywhere else this is compared, e.g.
+        # _find_dama_board_for_user).
+        if random.random() < 0.5:
+            board.white_user_id, board.white_display_name = user_id, conn.display_name
+            board.black_user_id, board.black_display_name = None, DAMA_AI_NAME
+        else:
+            board.white_user_id, board.white_display_name = None, DAMA_AI_NAME
+            board.black_user_id, board.black_display_name = user_id, conn.display_name
+        board.status = "in_progress"
+        await _broadcast_dama_state(board)
+        if board.white_user_id is None:
+            asyncio.create_task(_play_dama_ai_move(board))  # AI drew white — it moves first
+        return
+
+    if msg_type == "dama_cancel_host":
+        if board.status != "waiting" or board.host_id != user_id:
+            await send_to(user_id, {"type": "dama_error", "reason": "not_your_board"})
+            return
+        board.reset()
+        await _broadcast_dama_state(board)
+        return
+
+    if msg_type == "dama_join_request":
+        if board.status != "waiting":
+            await send_to(user_id, {"type": "dama_error", "reason": "board_not_waiting"})
+            return
+        if board.host_id == user_id:
+            await send_to(user_id, {"type": "dama_error", "reason": "cannot_join_own_board"})
+            return
+        if _find_dama_board_for_user(user_id) is not None or _find_chess_board_for_user(user_id) is not None:
+            await send_to(user_id, {"type": "dama_error", "reason": "already_playing"})
+            return
+        board.board = _create_initial_dama_board()
+        board.side_to_move = "white"
+        if random.random() < 0.5:
+            board.white_user_id, board.white_display_name = board.host_id, board.host_display_name
+            board.black_user_id, board.black_display_name = user_id, conn.display_name
+        else:
+            board.white_user_id, board.white_display_name = user_id, conn.display_name
+            board.black_user_id, board.black_display_name = board.host_id, board.host_display_name
+        board.status = "in_progress"
+        await _broadcast_dama_state(board)
+        return
+
+    if msg_type == "dama_move":
+        if board.status != "in_progress" or board.outcome is not None:
+            await send_to(user_id, {"type": "dama_error", "reason": "no_active_game"})
+            return
+        is_white = board.white_user_id == user_id
+        if not is_white and board.black_user_id != user_id:
+            await send_to(user_id, {"type": "dama_error", "reason": "not_a_player"})
+            return
+        if board.side_to_move != ("white" if is_white else "black"):
+            await send_to(user_id, {"type": "dama_error", "reason": "not_your_turn"})
+            return
+        new_board = msg.get("board")
+        if not isinstance(new_board, list) or len(new_board) != 8 or any(not isinstance(r, list) or len(r) != 8 for r in new_board):
+            await send_to(user_id, {"type": "dama_error", "reason": "malformed_board"})
+            return
+        board.board = new_board
+        move_text = msg.get("move_text")
+        if isinstance(move_text, str) and move_text:
+            board.move_history.append(move_text[:16])
+        last_move = msg.get("last_move")
+        if (
+            isinstance(last_move, dict)
+            and isinstance(last_move.get("from"), list) and len(last_move["from"]) == 2
+            and isinstance(last_move.get("to"), list) and len(last_move["to"]) == 2
+        ):
+            # "by" is server-assigned, never trusted from the client — this
+            # acting connection's own already-verified side (is_white,
+            # checked above), not whatever the message claims. Lets the
+            # client highlight "your last move" vs "the opponent's/AI's
+            # last move" distinctly without having to infer it from
+            # board.turn, which alone can't tell a continued multi-jump
+            # hop (same side moves again, turn never flips) apart from an
+            # actual turn change.
+            board.last_move = {"from": last_move["from"], "to": last_move["to"], "by": "white" if is_white else "black"}
+        # A fresh move retires any earlier draw offer/undo request outright
+        # — same reasoning as chess_move's own identical guard. Also clears
+        # a pending undo_accept_pending_for: if the OTHER player accepted an
+        # undo and then immediately moved again before the requester's own
+        # dama_undo_commit round trip completed, that now-stale commit must
+        # not be allowed to silently roll back this newer move too.
+        board.draw_offered_by = None
+        board.undo_requested_by = None
+        board.undo_accept_pending_for = None
+        # continued: true means the same side just took one hop of a
+        # multi-jump capture and must keep moving the same piece — the
+        # client's own dama.js already enforces this locally before it
+        # ever lets the player send a second dama_move; the turn only
+        # actually passes once continued is false.
+        if not msg.get("continued"):
+            board.side_to_move = "black" if is_white else "white"
+        outcome = msg.get("outcome")
+        if isinstance(outcome, dict):
+            winner_side = outcome.get("winner_side")
+            winner_id = None
+            if winner_side == "white":
+                winner_id = board.white_user_id
+            elif winner_side == "black":
+                winner_id = board.black_user_id
+            board.outcome = {"winner_user_id": winner_id, "reason": str(outcome.get("reason", "no_moves"))[:32]}
+        await _broadcast_dama_state(board)
+        if board.outcome is not None:
+            asyncio.create_task(_reset_dama_board_after_delay(board))
+        elif board.id == AI_BOARD_ID and not msg.get("continued"):
+            # continued being true means this was only one hop of the
+            # human's OWN still-ongoing multi-jump capture — side_to_move
+            # deliberately wasn't flipped above, so it's still their turn,
+            # not the AI's. Without this check, EVERY intermediate hop of a
+            # human capture chain against the AI would also fire this,
+            # computing and applying a move for the human's own side
+            # (ai_side = board.side_to_move reads THEIR color mid-chain) —
+            # silently finishing their turn on their behalf and leaving
+            # side_to_move flipped to something that no longer matches
+            # what their own client (still mid-chain locally, still
+            # expecting to pick the next hop itself) is about to send,
+            # which then gets rejected as "not_your_turn" — the game
+            # appears to freeze on "AI is thinking…" with nothing arriving
+            # to unstick it, exactly this bug's own reported symptom.
+            asyncio.create_task(_play_dama_ai_move(board))
+        return
+
+    if msg_type == "dama_resign":
+        if board.status != "in_progress" or board.outcome is not None:
+            return
+        if user_id not in (board.white_user_id, board.black_user_id):
+            return
+        winner_id = board.black_user_id if user_id == board.white_user_id else board.white_user_id
+        board.outcome = {"winner_user_id": winner_id, "reason": "resignation"}
+        await _broadcast_dama_state(board)
+        asyncio.create_task(_reset_dama_board_after_delay(board))
+        return
+
+    # Draw offer — same shape as Chess's own (see _handle_chess_message),
+    # human-vs-human boards only.
+    if msg_type == "dama_draw_offer":
+        if board.id == AI_BOARD_ID or board.status != "in_progress" or board.outcome is not None:
+            return
+        if user_id not in (board.white_user_id, board.black_user_id):
+            return
+        if board.draw_offered_by is not None or board.undo_requested_by is not None:
+            return
+        board.draw_offered_by = user_id
+        await _broadcast_dama_state(board)
+        return
+
+    if msg_type == "dama_draw_respond":
+        # Same stale-request guard as chess_draw_respond's own.
+        if board.draw_offered_by is None or board.draw_offered_by == user_id or board.outcome is not None:
+            return
+        if user_id not in (board.white_user_id, board.black_user_id):
+            return
+        if msg.get("accept"):
+            board.outcome = {"winner_user_id": None, "reason": "draw_agreed"}
+            board.draw_offered_by = None
+            await _broadcast_dama_state(board)
+            asyncio.create_task(_reset_dama_board_after_delay(board))
+        else:
+            board.draw_offered_by = None
+            await _broadcast_dama_state(board)
+        return
+
+    # Undo request — Dama stays client-authoritative even here (see
+    # DamaBoardState's own comment on undo_accept_pending_for): accepting
+    # doesn't revert anything itself, it just authorizes the REQUESTER's own
+    # client to send back the board it already has in memory from before
+    # its last move, via dama_undo_commit below.
+    if msg_type == "dama_undo_request":
+        if board.id == AI_BOARD_ID or board.status != "in_progress" or board.outcome is not None:
+            return
+        # move_history isn't a reliable "has anyone moved yet" check here —
+        # it only ever grows off an optional move_text the client doesn't
+        # actually send in real play (see dama_move's own handling above);
+        # last_move is set on every real move though, so check that instead.
+        if board.last_move is None:
+            return  # nothing to undo yet
+        is_white = board.white_user_id == user_id
+        if not is_white and board.black_user_id != user_id:
+            return
+        # Only the player who just moved may ask for it back — side_to_move
+        # being the OTHER color is exactly what "I just moved" means here.
+        if board.side_to_move == ("white" if is_white else "black"):
+            return
+        if board.draw_offered_by is not None or board.undo_requested_by is not None:
+            return
+        board.undo_requested_by = user_id
+        await _broadcast_dama_state(board)
+        return
+
+    if msg_type == "dama_undo_respond":
+        # Same stale-request guard as chess_undo_respond's own.
+        if board.undo_requested_by is None or board.undo_requested_by == user_id or board.outcome is not None:
+            return
+        if user_id not in (board.white_user_id, board.black_user_id):
+            return
+        if msg.get("accept"):
+            board.undo_accept_pending_for = board.undo_requested_by
+            board.undo_requested_by = None
+            await _broadcast_dama_state(board)
+        else:
+            board.undo_requested_by = None
+            await _broadcast_dama_state(board)
+        return
+
+    if msg_type == "dama_undo_commit":
+        if board.undo_accept_pending_for != user_id or board.outcome is not None:
+            return  # not this user's turn to commit, or the game ended some other way meanwhile
+        new_board = msg.get("board")
+        if not isinstance(new_board, list) or len(new_board) != 8 or any(not isinstance(r, list) or len(r) != 8 for r in new_board):
+            return
+        side_to_move = msg.get("side_to_move")
+        if side_to_move not in ("white", "black"):
+            return
+        board.board = new_board
+        board.side_to_move = side_to_move
+        if board.move_history:
+            board.move_history.pop()
+        board.last_move = None  # the move before that one isn't tracked — the highlight just clears
+        board.undo_accept_pending_for = None
+        await _broadcast_dama_state(board)
+        return
+
+
+async def _dama_disconnect_cleanup(user_id: int) -> None:
+    board = _find_dama_board_for_user(user_id)
+    if board is None:
+        return
+    if board.status == "waiting":
+        board.reset()
+        await _broadcast_dama_state(board)
+        return
+    winner_id = board.black_user_id if user_id == board.white_user_id else board.white_user_id
+    board.outcome = {"winner_user_id": winner_id, "reason": "disconnect"}
+    await _broadcast_dama_state(board)
+    asyncio.create_task(_reset_dama_board_after_delay(board))
 
 
 async def _reject(websocket: WebSocket, reason: str, code: int) -> None:
@@ -2470,6 +3549,7 @@ async def world_ws(websocket: WebSocket) -> None:
             row.x,
             row.z,
             row.facing,
+            row.floor,
             starter_row.level if starter_row is not None else 1,
         )
         connections[user_id] = conn
@@ -2490,6 +3570,7 @@ async def world_ws(websocket: WebSocket) -> None:
                     "x": c.x,
                     "z": c.z,
                     "facing": c.facing,
+                    "floor": c.floor,
                     **c.appearance,
                 }
                 for c in connections.values()
@@ -2512,6 +3593,26 @@ async def world_ws(websocket: WebSocket) -> None:
                 }
                 for w in wild_spawns.values()
             ],
+        }
+    )
+    # Full spectator mode's own late-join catch-up — without this, a client
+    # that connects (or, on the extension side, just mounted this webview)
+    # mid-fight would see nothing at all about any battle already in
+    # progress until that battler's next wild_battle_update happens to fire,
+    # which could be a while if the fight's current round is just sitting on
+    # a defend-selection or intro pause. Sent as its own message (rather than
+    # folded into wild_roster above) since it's keyed by battling user_id,
+    # not by wild id — a wild's own wild_roster entry already exists
+    # separately and unconditionally regardless of whether anyone's
+    # currently fighting it. Each entry is exactly the same shape a live
+    # wild_battle_state push carries (by_user_id plus the snapshot fields —
+    # see _handle_wild_battle_message), so the client's own onSocketMessage
+    # can hand every one of these to the identical per-battle handler a live
+    # push already uses.
+    await websocket.send_json(
+        {
+            "type": "wild_battle_roster",
+            "battles": [{"by_user_id": uid, **snapshot} for uid, snapshot in active_wild_battles.items()],
         }
     )
     # The current Karirs race's public state (no bets — those are per-user
@@ -2547,6 +3648,18 @@ async def world_ws(websocket: WebSocket) -> None:
     # gating wrong in the meantime.
     for board in chess_boards.values():
         await websocket.send_json(_chess_state_payload(board))
+    for board in dama_boards.values():
+        await websocket.send_json(_dama_state_payload(board))
+    # Floor 2 cinema's own late-join catch-up — sent as the exact same
+    # message shapes a live cinema_projectionist_state/cinema_screen_state
+    # broadcast already uses (see _handle_cinema_message), so the client's
+    # existing onSocketMessage handlers for those two types just work here
+    # too, with no separate "initial snapshot" shape to reconcile. Without
+    # this, a client connecting (or the game just mounting) after someone
+    # already claimed the role or changed the URL would show the stale
+    # default until the next actual change happened to broadcast.
+    await websocket.send_json({"type": "cinema_projectionist_state", "projectionist": cinema_projectionist})
+    await websocket.send_json({"type": "cinema_screen_state", "url": cinema_screen_url})
     await broadcast(
         {
             "type": "joined",
@@ -2555,6 +3668,7 @@ async def world_ws(websocket: WebSocket) -> None:
             "x": conn.x,
             "z": conn.z,
             "facing": conn.facing,
+            "floor": conn.floor,
             **conn.appearance,
         },
         exclude=websocket,
@@ -2568,6 +3682,7 @@ async def world_ws(websocket: WebSocket) -> None:
                 character.x = conn.x
                 character.z = conn.z
                 character.facing = conn.facing
+                character.floor = conn.floor
                 db.commit()
         finally:
             db.close()
@@ -2584,8 +3699,23 @@ async def world_ws(websocket: WebSocket) -> None:
                     conn.facing = float(msg["facing"])
                 except (KeyError, TypeError, ValueError):
                     continue
+                # Defensive fallback only (every client sends this from here
+                # on) — a missing/malformed floor keeps this connection's
+                # last-known value rather than snapping it back to ground.
+                try:
+                    conn.floor = int(msg["floor"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+                else:
+                    # Auto-vacate the cinema projectionist role the instant
+                    # they leave floor 2 — only reachable when the floor
+                    # parse above actually succeeded (the `else`), since an
+                    # unparsed/missing floor leaves conn.floor at its last
+                    # known value and shouldn't be treated as "just left".
+                    if conn.floor != CINEMA_FLOOR_INDEX:
+                        await _cinema_release_if_projectionist(user_id)
                 await broadcast(
-                    {"type": "position", "user_id": user_id, "x": conn.x, "z": conn.z, "facing": conn.facing},
+                    {"type": "position", "user_id": user_id, "x": conn.x, "z": conn.z, "facing": conn.facing, "floor": conn.floor},
                     exclude=websocket,
                 )
                 await _check_chess_away(user_id, conn)
@@ -2614,8 +3744,17 @@ async def world_ws(websocket: WebSocket) -> None:
             elif msg_type is not None and msg_type.startswith("pvp_"):
                 await _handle_pvp_message(user_id, conn, msg)
 
+            elif msg_type is not None and msg_type.startswith("wild_battle_"):
+                await _handle_wild_battle_message(user_id, conn, msg)
+
             elif msg_type is not None and msg_type.startswith("chess_"):
                 await _handle_chess_message(user_id, conn, msg)
+
+            elif msg_type is not None and msg_type.startswith("dama_"):
+                await _handle_dama_message(user_id, conn, msg)
+
+            elif msg_type is not None and msg_type.startswith("cinema_"):
+                await _handle_cinema_message(user_id, conn, msg)
     except WebSocketDisconnect:
         pass
     finally:
@@ -2640,6 +3779,19 @@ async def world_ws(websocket: WebSocket) -> None:
                 wild.wander_target_z = wild.z
                 wild.wander_paused_until = now + random.uniform(WILD_WANDER_PAUSE_MIN_S, WILD_WANDER_PAUSE_MAX_S)
                 await broadcast({"type": "wild_released", "id": wild.id})
+        # Same reasoning again — a disconnect (crash, closed tab, network
+        # drop) is the only way a spectated wild battle could otherwise get
+        # stuck showing on every OTHER connected client forever: the
+        # battling player's own client is the only thing that ever sends
+        # wild_battle_end (see endBattle()'s own guard on battle.wildId),
+        # and that obviously never runs once its own connection is already
+        # gone. Every client currently rendering this as a peerBattles entry
+        # tears its own dome/rigs down and restores that player's normal
+        # overworld avatar the instant this arrives (see game.js's own
+        # onSocketMessage wild_battle_end handler).
+        if user_id in active_wild_battles:
+            del active_wild_battles[user_id]
+            await broadcast({"type": "wild_battle_end", "by_user_id": user_id})
         # Same reasoning as the wild-release cleanup above — a disconnect is
         # the only way a Luba lobby this player was hosting/in could
         # otherwise get stuck around forever. No connection left to notify
@@ -2672,4 +3824,11 @@ async def world_ws(websocket: WebSocket) -> None:
         # player was hosting/waiting on, or ends their in-progress game by
         # forfeit (see _chess_disconnect_cleanup).
         await _chess_disconnect_cleanup(user_id)
+        await _dama_disconnect_cleanup(user_id)
+        # Same reasoning again — a disconnect (crash, closed tab, network
+        # drop) is the only way the cinema projectionist role could
+        # otherwise get stuck held by someone no longer even connected,
+        # let alone still standing on floor 2. Shared with the "walked off
+        # floor 2" vacate path above (see _cinema_release_if_projectionist).
+        await _cinema_release_if_projectionist(user_id)
         await broadcast({"type": "left", "user_id": user_id})

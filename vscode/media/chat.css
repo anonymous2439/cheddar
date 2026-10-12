@@ -49,6 +49,20 @@ html, body {
     width: calc(100% - 578px);
 }
 
+/* /chats hide — toggled via chat.js's own #msg class, not #game-drawer-lock's
+   "unlocked" (that one only ever caps the game drawer at 578px; this is the
+   opposite intent, a *full-width* game view with the chat log gone
+   entirely) — the !important pair overrides "unlocked" regardless of
+   which one got toggled first. */
+#msg.chats-hidden #msg-users {
+    display: none;
+}
+
+#msg.chats-hidden .msg-options {
+    width: 100% !important;
+    opacity: 1 !important;
+}
+
 .msg-options::before {
     content:"";
     position: absolute;
@@ -164,6 +178,18 @@ html, body {
     left: 0;
     width: 100%;
     transition: .6s;
+}
+
+/* /hide <true|false> — covers #msg only (the game drawer + message log),
+   never #user-actions (the input box stays usable either way). Toggled via
+   inline style from chat.js, not a class, since it's just two properties. */
+#hide-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 50;
+    background: var(--vscode-editor-background, #1e1e1e);
+    opacity: 0;
+    pointer-events: none;
 }
 
 #user-actions {

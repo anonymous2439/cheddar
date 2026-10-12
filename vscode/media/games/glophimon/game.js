@@ -30138,6 +30138,292 @@ void main() {
     }
   };
 
+  // node_modules/three/examples/jsm/renderers/CSS3DRenderer.js
+  var _position = new Vector3();
+  var _quaternion = new Quaternion();
+  var _scale = new Vector3();
+  var CSS3DObject = class extends Object3D {
+    /**
+     * Constructs a new CSS3D object.
+     *
+     * @param {HTMLElement} [element] - The DOM element.
+     */
+    constructor(element = document.createElement("div")) {
+      super();
+      this.isCSS3DObject = true;
+      this.element = element;
+      this.element.style.position = "absolute";
+      this.element.style.pointerEvents = "auto";
+      this.element.style.userSelect = "none";
+      this.element.setAttribute("draggable", false);
+      this.addEventListener("removed", function() {
+        this.traverse(function(object) {
+          if (object.element && object.element instanceof object.element.ownerDocument.defaultView.Element && object.element.parentNode !== null) {
+            object.element.remove();
+          }
+        });
+      });
+    }
+    copy(source, recursive) {
+      super.copy(source, recursive);
+      this.element = source.element.cloneNode(true);
+      return this;
+    }
+  };
+  var _matrix2 = new Matrix4();
+  var _matrix22 = new Matrix4();
+  var CSS3DRenderer = class {
+    /**
+     * Constructs a new CSS3D renderer.
+     *
+     * @param {CSS3DRenderer~Parameters} [parameters] - The parameters.
+     */
+    constructor(parameters = {}) {
+      const _this = this;
+      let _width, _height;
+      let _widthHalf, _heightHalf;
+      const cache = {
+        camera: { style: "" },
+        objects: /* @__PURE__ */ new WeakMap()
+      };
+      const domElement = parameters.element !== void 0 ? parameters.element : document.createElement("div");
+      domElement.style.overflow = "hidden";
+      this.domElement = domElement;
+      const viewElement = document.createElement("div");
+      viewElement.style.transformOrigin = "0 0";
+      viewElement.style.pointerEvents = "none";
+      domElement.appendChild(viewElement);
+      const cameraElement = document.createElement("div");
+      cameraElement.style.transformStyle = "preserve-3d";
+      viewElement.appendChild(cameraElement);
+      this.getSize = function() {
+        return {
+          width: _width,
+          height: _height
+        };
+      };
+      this.render = function(scene, camera) {
+        const fov2 = camera.projectionMatrix.elements[5] * _heightHalf;
+        if (camera.view && camera.view.enabled) {
+          viewElement.style.transform = `translate( ${-camera.view.offsetX * (_width / camera.view.width)}px, ${-camera.view.offsetY * (_height / camera.view.height)}px )`;
+          viewElement.style.transform += `scale( ${camera.view.fullWidth / camera.view.width}, ${camera.view.fullHeight / camera.view.height} )`;
+        } else {
+          viewElement.style.transform = "";
+        }
+        if (scene.matrixWorldAutoUpdate === true) scene.updateMatrixWorld();
+        if (camera.parent === null && camera.matrixWorldAutoUpdate === true) camera.updateMatrixWorld();
+        let tx, ty;
+        if (camera.isOrthographicCamera) {
+          tx = -(camera.right + camera.left) / 2;
+          ty = (camera.top + camera.bottom) / 2;
+        }
+        const scaleByViewOffset = camera.view && camera.view.enabled ? camera.view.height / camera.view.fullHeight : 1;
+        const cameraCSSMatrix = camera.isOrthographicCamera ? `scale( ${scaleByViewOffset} )scale(` + fov2 + ")translate(" + epsilon(tx) + "px," + epsilon(ty) + "px)" + getCameraCSSMatrix(camera.matrixWorldInverse) : `scale( ${scaleByViewOffset} )translateZ(` + fov2 + "px)" + getCameraCSSMatrix(camera.matrixWorldInverse);
+        const perspective = camera.isPerspectiveCamera ? "perspective(" + fov2 + "px) " : "";
+        const style = perspective + cameraCSSMatrix + "translate(" + _widthHalf + "px," + _heightHalf + "px)";
+        if (cache.camera.style !== style) {
+          cameraElement.style.transform = style;
+          cache.camera.style = style;
+        }
+        renderObject(scene, scene, camera, cameraCSSMatrix);
+      };
+      this.setSize = function(width, height) {
+        _width = width;
+        _height = height;
+        _widthHalf = _width / 2;
+        _heightHalf = _height / 2;
+        domElement.style.width = width + "px";
+        domElement.style.height = height + "px";
+        viewElement.style.width = width + "px";
+        viewElement.style.height = height + "px";
+        cameraElement.style.width = width + "px";
+        cameraElement.style.height = height + "px";
+      };
+      function epsilon(value) {
+        return Math.abs(value) < 1e-10 ? 0 : value;
+      }
+      function getCameraCSSMatrix(matrix) {
+        const elements = matrix.elements;
+        return "matrix3d(" + epsilon(elements[0]) + "," + epsilon(-elements[1]) + "," + epsilon(elements[2]) + "," + epsilon(elements[3]) + "," + epsilon(elements[4]) + "," + epsilon(-elements[5]) + "," + epsilon(elements[6]) + "," + epsilon(elements[7]) + "," + epsilon(elements[8]) + "," + epsilon(-elements[9]) + "," + epsilon(elements[10]) + "," + epsilon(elements[11]) + "," + epsilon(elements[12]) + "," + epsilon(-elements[13]) + "," + epsilon(elements[14]) + "," + epsilon(elements[15]) + ")";
+      }
+      function getObjectCSSMatrix(matrix) {
+        const elements = matrix.elements;
+        const matrix3d = "matrix3d(" + epsilon(elements[0]) + "," + epsilon(elements[1]) + "," + epsilon(elements[2]) + "," + epsilon(elements[3]) + "," + epsilon(-elements[4]) + "," + epsilon(-elements[5]) + "," + epsilon(-elements[6]) + "," + epsilon(-elements[7]) + "," + epsilon(elements[8]) + "," + epsilon(elements[9]) + "," + epsilon(elements[10]) + "," + epsilon(elements[11]) + "," + epsilon(elements[12]) + "," + epsilon(elements[13]) + "," + epsilon(elements[14]) + "," + epsilon(elements[15]) + ")";
+        return "translate(-50%,-50%)" + matrix3d;
+      }
+      function hideObject(object) {
+        if (object.isCSS3DObject) object.element.style.display = "none";
+        for (let i = 0, l = object.children.length; i < l; i++) {
+          hideObject(object.children[i]);
+        }
+      }
+      function renderObject(object, scene, camera, cameraCSSMatrix) {
+        if (object.visible === false) {
+          hideObject(object);
+          return;
+        }
+        if (object.isCSS3DObject) {
+          const visible = object.layers.test(camera.layers) === true;
+          const element = object.element;
+          element.style.display = visible === true ? "" : "none";
+          if (visible === true) {
+            object.onBeforeRender(_this, scene, camera);
+            let style;
+            if (object.isCSS3DSprite) {
+              _matrix2.copy(camera.matrixWorldInverse);
+              _matrix2.transpose();
+              if (object.rotation2D !== 0) _matrix2.multiply(_matrix22.makeRotationZ(object.rotation2D));
+              object.matrixWorld.decompose(_position, _quaternion, _scale);
+              _matrix2.setPosition(_position);
+              _matrix2.scale(_scale);
+              _matrix2.elements[3] = 0;
+              _matrix2.elements[7] = 0;
+              _matrix2.elements[11] = 0;
+              _matrix2.elements[15] = 1;
+              style = getObjectCSSMatrix(_matrix2);
+            } else {
+              style = getObjectCSSMatrix(object.matrixWorld);
+            }
+            const cachedObject = cache.objects.get(object);
+            if (cachedObject === void 0 || cachedObject.style !== style) {
+              element.style.transform = style;
+              const objectData = { style };
+              cache.objects.set(object, objectData);
+            }
+            if (element.parentNode !== cameraElement) {
+              cameraElement.appendChild(element);
+            }
+            object.onAfterRender(_this, scene, camera);
+          }
+        }
+        for (let i = 0, l = object.children.length; i < l; i++) {
+          renderObject(object.children[i], scene, camera, cameraCSSMatrix);
+        }
+      }
+    }
+  };
+
+  // node_modules/three/examples/jsm/geometries/RoundedBoxGeometry.js
+  var _tempNormal = new Vector3();
+  function getUv(faceDirVector, normal, uvAxis, projectionAxis, radius, sideLength) {
+    const totArcLength = 2 * Math.PI * radius / 4;
+    const centerLength = Math.max(sideLength - 2 * radius, 0);
+    const halfArc = Math.PI / 4;
+    _tempNormal.copy(normal);
+    _tempNormal[projectionAxis] = 0;
+    _tempNormal.normalize();
+    const arcUvRatio = 0.5 * totArcLength / (totArcLength + centerLength);
+    const arcAngleRatio = 1 - _tempNormal.angleTo(faceDirVector) / halfArc;
+    if (Math.sign(_tempNormal[uvAxis]) === 1) {
+      return arcAngleRatio * arcUvRatio;
+    } else {
+      const lenUv = centerLength / (totArcLength + centerLength);
+      return lenUv + arcUvRatio + arcUvRatio * (1 - arcAngleRatio);
+    }
+  }
+  var RoundedBoxGeometry = class _RoundedBoxGeometry extends BoxGeometry {
+    /**
+     * Constructs a new rounded box geometry.
+     *
+     * @param {number} [width=1] - The width. That is, the length of the edges parallel to the X axis.
+     * @param {number} [height=1] - The height. That is, the length of the edges parallel to the Y axis.
+     * @param {number} [depth=1] - The depth. That is, the length of the edges parallel to the Z axis.
+     * @param {number} [segments=2] - Number of segments that form the rounded corners.
+     * @param {number} [radius=0.1] - The radius of the rounded corners.
+     */
+    constructor(width = 1, height = 1, depth = 1, segments = 2, radius = 0.1) {
+      const totalSegments = segments * 2 + 1;
+      radius = Math.min(width / 2, height / 2, depth / 2, radius);
+      super(1, 1, 1, totalSegments, totalSegments, totalSegments);
+      this.type = "RoundedBoxGeometry";
+      this.parameters = {
+        width,
+        height,
+        depth,
+        segments,
+        radius
+      };
+      if (totalSegments === 1) return;
+      const geometry2 = this.toNonIndexed();
+      this.index = null;
+      this.attributes.position = geometry2.attributes.position;
+      this.attributes.normal = geometry2.attributes.normal;
+      this.attributes.uv = geometry2.attributes.uv;
+      const position = new Vector3();
+      const normal = new Vector3();
+      const box2 = new Vector3(width, height, depth).divideScalar(2).subScalar(radius);
+      const positions = this.attributes.position.array;
+      const normals = this.attributes.normal.array;
+      const uvs = this.attributes.uv.array;
+      const faceTris = positions.length / 6;
+      const faceDirVector = new Vector3();
+      const halfSegmentSize = 0.5 / totalSegments;
+      for (let i = 0, j = 0; i < positions.length; i += 3, j += 2) {
+        position.fromArray(positions, i);
+        normal.copy(position);
+        normal.x -= Math.sign(normal.x) * halfSegmentSize;
+        normal.y -= Math.sign(normal.y) * halfSegmentSize;
+        normal.z -= Math.sign(normal.z) * halfSegmentSize;
+        normal.normalize();
+        positions[i + 0] = box2.x * Math.sign(position.x) + normal.x * radius;
+        positions[i + 1] = box2.y * Math.sign(position.y) + normal.y * radius;
+        positions[i + 2] = box2.z * Math.sign(position.z) + normal.z * radius;
+        normals[i + 0] = normal.x;
+        normals[i + 1] = normal.y;
+        normals[i + 2] = normal.z;
+        const side = Math.floor(i / faceTris);
+        switch (side) {
+          case 0:
+            faceDirVector.set(1, 0, 0);
+            uvs[j + 0] = getUv(faceDirVector, normal, "z", "y", radius, depth);
+            uvs[j + 1] = 1 - getUv(faceDirVector, normal, "y", "z", radius, height);
+            break;
+          case 1:
+            faceDirVector.set(-1, 0, 0);
+            uvs[j + 0] = 1 - getUv(faceDirVector, normal, "z", "y", radius, depth);
+            uvs[j + 1] = 1 - getUv(faceDirVector, normal, "y", "z", radius, height);
+            break;
+          case 2:
+            faceDirVector.set(0, 1, 0);
+            uvs[j + 0] = 1 - getUv(faceDirVector, normal, "x", "z", radius, width);
+            uvs[j + 1] = getUv(faceDirVector, normal, "z", "x", radius, depth);
+            break;
+          case 3:
+            faceDirVector.set(0, -1, 0);
+            uvs[j + 0] = 1 - getUv(faceDirVector, normal, "x", "z", radius, width);
+            uvs[j + 1] = 1 - getUv(faceDirVector, normal, "z", "x", radius, depth);
+            break;
+          case 4:
+            faceDirVector.set(0, 0, 1);
+            uvs[j + 0] = 1 - getUv(faceDirVector, normal, "x", "y", radius, width);
+            uvs[j + 1] = 1 - getUv(faceDirVector, normal, "y", "x", radius, height);
+            break;
+          case 5:
+            faceDirVector.set(0, 0, -1);
+            uvs[j + 0] = getUv(faceDirVector, normal, "x", "y", radius, width);
+            uvs[j + 1] = 1 - getUv(faceDirVector, normal, "y", "x", radius, height);
+            break;
+        }
+      }
+    }
+    /**
+     * Factory method for creating an instance of this class from the given
+     * JSON object.
+     *
+     * @param {Object} data - A JSON object representing the serialized geometry.
+     * @returns {RoundedBoxGeometry} A new instance.
+     */
+    static fromJSON(data) {
+      return new _RoundedBoxGeometry(
+        data.width,
+        data.height,
+        data.depth,
+        data.segments,
+        data.radius
+      );
+    }
+  };
+
   // src/character.js
   var HEAD_SIZE = 0.34;
   var TORSO_WIDTH = 0.42;
@@ -30163,6 +30449,50 @@ void main() {
     mesh.position.set(x, y, 0);
     mesh.castShadow = true;
     return mesh;
+  }
+  function buildFaceMarker() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+    ctx.strokeStyle = "#000000";
+    ctx.fillStyle = "#000000";
+    ctx.lineWidth = 4;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.arc(22, 26, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(42, 26, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(32, 28, 16, 0.15 * Math.PI, 0.85 * Math.PI);
+    ctx.stroke();
+    const texture = new CanvasTexture(canvas);
+    texture.minFilter = LinearFilter;
+    const material = new MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false });
+    const marker = new Mesh(new PlaneGeometry(HEAD_SIZE * 0.85, HEAD_SIZE * 0.85), material);
+    marker.position.z = HEAD_SIZE / 2 + 2e-3;
+    marker.renderOrder = 1;
+    return marker;
+  }
+  function buildBackMarker() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ef4444";
+    ctx.beginPath();
+    ctx.arc(32, 32, 20, 0, Math.PI * 2);
+    ctx.fill();
+    const texture = new CanvasTexture(canvas);
+    texture.minFilter = LinearFilter;
+    const material = new MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false });
+    const marker = new Mesh(new PlaneGeometry(HEAD_SIZE * 0.85, HEAD_SIZE * 0.85), material);
+    marker.position.z = -(HEAD_SIZE / 2 + 2e-3);
+    marker.rotation.y = Math.PI;
+    marker.renderOrder = 1;
+    return marker;
   }
   var NAME_LABEL_FONT = "bold 13px sans-serif";
   var NAME_LABEL_HEIGHT = 20;
@@ -30426,6 +30756,186 @@ void main() {
     });
   }
 
+  // src/dama.js
+  var DAMA_SIZE = 8;
+  function createInitialDamaBoard() {
+    const board = Array.from({ length: DAMA_SIZE }, () => Array(DAMA_SIZE).fill(null));
+    for (let row = 0; row < DAMA_SIZE; row++) {
+      for (let col = 0; col < DAMA_SIZE; col++) {
+        if ((row + col) % 2 !== 1) continue;
+        if (row <= 2) board[row][col] = { side: "black", king: false };
+        else if (row >= 5) board[row][col] = { side: "white", king: false };
+      }
+    }
+    return board;
+  }
+  function inBounds(row, col) {
+    return row >= 0 && row < DAMA_SIZE && col >= 0 && col < DAMA_SIZE;
+  }
+  var DIAGONALS = [
+    [-1, -1],
+    [-1, 1],
+    [1, -1],
+    [1, 1]
+  ];
+  function forwardDir(side) {
+    return side === "black" ? 1 : -1;
+  }
+  function isBackRow(side, row) {
+    return side === "black" ? row === DAMA_SIZE - 1 : row === 0;
+  }
+  function manCaptures(board, row, col, side) {
+    const moves = [];
+    for (const [dr, dc] of DIAGONALS) {
+      const midRow = row + dr;
+      const midCol = col + dc;
+      const toRow = row + dr * 2;
+      const toCol = col + dc * 2;
+      if (!inBounds(toRow, toCol)) continue;
+      const mid = board[midRow][midCol];
+      if (mid && mid.side !== side && board[toRow][toCol] === null) {
+        moves.push({ to: { row: toRow, col: toCol }, captured: { row: midRow, col: midCol } });
+      }
+    }
+    return moves;
+  }
+  function manSimpleMoves(board, row, col, side) {
+    const moves = [];
+    const dr = forwardDir(side);
+    for (const dc of [-1, 1]) {
+      const toRow = row + dr;
+      const toCol = col + dc;
+      if (inBounds(toRow, toCol) && board[toRow][toCol] === null) {
+        moves.push({ to: { row: toRow, col: toCol } });
+      }
+    }
+    return moves;
+  }
+  function kingCaptures(board, row, col, side) {
+    const moves = [];
+    for (const [dr, dc] of DIAGONALS) {
+      let r = row + dr;
+      let c = col + dc;
+      while (inBounds(r, c) && board[r][c] === null) {
+        r += dr;
+        c += dc;
+      }
+      if (!inBounds(r, c) || board[r][c].side === side) continue;
+      const capturedRow = r;
+      const capturedCol = c;
+      r += dr;
+      c += dc;
+      while (inBounds(r, c) && board[r][c] === null) {
+        moves.push({ to: { row: r, col: c }, captured: { row: capturedRow, col: capturedCol } });
+        r += dr;
+        c += dc;
+      }
+    }
+    return moves;
+  }
+  function kingSimpleMoves(board, row, col) {
+    const moves = [];
+    for (const [dr, dc] of DIAGONALS) {
+      let r = row + dr;
+      let c = col + dc;
+      while (inBounds(r, c) && board[r][c] === null) {
+        moves.push({ to: { row: r, col: c } });
+        r += dr;
+        c += dc;
+      }
+    }
+    return moves;
+  }
+  function capturesForPiece(board, row, col) {
+    const piece = board[row][col];
+    if (!piece) return [];
+    return piece.king ? kingCaptures(board, row, col, piece.side) : manCaptures(board, row, col, piece.side);
+  }
+  function simpleMovesForPiece(board, row, col) {
+    const piece = board[row][col];
+    if (!piece) return [];
+    return piece.king ? kingSimpleMoves(board, row, col) : manSimpleMoves(board, row, col, piece.side);
+  }
+  function bestCaptureValue(board, row, col) {
+    const moves = capturesForPiece(board, row, col);
+    if (moves.length === 0) return { count: 0, kingCount: 0 };
+    let best = { count: -1, kingCount: -1 };
+    for (const m of moves) {
+      const capturedWasKing = board[m.captured.row][m.captured.col].king;
+      const { board: nextBoard, continuedCaptureFrom } = applyDamaMove(board, { from: { row, col }, to: m.to, captured: m.captured });
+      const rest = continuedCaptureFrom ? bestCaptureValue(nextBoard, continuedCaptureFrom.row, continuedCaptureFrom.col) : { count: 0, kingCount: 0 };
+      const total = { count: 1 + rest.count, kingCount: (capturedWasKing ? 1 : 0) + rest.kingCount };
+      if (isBetterValue(total, best)) best = total;
+    }
+    return best;
+  }
+  function isBetterValue(a, b) {
+    return a.count > b.count || a.count === b.count && a.kingCount > b.kingCount;
+  }
+  function mandatoryMovesForPiece(board, row, col) {
+    const moves = capturesForPiece(board, row, col);
+    if (moves.length === 0) return [];
+    const scored = moves.map((m) => {
+      const capturedWasKing = board[m.captured.row][m.captured.col].king;
+      const { board: nextBoard, continuedCaptureFrom } = applyDamaMove(board, { from: { row, col }, to: m.to, captured: m.captured });
+      const rest = continuedCaptureFrom ? bestCaptureValue(nextBoard, continuedCaptureFrom.row, continuedCaptureFrom.col) : { count: 0, kingCount: 0 };
+      return { move: { from: { row, col }, to: m.to, captured: m.captured }, total: { count: 1 + rest.count, kingCount: (capturedWasKing ? 1 : 0) + rest.kingCount } };
+    });
+    let bestTotal = scored[0].total;
+    for (const s of scored) if (isBetterValue(s.total, bestTotal)) bestTotal = s.total;
+    return scored.filter((s) => s.total.count === bestTotal.count && s.total.kingCount === bestTotal.kingCount).map((s) => s.move);
+  }
+  function getAllLegalMoves(board, side, forcedFromSquare) {
+    if (forcedFromSquare) {
+      return mandatoryMovesForPiece(board, forcedFromSquare.row, forcedFromSquare.col);
+    }
+    const simpleMoves = [];
+    const capturingSquares = [];
+    for (let row = 0; row < DAMA_SIZE; row++) {
+      for (let col = 0; col < DAMA_SIZE; col++) {
+        const piece = board[row][col];
+        if (!piece || piece.side !== side) continue;
+        if (capturesForPiece(board, row, col).length > 0) {
+          capturingSquares.push({ row, col });
+        }
+        for (const move of simpleMovesForPiece(board, row, col)) {
+          simpleMoves.push({ from: { row, col }, to: move.to });
+        }
+      }
+    }
+    if (capturingSquares.length === 0) return simpleMoves;
+    const bestByPiece = capturingSquares.map((sq) => ({ sq, value: bestCaptureValue(board, sq.row, sq.col) }));
+    let globalBest = bestByPiece[0].value;
+    for (const { value } of bestByPiece) if (isBetterValue(value, globalBest)) globalBest = value;
+    const captureMoves = [];
+    for (const { sq, value } of bestByPiece) {
+      if (value.count === globalBest.count && value.kingCount === globalBest.kingCount) {
+        captureMoves.push(...mandatoryMovesForPiece(board, sq.row, sq.col));
+      }
+    }
+    return captureMoves;
+  }
+  function applyDamaMove(board, move) {
+    const next = board.map((r) => r.slice());
+    const piece = next[move.from.row][move.from.col];
+    next[move.from.row][move.from.col] = null;
+    if (move.captured) next[move.captured.row][move.captured.col] = null;
+    next[move.to.row][move.to.col] = { side: piece.side, king: piece.king };
+    const hasMoreCaptures = !!move.captured && capturesForPiece(next, move.to.row, move.to.col).length > 0;
+    let continuedCaptureFrom = null;
+    let promoted = false;
+    if (hasMoreCaptures) {
+      continuedCaptureFrom = { row: move.to.row, col: move.to.col };
+    } else if (!piece.king && isBackRow(piece.side, move.to.row)) {
+      promoted = true;
+      next[move.to.row][move.to.col] = { side: piece.side, king: true };
+    }
+    return { board: next, continuedCaptureFrom, promoted };
+  }
+  function hasNoLegalMoves(board, side) {
+    return getAllLegalMoves(board, side).length === 0;
+  }
+
   // ../../glsims/client/src/character.js
   var HEAD_RADIUS = 0.14;
   var SPINE_LEN = 0.5;
@@ -30599,9 +31109,15 @@ void main() {
     }
     connect();
     return {
-      sendPosition(x, z, facing) {
+      // floor: which Glophics floor the player is currently on (0 = ground) —
+      // see game.js's own local.currentFloor/GLOPHICS_FLOORS. Threaded
+      // through unchanged to the server (main.py's own Connection.floor),
+      // which relays it to every other connected client exactly like x/z/
+      // facing already are, so peers can be hidden/rendered at the right
+      // height on whichever floor they're actually standing on.
+      sendPosition(x, z, facing, floor) {
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "position", x, z, facing }));
+          ws.send(JSON.stringify({ type: "position", x, z, facing, floor }));
         }
       },
       sendChat(text) {
@@ -30686,6 +31202,11 @@ void main() {
           ws.send(JSON.stringify({ type: "chess_host_request", board_id: boardId }));
         }
       },
+      sendChessAiStart(boardId) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "chess_ai_start", board_id: boardId }));
+        }
+      },
       sendChessCancelHost(boardId) {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "chess_cancel_host", board_id: boardId }));
@@ -30704,6 +31225,153 @@ void main() {
       sendChessResign(boardId) {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "chess_resign", board_id: boardId }));
+        }
+      },
+      // Draw offer / undo request — human-vs-human boards only (see the api's
+      // own chess_draw_offer/chess_undo_request), same fire-and-forget shape
+      // as every send method above.
+      sendChessDrawOffer(boardId) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "chess_draw_offer", board_id: boardId }));
+        }
+      },
+      sendChessDrawRespond(boardId, accept) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "chess_draw_respond", board_id: boardId, accept: !!accept }));
+        }
+      },
+      sendChessUndoRequest(boardId) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "chess_undo_request", board_id: boardId }));
+        }
+      },
+      sendChessUndoRespond(boardId, accept) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "chess_undo_respond", board_id: boardId, accept: !!accept }));
+        }
+      },
+      // Dama (Phase 2) — shares tables 1/2 with Chess but is otherwise a
+      // fully separate message set (see the api's own _handle_dama_message).
+      // sendDamaMove's board is the *whole* resulting 8x8 grid, not a single
+      // move notation — the server trusts the sending client's own dama.js
+      // validation rather than re-deriving the move itself (see this
+      // feature's own plan file for why).
+      sendDamaHostRequest(boardId) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "dama_host_request", board_id: boardId }));
+        }
+      },
+      // Phase 3 — the standing AI table's Dama option (see the api's own
+      // dama_ai_start), same fire-and-forget shape as sendChessAiStart.
+      sendDamaAiStart(boardId) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "dama_ai_start", board_id: boardId }));
+        }
+      },
+      sendDamaCancelHost(boardId) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "dama_cancel_host", board_id: boardId }));
+        }
+      },
+      sendDamaJoinRequest(boardId) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "dama_join_request", board_id: boardId }));
+        }
+      },
+      // last_move: {from: {row,col}, to: {row,col}} — the WHOLE current turn's
+      // own start/end squares so far (start stays fixed across a multi-jump
+      // chain's own hops, see game.js's own activeDamaMatch.turnStartSquare),
+      // used purely for the last-move highlight (see the api's own last_move
+      // field) — never validated server-side, same trust level as `board`.
+      sendDamaMove(boardId, board, { continued, outcome, lastMove }) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "dama_move", board_id: boardId, board, continued: !!continued, outcome: outcome || null, last_move: lastMove || null }));
+        }
+      },
+      sendDamaResign(boardId) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "dama_resign", board_id: boardId }));
+        }
+      },
+      // Draw offer / undo request — same shape as Chess's own (see
+      // sendChessDrawOffer etc.), human-vs-human boards only.
+      sendDamaDrawOffer(boardId) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "dama_draw_offer", board_id: boardId }));
+        }
+      },
+      sendDamaDrawRespond(boardId, accept) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "dama_draw_respond", board_id: boardId, accept: !!accept }));
+        }
+      },
+      sendDamaUndoRequest(boardId) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "dama_undo_request", board_id: boardId }));
+        }
+      },
+      sendDamaUndoRespond(boardId, accept) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "dama_undo_respond", board_id: boardId, accept: !!accept }));
+        }
+      },
+      // Sent only by whichever client the server just told (via dama_state's
+      // own undo_accept_pending_for) that its undo request was accepted — the
+      // ONE client that still has the pre-move board in memory (see game.js's
+      // own activeDamaMatch.lastTurnSnapshot). board/sideToMove is exactly
+      // that snapshot, played back to the server the same way any other
+      // dama_move's board already is.
+      sendDamaUndoCommit(boardId, board, sideToMove) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "dama_undo_commit", board_id: boardId, board, side_to_move: sideToMove }));
+        }
+      },
+      // Full spectator mode for wild battles — same fire-and-forget shape as
+      // every send method above, but narrating an already-computed LOCAL
+      // simulation rather than asking the server to do or validate anything:
+      // wild battles stay entirely client-side/non-authoritative (species
+      // stats, moves, HP, turn order, RNG are all simulated by
+      // game.js's own startWildBattle/resolvePlayerAttack/resolveWildAttack),
+      // so these three just tell the server "here's my fight's current full
+      // state," which stores it (keyed by this user's own user_id) and
+      // rebroadcasts it to everyone else as wild_battle_state/wild_battle_end
+      // (see the api's own _handle_wild_battle_message) — the exact same
+      // trust level sendPosition already gets. `snapshot` is always the WHOLE
+      // current state, never a delta (see game.js's own buildBattleSnapshot),
+      // so a spectator can render correctly from just the latest message with
+      // no history to reconcile. Never called at all for the dev-only
+      // "Simulate Wild Battle" shortcut, which was never engaged with the
+      // server in the first place (see startWildBattle's own wildId guard).
+      sendWildBattleStart(snapshot) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "wild_battle_start", ...snapshot }));
+        }
+      },
+      sendWildBattleUpdate(snapshot) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "wild_battle_update", ...snapshot }));
+        }
+      },
+      sendWildBattleEnd() {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "wild_battle_end" }));
+        }
+      },
+      // Floor 2 cinema's shared projectionist role — same fire-and-forget
+      // shape as every send method above, server-validated (see main.py's
+      // own _handle_cinema_message: re-checks the role is actually vacant/
+      // actually held by this caller rather than trusting whatever the
+      // client's own Usher popup currently shows) and answered via a
+      // cinema_projectionist_state/cinema_screen_state/cinema_error message
+      // rather than a direct reply to either of these.
+      sendCinemaClaimProjectionist() {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "cinema_claim_projectionist" }));
+        }
+      },
+      sendCinemaSetUrl(url) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "cinema_set_url", url }));
         }
       },
       dispose() {
@@ -31022,12 +31690,64 @@ void main() {
   var TOWN_WALL_HEIGHT = 2.4;
   var TOWN_DOOR_HALF_WIDTH = 2.2;
   var TOWN_WALL_COLOR = "#8d8d8d";
-  var TOWN_WALL_OCCLUDED_OPACITY = 0.15;
+  var TOWN_WALL_OCCLUDED_OPACITY = 0.02;
   var TOWN_WALL_FADE_RATE = 8;
   var TOWN_DOOR_POST_COLOR = "#7c4a2d";
   var TOWN_PLAZA_COLOR = "#c9b38c";
+  var FLOOR_HEIGHT = TOWN_WALL_HEIGHT;
+  var GLOPHICS_FLOORS = [
+    // wallHeight doubled (TOWN_WALL_HEIGHT*2) and hasDoors:false per explicit
+    // request — a taller cinema room, reachable only via the stairs, never
+    // through a walk-in doorway like the ground floor's four.
+    // wallHeight raised from TOWN_WALL_HEIGHT*2 to *6 so the cinema screen
+    // (CINEMA_SCREEN_WORLD_WIDTH/HEIGHT below) can span the wall at its own
+    // real 16:9 proportions instead of being squashed to fit a shorter room —
+    // see that constant's own comment for why a screen this wide needs this
+    // much headroom once it's not being stretched.
+    { index: 1, y: FLOOR_HEIGHT, wallColor: "#3a3a45", floorColor: "#7a2e2e", wallHeight: TOWN_WALL_HEIGHT * 6, hasDoors: false }
+    // Future floors just append here, e.g.
+    // { index: 2, y: FLOOR_HEIGHT * 2, wallColor: ..., floorColor: ..., wallHeight: TOWN_WALL_HEIGHT, hasDoors: false }.
+  ];
+  var CINEMA_SCREEN_FLOOR_INDEX = GLOPHICS_FLOORS[0].index;
+  var GLOPHICS_TOPMOST_FLOOR = GLOPHICS_FLOORS[GLOPHICS_FLOORS.length - 1];
+  var GLOPHICS_ROOF_Y = GLOPHICS_TOPMOST_FLOOR.y + (GLOPHICS_TOPMOST_FLOOR.wallHeight ?? TOWN_WALL_HEIGHT);
+  var GLOPHICS_ROOF_COLOR = "#6b3f2a";
+  var GLOPHICS_ROOF_INDEX = GLOPHICS_FLOORS.length + 1;
+  var GLOPHICS_STAIRS_X = 6;
+  var GLOPHICS_STAIRS_Z = 6;
+  var STAIRS_CONTACT_RADIUS = 0.9;
+  var STAIRS_COOLDOWN_MS = 1200;
+  var STAIRS_STEP_AWAY = 1.4;
+  var GLOPHICS_STAIR_TRANSITIONS = GLOPHICS_FLOORS.map((floor, i) => ({
+    belowFloor: i === 0 ? 0 : GLOPHICS_FLOORS[i - 1].index,
+    belowY: i === 0 ? 0 : GLOPHICS_FLOORS[i - 1].y,
+    aboveFloor: floor.index,
+    aboveY: floor.y,
+    x: GLOPHICS_STAIRS_X,
+    z: GLOPHICS_STAIRS_Z
+  }));
+  function glophicsFloorY(floorIndex) {
+    if (!floorIndex) return 0;
+    return GLOPHICS_FLOORS.find((f) => f.index === floorIndex)?.y ?? 0;
+  }
+  var CINEMA_YOUTUBE_VIDEO_ID = "dQw4w9WgXcQ";
+  var CINEMA_YOUTUBE_EMBED_URL = `https://www.youtube.com/embed/${CINEMA_YOUTUBE_VIDEO_ID}?autoplay=1&mute=1&loop=1&playlist=${CINEMA_YOUTUBE_VIDEO_ID}&controls=0&enablejsapi=1`;
+  function sendCinemaScreenCommand(iframe, func) {
+    iframe.contentWindow?.postMessage(JSON.stringify({ event: "command", func, args: [] }), "https://www.youtube.com");
+  }
+  function isYoutubeEmbedUrl(url) {
+    return typeof url === "string" && url.startsWith("https://www.youtube.com/");
+  }
+  var CINEMA_SCREEN_PIXEL_WIDTH = 480;
+  var CINEMA_SCREEN_PIXEL_HEIGHT = 270;
+  var CINEMA_SCREEN_WORLD_WIDTH = TOWN_HALF_X * 2 - TOWN_WALL_THICKNESS * 2;
+  var CINEMA_SCREEN_WORLD_HEIGHT = CINEMA_SCREEN_WORLD_WIDTH * (CINEMA_SCREEN_PIXEL_HEIGHT / CINEMA_SCREEN_PIXEL_WIDTH);
+  var CINEMA_SCREEN_X = 0;
+  var CINEMA_SCREEN_Z = -TOWN_HALF_Z + TOWN_WALL_THICKNESS / 2 + 0.05;
+  var CINEMA_SCREEN_BOTTOM_CLEARANCE = 0.8;
+  var CINEMA_SCREEN_Y_OFFSET = CINEMA_SCREEN_BOTTOM_CLEARANCE + CINEMA_SCREEN_WORLD_HEIGHT / 2;
   var SPRINT_SPEED_MULTIPLIER = 1.9;
-  var STAMINA_MAX = 100;
+  var STAMINA_MAX = 200;
   var STAMINA_DRAIN_PER_SEC = 28;
   var STAMINA_REGEN_PER_SEC = 18;
   var CAMERA_RADIUS = 10;
@@ -31037,7 +31757,7 @@ void main() {
   var MIN_ZOOM_RADIUS = 5;
   var MAX_ZOOM_RADIUS = 70;
   var ZOOM_SPEED = 0.02;
-  var MIN_ELEVATION = 0.1;
+  var MIN_ELEVATION = -0.6;
   var MAX_ELEVATION = 1.45;
   var DRAG_SENSITIVITY = 6e-3;
   var CAMERA_FOLLOW_LERP_SPEED = 6;
@@ -31170,7 +31890,8 @@ void main() {
   var ATTACK_ANIM_MS = 850;
   var DEFEND_ANIM_MS = 600;
   var CAST_ANIM_MS = 700;
-  var ANIM_SETTLE_MS = Math.max(ATTACK_ANIM_MS, DEFEND_ANIM_MS, CAST_ANIM_MS) + 150;
+  var ANIM_SETTLE_BUFFER_MS = 150;
+  var ANIM_SETTLE_MS = Math.max(ATTACK_ANIM_MS, DEFEND_ANIM_MS, CAST_ANIM_MS) + ANIM_SETTLE_BUFFER_MS;
   var BATTLE_RESULT_TIMEOUT_MS = 4e3;
   var RESET_CAM_ORBIT_SPEED = 0.12;
   var TEAM_SIZE = 3;
@@ -31197,6 +31918,12 @@ void main() {
   var INTERACTION_RANGE = 2.5;
   var LABEL_VISIBLE_DISTANCE = 20;
   var DAILY_CLAIM_GLOPHIBALLS = 5;
+  var RODZ_CLAIM_SEND_OFFS = [
+    "Happy Glophimon catching!",
+    "Take care out there!",
+    "Go get 'em, trainer!",
+    "Good luck on your next catch!"
+  ];
   var RODZ_SHOUT_TEXT = "Claim your free Glophiballs here!";
   var RODZ_SHOUT_VISIBLE_MS = 3e3;
   var RODZ_SHOUT_HIDDEN_MS = 2500;
@@ -31220,6 +31947,60 @@ void main() {
   var KARIRS_TV_HEIGHT = 1.1;
   var KARIRS_BOARD_WIDTH = 1.8;
   var KARIRS_STEP_DELAY_MS = 300;
+  var KARIRS_PRACTICE_COUNTDOWN_MS = 1e4;
+  var KARIRS_PRACTICE_BLOCK_WINDOW_MS = 6e4;
+  var KARIRS_PRACTICE_RESULT_HOLD_MS = 6e3;
+  var KARIRS_PRACTICE_FALLBACK_NAMES = ["Practice Runner A", "Practice Runner B", "Practice Runner C", "Practice Runner D"];
+  var KARIRS_PRACTICE_TOTAL_STEPS = 150;
+  var KARIRS_PRACTICE_SPEED_MIN = 0;
+  var KARIRS_PRACTICE_SPEED_MAX = 2;
+  var KARIRS_PRACTICE_SPEED_CHANGE_MIN = 5;
+  var KARIRS_PRACTICE_SPEED_CHANGE_MAX = 15;
+  var KARIRS_PRACTICE_FINISH_LINE = 100;
+  function simulateKarirsPracticeRace(racerNames) {
+    const positions = {};
+    const speeds = {};
+    const nextChange = {};
+    for (const name of racerNames) {
+      positions[name] = 0;
+      speeds[name] = KARIRS_PRACTICE_SPEED_MIN + Math.random() * (KARIRS_PRACTICE_SPEED_MAX - KARIRS_PRACTICE_SPEED_MIN);
+      nextChange[name] = KARIRS_PRACTICE_SPEED_CHANGE_MIN + Math.floor(Math.random() * (KARIRS_PRACTICE_SPEED_CHANGE_MAX - KARIRS_PRACTICE_SPEED_CHANGE_MIN + 1));
+    }
+    const steps = [];
+    let winner = null;
+    for (let step = 1; step <= KARIRS_PRACTICE_TOTAL_STEPS; step++) {
+      for (const name of racerNames) {
+        if (step >= nextChange[name]) {
+          speeds[name] = KARIRS_PRACTICE_SPEED_MIN + Math.random() * (KARIRS_PRACTICE_SPEED_MAX - KARIRS_PRACTICE_SPEED_MIN);
+          nextChange[name] = step + KARIRS_PRACTICE_SPEED_CHANGE_MIN + Math.floor(Math.random() * (KARIRS_PRACTICE_SPEED_CHANGE_MAX - KARIRS_PRACTICE_SPEED_CHANGE_MIN + 1));
+        }
+      }
+      let crossed = null;
+      for (const name of racerNames) {
+        if (positions[name] < KARIRS_PRACTICE_FINISH_LINE) {
+          positions[name] = Math.min(positions[name] + speeds[name], KARIRS_PRACTICE_FINISH_LINE);
+          if (positions[name] >= KARIRS_PRACTICE_FINISH_LINE && crossed === null) crossed = name;
+        }
+      }
+      const isFinal = crossed !== null || step === KARIRS_PRACTICE_TOTAL_STEPS;
+      steps.push({ positions: { ...positions } });
+      if (isFinal) {
+        winner = crossed ?? racerNames.reduce((best, n) => positions[n] > positions[best] ? n : best, racerNames[0]);
+        break;
+      }
+    }
+    return { steps, winner };
+  }
+  var KARIRS_TRACK_LANE_COUNT = 4;
+  var KARIRS_TRACK_LANE_SPACING = 2.4;
+  var KARIRS_TRACK_START_Z = KARIRS_FIELD_Z - KARIRS_FIELD_HALF - 3;
+  var KARIRS_TRACK_LENGTH = 30;
+  var KARIRS_TRACK_FINISH_Z = KARIRS_TRACK_START_Z - KARIRS_TRACK_LENGTH;
+  var KARIRS_TRACK_WIDTH = KARIRS_TRACK_LANE_COUNT * KARIRS_TRACK_LANE_SPACING + 2;
+  var KARIRS_TRACK_LANE_OFFSETS = Array.from(
+    { length: KARIRS_TRACK_LANE_COUNT },
+    (_, i) => (i - (KARIRS_TRACK_LANE_COUNT - 1) / 2) * KARIRS_TRACK_LANE_SPACING
+  );
   var LUBA_X = -28;
   var LUBA_Z = 28;
   var LUBA_HALF = 7;
@@ -31231,6 +32012,13 @@ void main() {
   var BOSS_RICK_Z = LUBA_Z;
   var LUBA_DURATION_OPTIONS_S = [180, 300, 600];
   var LUBA_MAX_MEMBERS = 8;
+  var USHER_NAME = "Usher";
+  var USHER_COLORS = { head: "#d1a17a", body: "#1c1c24", arm: "#d1a17a", leg: "#0d0d12" };
+  var USHER_X = 3.5;
+  var USHER_Z = 4.6;
+  function isInsideAreaFootprint(x, z, centerX, centerZ, half) {
+    return Math.abs(x - centerX) <= half && Math.abs(z - centerZ) <= half;
+  }
   var TAMBAYAN_X = 40;
   var TAMBAYAN_Z = 40;
   var TAMBAYAN_RADIUS = 14;
@@ -31244,8 +32032,20 @@ void main() {
   var CHESS_BOARD_1_Z = TAMBAYAN_Z;
   var CHESS_BOARD_2_X = TAMBAYAN_X + 5;
   var CHESS_BOARD_2_Z = TAMBAYAN_Z;
+  var CHESS_BOARD_3_X = TAMBAYAN_X;
+  var CHESS_BOARD_3_Z = TAMBAYAN_Z + 6;
+  var AI_BOARD_ID = 3;
   var CHESS_BOARD_SIZE = 1.6;
   var CHESS_TABLE_HEIGHT = 0.7;
+  var CHESS_TABLE_HALF = (CHESS_BOARD_SIZE + 0.3) / 2;
+  function isInsideChessTables(x, z) {
+    return Math.abs(x - CHESS_BOARD_1_X) <= CHESS_TABLE_HALF && Math.abs(z - CHESS_BOARD_1_Z) <= CHESS_TABLE_HALF || Math.abs(x - CHESS_BOARD_2_X) <= CHESS_TABLE_HALF && Math.abs(z - CHESS_BOARD_2_Z) <= CHESS_TABLE_HALF || Math.abs(x - CHESS_BOARD_3_X) <= CHESS_TABLE_HALF && Math.abs(z - CHESS_BOARD_3_Z) <= CHESS_TABLE_HALF;
+  }
+  var STOCKFISH_NAME = "Stockfish";
+  var STOCKFISH_COLORS = { head: "#d1d5db", body: "#111827", arm: "#d1d5db", leg: "#1f2937" };
+  var STOCKFISH_X = CHESS_BOARD_3_X;
+  var STOCKFISH_Z = CHESS_BOARD_3_Z + 1.3;
+  var DAMA_AI_NAME = "Dama AI";
   function isInsidePolygon(x, z, vertices) {
     let inside = false;
     for (let i = 0, j = vertices.length - 1; i < vertices.length; j = i++) {
@@ -31258,6 +32058,13 @@ void main() {
   }
   function isInsideTambayan(x, z) {
     return isInsidePolygon(x, z, TAMBAYAN_VERTICES);
+  }
+  function getAreaKey(x, z) {
+    if (isInsideAreaFootprint(x, z, 0, 0, TOWN_HALF_X)) return "town";
+    if (isInsideAreaFootprint(x, z, KARIRS_FIELD_X, KARIRS_FIELD_Z, KARIRS_FIELD_HALF)) return "karirs";
+    if (isInsideAreaFootprint(x, z, LUBA_X, LUBA_Z, LUBA_HALF)) return "luba";
+    if (isInsideTambayan(x, z)) return "tambayan";
+    return null;
   }
   function distanceToSegment(px2, pz2, x1, z1, x2, z2) {
     const dx = x2 - x1;
@@ -31305,6 +32112,10 @@ void main() {
     n: "\u265E",
     p: "\u265F"
   };
+  var TAMBAYAN_BOARD_LIGHT = "#eeeed2";
+  var TAMBAYAN_BOARD_DARK = "#769656";
+  var TAMBAYAN_LAST_MOVE_TINT = "#baca44";
+  var TAMBAYAN_LAST_MOVE_OPPONENT_TINT = "#c97b4a";
   function parseChessFen(fen) {
     const placement = fen.split(" ")[0];
     return placement.split("/").map((rankStr) => {
@@ -31323,6 +32134,39 @@ void main() {
   var TEAM_FOCUS_CAM_HEIGHT = 2;
   var TEAM_FOCUS_CAM_LOOK_Y = 0.2;
   var TEAM_FOCUS_CAM_LOOK_AHEAD = 3;
+  var FOCUS_CAM_HEIGHT_MIN = 0.5;
+  var FOCUS_CAM_HEIGHT_MAX = 5;
+  function computeFocusCameraFrame(pos, facingAngle, lookAtPos, params, theta = 0) {
+    const fx = Math.sin(facingAngle);
+    const fz = Math.cos(facingAngle);
+    const orbitAngle = facingAngle + Math.PI + theta;
+    return {
+      camX: pos.x + Math.sin(orbitAngle) * params.behind,
+      camY: params.height,
+      camZ: pos.z + Math.cos(orbitAngle) * params.behind,
+      lookX: lookAtPos ? lookAtPos.x : pos.x + fx * params.lookAhead,
+      lookY: params.lookY,
+      lookZ: lookAtPos ? lookAtPos.z : pos.z + fz * params.lookAhead
+    };
+  }
+  function advanceFocusOrbit(battle, focus, dt) {
+    const params = focus.params;
+    if (!params || !params.autoRotate) return;
+    if (params.rotateSpeed <= 0 && params.heightRotateSpeed <= 0) return;
+    if (!focus.anchorRig) return;
+    battle.focusOrbitState = battle.focusOrbitState || {};
+    const key = focus.slotId || "_default";
+    const state = battle.focusOrbitState[key] || (battle.focusOrbitState[key] = { angle: params.angle ?? 0, camElevation: params.height, camElevationDir: 1 });
+    state.angle += params.rotateSpeed * dt;
+    const height = advanceOrbitElevation(state, params.height, params.heightRotateSpeed, dt, FOCUS_CAM_HEIGHT_MIN, FOCUS_CAM_HEIGHT_MAX);
+    const frame = computeFocusCameraFrame(focus.anchorRig.group.position, focus.facingAngle, focus.lookAtPos, { ...params, height }, state.angle);
+    focus.camX = frame.camX;
+    focus.camY = frame.camY;
+    focus.camZ = frame.camZ;
+    focus.lookX = frame.lookX;
+    focus.lookY = frame.lookY;
+    focus.lookZ = frame.lookZ;
+  }
   function randomInt(min, max) {
     return Math.floor(Math.random() * (max - min + 1)) + min;
   }
@@ -31472,13 +32316,120 @@ void main() {
     ctx.log(`${attackerCombatant.name} used ${move.name}!${hitNote} (${totalDmg} damage)`);
     return { hit: true, damage: totalDmg };
   }
+  function terrainHash(x, z) {
+    let h = x * 374761393 + z * 668265263 | 0;
+    h = (h ^ h >>> 13) * 1274126177;
+    h = h ^ h >>> 16;
+    return (h >>> 0) / 4294967295;
+  }
+  function terrainSmoothNoise(x, z) {
+    const x0 = Math.floor(x);
+    const z0 = Math.floor(z);
+    const sx = x - x0;
+    const sz = z - z0;
+    const n00 = terrainHash(x0, z0);
+    const n10 = terrainHash(x0 + 1, z0);
+    const n01 = terrainHash(x0, z0 + 1);
+    const n11 = terrainHash(x0 + 1, z0 + 1);
+    const ux = sx * sx * (3 - 2 * sx);
+    const uz = sz * sz * (3 - 2 * sz);
+    const nx0 = n00 + (n10 - n00) * ux;
+    const nx1 = n01 + (n11 - n01) * ux;
+    return nx0 + (nx1 - nx0) * uz;
+  }
+  function terrainFractalNoise(x, z, octaves, scale) {
+    let total = 0;
+    let amplitude = 1;
+    let frequency = scale;
+    let maxValue = 0;
+    for (let i = 0; i < octaves; i++) {
+      total += terrainSmoothNoise(x * frequency, z * frequency) * amplitude;
+      maxValue += amplitude;
+      amplitude *= 0.5;
+      frequency *= 2;
+    }
+    return total / maxValue;
+  }
+  function terrainSmooth01(t) {
+    const c = Math.min(1, Math.max(0, t));
+    return c * c * (3 - 2 * c);
+  }
+  function terrainBiomeValue(x, z) {
+    return terrainFractalNoise(x + 5e3, z - 5e3, 3, 0.025);
+  }
+  function terrainBiomeAmplitude(biome) {
+    const DESERT_AMPLITUDE = 1.2;
+    const HILL_AMPLITUDE = 4.5;
+    const MOUNTAIN_AMPLITUDE = 13;
+    if (biome < 0.5) {
+      return DESERT_AMPLITUDE + (HILL_AMPLITUDE - DESERT_AMPLITUDE) * terrainSmooth01((biome - 0.3) / 0.2);
+    }
+    return HILL_AMPLITUDE + (MOUNTAIN_AMPLITUDE - HILL_AMPLITUDE) * terrainSmooth01((biome - 0.5) / 0.2);
+  }
+  var TERRAIN_FLATTEN_MARGIN = 10;
+  function terrainFlattenFactor(x, z) {
+    let factor = 1;
+    factor = Math.min(factor, terrainSmooth01(Math.max(Math.abs(x) - TOWN_HALF_X, Math.abs(z) - TOWN_HALF_Z) / TERRAIN_FLATTEN_MARGIN));
+    factor = Math.min(factor, terrainSmooth01(Math.max(Math.abs(x - KARIRS_FIELD_X) - KARIRS_FIELD_HALF, Math.abs(z - KARIRS_FIELD_Z) - KARIRS_FIELD_HALF) / TERRAIN_FLATTEN_MARGIN));
+    factor = Math.min(factor, terrainSmooth01(Math.max(Math.abs(x - LUBA_X) - LUBA_HALF, Math.abs(z - LUBA_Z) - LUBA_HALF) / TERRAIN_FLATTEN_MARGIN));
+    factor = Math.min(factor, terrainSmooth01((Math.hypot(x - TAMBAYAN_X, z - TAMBAYAN_Z) - TAMBAYAN_RADIUS) / TERRAIN_FLATTEN_MARGIN));
+    const trackHalfWidth = KARIRS_TRACK_WIDTH / 2;
+    const distX = Math.abs(x - KARIRS_FIELD_X) - trackHalfWidth;
+    const distZ = z > KARIRS_TRACK_START_Z ? z - KARIRS_TRACK_START_Z : z < KARIRS_TRACK_FINISH_Z ? KARIRS_TRACK_FINISH_Z - z : 0;
+    factor = Math.min(factor, terrainSmooth01(Math.max(distX, distZ) / TERRAIN_FLATTEN_MARGIN));
+    const distFromEdge = Math.min(ARENA_HALF_X - Math.abs(x), ARENA_HALF_Z - Math.abs(z));
+    factor = Math.min(factor, terrainSmooth01(distFromEdge / TERRAIN_FLATTEN_MARGIN));
+    return factor;
+  }
+  function terrainHeight(x, z) {
+    const flatten2 = terrainFlattenFactor(x, z);
+    if (flatten2 <= 0) return 0;
+    const biome = terrainBiomeValue(x, z);
+    const detail = terrainFractalNoise(x, z, 4, 0.035);
+    return detail * terrainBiomeAmplitude(biome) * flatten2;
+  }
+  function entityGroundY(floorIndex, x, z) {
+    return floorIndex === 0 ? terrainHeight(x, z) : glophicsFloorY(floorIndex);
+  }
+  var TERRAIN_COLOR_GRASS = new Color("#4a7c4a");
+  var TERRAIN_COLOR_DIRT = new Color("#8a6d4a");
+  var TERRAIN_COLOR_SAND = new Color("#d9c58a");
+  var TERRAIN_COLOR_ROCK = new Color("#767068");
+  var TERRAIN_COLOR_SNOW = new Color("#f2f2f2");
+  function terrainColorAt(height, biome) {
+    const color = TERRAIN_COLOR_GRASS.clone();
+    color.lerp(TERRAIN_COLOR_DIRT, terrainSmooth01(height / 3));
+    color.lerp(TERRAIN_COLOR_SAND, terrainSmooth01((0.4 - biome) / 0.15));
+    color.lerp(TERRAIN_COLOR_ROCK, terrainSmooth01((height - 5) / 4));
+    color.lerp(TERRAIN_COLOR_SNOW, terrainSmooth01((height - 10) / 3));
+    return color;
+  }
   var OCEAN_HALF_EXTENT = 2e3;
+  var TERRAIN_MESH_SEGMENTS = 128;
   function buildGround(scene) {
     const groundWidth = (ARENA_HALF_X + 3) * 2;
     const groundDepth = (ARENA_HALF_Z + 3) * 2;
+    const geometry = new PlaneGeometry(groundWidth, groundDepth, TERRAIN_MESH_SEGMENTS, TERRAIN_MESH_SEGMENTS);
+    const positions = geometry.attributes.position;
+    const colors = new Float32Array(positions.count * 3);
+    for (let i = 0; i < positions.count; i++) {
+      const localX = positions.getX(i);
+      const localY = positions.getY(i);
+      const worldX = localX;
+      const worldZ = -localY;
+      const height = terrainHeight(worldX, worldZ);
+      positions.setZ(i, height);
+      const biome = terrainBiomeValue(worldX, worldZ);
+      const color = terrainColorAt(height, biome);
+      colors[i * 3] = color.r;
+      colors[i * 3 + 1] = color.g;
+      colors[i * 3 + 2] = color.b;
+    }
+    geometry.computeVertexNormals();
+    geometry.setAttribute("color", new BufferAttribute(colors, 3));
     const ground = new Mesh(
-      new PlaneGeometry(groundWidth, groundDepth),
-      new MeshStandardMaterial({ color: "#4a7c4a" })
+      geometry,
+      new MeshStandardMaterial({ vertexColors: true })
     );
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = true;
@@ -31545,8 +32496,10 @@ void main() {
     );
   }
   function segmentIntersectsWallBox(x0, y0, z0, x1, y1, z1, box2) {
-    const minB = [box2.minX, 0, box2.minZ];
-    const maxB = [box2.maxX, TOWN_WALL_HEIGHT, box2.maxZ];
+    const baseY = box2.baseY ?? 0;
+    const wallHeight = box2.wallHeight ?? TOWN_WALL_HEIGHT;
+    const minB = [box2.minX, baseY, box2.minZ];
+    const maxB = [box2.maxX, baseY + wallHeight, box2.maxZ];
     const p = [x0, y0, z0];
     const d = [x1 - x0, y1 - y0, z1 - z0];
     let tMin = 0;
@@ -31565,25 +32518,25 @@ void main() {
     }
     return true;
   }
-  function buildTownWallSegment(scene, minX, maxX, minZ, maxZ, wallSegments) {
+  function buildTownWallSegment(scene, minX, maxX, minZ, maxZ, wallSegments, baseY = 0, color = TOWN_WALL_COLOR, wallHeight = TOWN_WALL_HEIGHT) {
     const mesh = new Mesh(
-      new BoxGeometry(maxX - minX, TOWN_WALL_HEIGHT, maxZ - minZ),
-      new MeshStandardMaterial({ color: TOWN_WALL_COLOR })
+      new BoxGeometry(maxX - minX, wallHeight, maxZ - minZ),
+      new MeshStandardMaterial({ color })
     );
-    mesh.position.set((minX + maxX) / 2, TOWN_WALL_HEIGHT / 2, (minZ + maxZ) / 2);
+    mesh.position.set((minX + maxX) / 2, baseY + wallHeight / 2, (minZ + maxZ) / 2);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     scene.add(mesh);
-    wallSegments.push({ mesh, minX, maxX, minZ, maxZ, faded: false });
+    wallSegments.push({ mesh, minX, maxX, minZ, maxZ, baseY, wallHeight, faded: false });
   }
-  function buildTownDoorPost(scene, x, z) {
+  function buildTownDoorPost(scene, x, z, baseY = 0) {
     const size = TOWN_WALL_THICKNESS + 0.3;
     const height = TOWN_WALL_HEIGHT * 1.15;
     const mesh = new Mesh(
       new BoxGeometry(size, height, size),
       new MeshStandardMaterial({ color: TOWN_DOOR_POST_COLOR })
     );
-    mesh.position.set(x, height / 2, z);
+    mesh.position.set(x, baseY + height / 2, z);
     mesh.castShadow = true;
     scene.add(mesh);
   }
@@ -31613,29 +32566,161 @@ void main() {
     sprite.scale.set(canvas.width / canvas.height * 1.1, 1.1, 1);
     return sprite;
   }
-  function buildAreaWalls(scene, centerX, centerZ, half, wallSegments) {
+  function setGroupTransparent(group, on) {
+    group.traverse((obj) => {
+      if (obj.isMesh) {
+        obj.material.transparent = true;
+        obj.material.opacity = on ? 0.3 : 1;
+        obj.material.needsUpdate = true;
+      }
+    });
+  }
+  function setGroupHidden(group, hidden) {
+    group.visible = !hidden;
+  }
+  function buildAreaWalls(scene, centerX, centerZ, half, wallSegments, baseY = 0, color = TOWN_WALL_COLOR, wallHeight = TOWN_WALL_HEIGHT, hasDoors = true) {
     const H = half;
     const T = TOWN_WALL_THICKNESS;
     const D = TOWN_DOOR_HALF_WIDTH;
     const postOffset = D + T / 2 + 0.2;
+    if (!hasDoors) {
+      for (const zOff of [-H, H]) {
+        const z = centerZ + zOff;
+        buildTownWallSegment(scene, centerX - H, centerX + H, z - T / 2, z + T / 2, wallSegments, baseY, color, wallHeight);
+      }
+      for (const xOff of [-H, H]) {
+        const x = centerX + xOff;
+        buildTownWallSegment(scene, x - T / 2, x + T / 2, centerZ - H, centerZ + H, wallSegments, baseY, color, wallHeight);
+      }
+      return;
+    }
     for (const zOff of [-H, H]) {
       const z = centerZ + zOff;
-      buildTownWallSegment(scene, centerX - H, centerX - D, z - T / 2, z + T / 2, wallSegments);
-      buildTownWallSegment(scene, centerX + D, centerX + H, z - T / 2, z + T / 2, wallSegments);
-      buildTownDoorPost(scene, centerX - postOffset, z);
-      buildTownDoorPost(scene, centerX + postOffset, z);
+      buildTownWallSegment(scene, centerX - H, centerX - D, z - T / 2, z + T / 2, wallSegments, baseY, color, wallHeight);
+      buildTownWallSegment(scene, centerX + D, centerX + H, z - T / 2, z + T / 2, wallSegments, baseY, color, wallHeight);
+      buildTownDoorPost(scene, centerX - postOffset, z, baseY);
+      buildTownDoorPost(scene, centerX + postOffset, z, baseY);
     }
     for (const xOff of [-H, H]) {
       const x = centerX + xOff;
-      buildTownWallSegment(scene, x - T / 2, x + T / 2, centerZ - H, centerZ - D, wallSegments);
-      buildTownWallSegment(scene, x - T / 2, x + T / 2, centerZ + D, centerZ + H, wallSegments);
-      buildTownDoorPost(scene, x, centerZ - postOffset);
-      buildTownDoorPost(scene, x, centerZ + postOffset);
+      buildTownWallSegment(scene, x - T / 2, x + T / 2, centerZ - H, centerZ - D, wallSegments, baseY, color, wallHeight);
+      buildTownWallSegment(scene, x - T / 2, x + T / 2, centerZ + D, centerZ + H, wallSegments, baseY, color, wallHeight);
+      buildTownDoorPost(scene, x, centerZ - postOffset, baseY);
+      buildTownDoorPost(scene, x, centerZ + postOffset, baseY);
     }
   }
+  function buildGlophicsFloor(scene, floor, wallSegmentsByFloor) {
+    const group = new Group();
+    scene.add(group);
+    const segments = [];
+    buildAreaWalls(group, 0, 0, TOWN_HALF_X, segments, floor.y, floor.wallColor, floor.wallHeight ?? TOWN_WALL_HEIGHT, floor.hasDoors ?? true);
+    wallSegmentsByFloor[floor.index] = segments;
+    const slab = new Mesh(
+      new PlaneGeometry(TOWN_HALF_X * 2, TOWN_HALF_Z * 2),
+      new MeshStandardMaterial({ color: floor.floorColor })
+    );
+    slab.rotation.x = -Math.PI / 2;
+    slab.position.y = floor.y + 0.015;
+    slab.receiveShadow = true;
+    slab.castShadow = true;
+    group.add(slab);
+    return group;
+  }
+  function buildGlophicsRoof(scene) {
+    const group = new Group();
+    scene.add(group);
+    const roof = new Mesh(
+      new BoxGeometry(TOWN_HALF_X * 2 + TOWN_WALL_THICKNESS * 2, 0.3, TOWN_HALF_Z * 2 + TOWN_WALL_THICKNESS * 2),
+      new MeshStandardMaterial({ color: GLOPHICS_ROOF_COLOR })
+    );
+    roof.position.y = GLOPHICS_ROOF_Y;
+    roof.castShadow = true;
+    roof.receiveShadow = true;
+    group.add(roof);
+    return group;
+  }
+  function buildStairsTileTexture(label, color) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx2d = canvas.getContext("2d");
+    ctx2d.fillStyle = color;
+    ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+    ctx2d.strokeStyle = "rgba(0,0,0,0.55)";
+    ctx2d.lineWidth = 8;
+    ctx2d.strokeRect(4, 4, canvas.width - 8, canvas.height - 8);
+    ctx2d.fillStyle = "rgba(0,0,0,0.8)";
+    ctx2d.font = "bold 30px sans-serif";
+    ctx2d.textAlign = "center";
+    ctx2d.textBaseline = "middle";
+    ctx2d.fillText(label, canvas.width / 2, canvas.height / 2 + 2);
+    const texture = new CanvasTexture(canvas);
+    texture.minFilter = LinearFilter;
+    return texture;
+  }
+  function buildGlophicsStairs(scene, glophicsFloorGroups) {
+    const groupForFloor = (floorIndex) => glophicsFloorGroups.find((f) => f.index === floorIndex)?.group;
+    for (const t of GLOPHICS_STAIR_TRANSITIONS) {
+      const upTile = new Mesh(
+        new PlaneGeometry(1.4, 1.4),
+        new MeshBasicMaterial({ map: buildStairsTileTexture("UP", "#f2c94c") })
+      );
+      upTile.rotation.x = -Math.PI / 2;
+      upTile.position.set(t.x, t.belowY + 0.02, t.z);
+      (groupForFloor(t.belowFloor) || scene).add(upTile);
+      const downTile = new Mesh(
+        new PlaneGeometry(1.4, 1.4),
+        new MeshBasicMaterial({ map: buildStairsTileTexture("DOWN", "#f2994a") })
+      );
+      downTile.rotation.x = -Math.PI / 2;
+      downTile.position.set(t.x, t.aboveY + 0.02, t.z);
+      (groupForFloor(t.aboveFloor) || scene).add(downTile);
+    }
+  }
+  function buildCinemaScreenObject() {
+    const iframe = document.createElement("iframe");
+    iframe.width = String(CINEMA_SCREEN_PIXEL_WIDTH);
+    iframe.height = String(CINEMA_SCREEN_PIXEL_HEIGHT);
+    iframe.src = CINEMA_YOUTUBE_EMBED_URL;
+    iframe.style.border = "0";
+    iframe.allow = "autoplay; encrypted-media";
+    iframe.sandbox = "allow-scripts allow-same-origin allow-presentation";
+    const cssObject = new CSS3DObject(iframe);
+    cssObject.position.set(
+      CINEMA_SCREEN_X,
+      glophicsFloorY(CINEMA_SCREEN_FLOOR_INDEX) + CINEMA_SCREEN_Y_OFFSET,
+      CINEMA_SCREEN_Z
+    );
+    cssObject.scale.set(
+      CINEMA_SCREEN_WORLD_WIDTH / CINEMA_SCREEN_PIXEL_WIDTH,
+      CINEMA_SCREEN_WORLD_HEIGHT / CINEMA_SCREEN_PIXEL_HEIGHT,
+      1
+    );
+    return { cssObject, iframe };
+  }
+  var CINEMA_SEAT_ROW_Z = [-1, 1, 3];
+  var CINEMA_SEAT_COLOR = "#2b2b33";
+  function buildCinemaSeats(group, floorY) {
+    for (const z of CINEMA_SEAT_ROW_Z) {
+      const bench = new Mesh(
+        new BoxGeometry(4, 0.5, 0.6),
+        new MeshStandardMaterial({ color: CINEMA_SEAT_COLOR })
+      );
+      bench.position.set(CINEMA_SCREEN_X, floorY + 0.27, z);
+      bench.castShadow = true;
+      bench.receiveShadow = true;
+      group.add(bench);
+    }
+  }
+  function buildCinemaUsher(group, floorY) {
+    const rig = buildBlockyCharacter(USHER_COLORS, USHER_NAME);
+    rig.group.position.set(USHER_X, floorY, USHER_Z);
+    group.add(rig.group);
+    return rig;
+  }
   function buildTown(scene) {
-    const wallSegments = [];
-    buildAreaWalls(scene, 0, 0, TOWN_HALF_X, wallSegments);
+    const wallSegmentsByFloor = { 0: [] };
+    buildAreaWalls(scene, 0, 0, TOWN_HALF_X, wallSegmentsByFloor[0]);
     const plaza = new Mesh(
       new PlaneGeometry(TOWN_HALF_X * 2, TOWN_HALF_Z * 2),
       new MeshStandardMaterial({ color: TOWN_PLAZA_COLOR })
@@ -31647,7 +32732,20 @@ void main() {
     const sign2 = buildTownSign(TOWN_NAME);
     sign2.position.set(0, TOWN_WALL_HEIGHT + 1.3, 0);
     scene.add(sign2);
-    return wallSegments;
+    const glophicsFloorGroups = GLOPHICS_FLOORS.map((floor) => ({
+      index: floor.index,
+      group: buildGlophicsFloor(scene, floor, wallSegmentsByFloor)
+    }));
+    glophicsFloorGroups.push({ index: GLOPHICS_ROOF_INDEX, group: buildGlophicsRoof(scene) });
+    buildGlophicsStairs(scene, glophicsFloorGroups);
+    const cinemaFloor = GLOPHICS_FLOORS.find((f) => f.index === CINEMA_SCREEN_FLOOR_INDEX);
+    const cinemaFloorGroup = glophicsFloorGroups.find((f) => f.index === CINEMA_SCREEN_FLOOR_INDEX)?.group;
+    let cinemaUsherRig = null;
+    if (cinemaFloor && cinemaFloorGroup) {
+      buildCinemaSeats(cinemaFloorGroup, cinemaFloor.y);
+      cinemaUsherRig = buildCinemaUsher(cinemaFloorGroup, cinemaFloor.y);
+    }
+    return { wallSegmentsByFloor, glophicsFloorGroups, sign: sign2, cinemaUsherRig };
   }
   function buildJaredShop(scene) {
     const counter = new Mesh(
@@ -31675,6 +32773,7 @@ void main() {
     const sign2 = buildTownSign(`${JARED_NAME}'s Shop`);
     sign2.position.set(JARED_X, 2.9, JARED_Z - 2);
     scene.add(sign2);
+    return sign2;
   }
   function buildKarirsBoardSign() {
     const canvas = document.createElement("canvas");
@@ -31763,6 +32862,148 @@ void main() {
     scene.add(board.sprite);
     return { board, tvGroup };
   }
+  function buildKarirsTrack(scene) {
+    const centerZ = (KARIRS_TRACK_START_Z + KARIRS_TRACK_FINISH_Z) / 2;
+    const trackLength = KARIRS_TRACK_START_Z - KARIRS_TRACK_FINISH_Z;
+    const dirt = new Mesh(
+      new PlaneGeometry(KARIRS_TRACK_WIDTH, trackLength),
+      new MeshStandardMaterial({ color: KARIRS_FIELD_COLOR })
+    );
+    dirt.rotation.x = -Math.PI / 2;
+    dirt.position.set(KARIRS_FIELD_X, 0.01, centerZ);
+    dirt.receiveShadow = true;
+    scene.add(dirt);
+    const laneLineMat = new MeshBasicMaterial({ color: "#f5f5f4" });
+    for (let i = 0; i <= KARIRS_TRACK_LANE_COUNT; i++) {
+      const x = KARIRS_FIELD_X + (i - KARIRS_TRACK_LANE_COUNT / 2) * KARIRS_TRACK_LANE_SPACING;
+      const line = new Mesh(new PlaneGeometry(0.08, trackLength), laneLineMat);
+      line.rotation.x = -Math.PI / 2;
+      line.position.set(x, 0.02, centerZ);
+      scene.add(line);
+    }
+    const startLine = new Mesh(
+      new PlaneGeometry(KARIRS_TRACK_WIDTH, 0.4),
+      new MeshBasicMaterial({ color: "#f5f5f4" })
+    );
+    startLine.rotation.x = -Math.PI / 2;
+    startLine.position.set(KARIRS_FIELD_X, 0.02, KARIRS_TRACK_START_Z);
+    scene.add(startLine);
+    const finishLine = new Mesh(
+      new PlaneGeometry(KARIRS_TRACK_WIDTH, 0.4),
+      new MeshBasicMaterial({ color: "#facc15" })
+    );
+    finishLine.rotation.x = -Math.PI / 2;
+    finishLine.position.set(KARIRS_FIELD_X, 0.02, KARIRS_TRACK_FINISH_Z);
+    scene.add(finishLine);
+  }
+  var KARIRS_RACER_COLORS = ["#f59e0b", "#3b82f6", "#ef4444", "#10b981"];
+  var KARIRS_GAIT_SPRINT_SPEED = 6.7;
+  var KARIRS_GAIT_STOP_SPEED_THRESHOLD = 0.35;
+  var KARIRS_GAIT_WALK_FREQUENCY = 3.5;
+  var KARIRS_GAIT_SPRINT_FREQUENCY = 9;
+  var KARIRS_GAIT_SPRINT_STRIDE = 0.55;
+  var KARIRS_GAIT_SPRINT_BOUNCE = 0.12;
+  var KARIRS_GAIT_HEAD_BOB = 0.055;
+  var KARIRS_GAIT_EXHAUSTED_SPEED_THRESHOLD = 1.4;
+  var KARIRS_GAIT_EXHAUSTED_LEAN = 0.38;
+  var KARIRS_GAIT_EXHAUSTED_HEAD_DROOP = 0.22;
+  var KARIRS_GAIT_EXHAUSTED_ARM_FORWARD = -1.05;
+  var KARIRS_GAIT_EXHAUSTED_TREMBLE = 0.06;
+  var KARIRS_GAIT_EXHAUSTED_BREATH_FREQUENCY = 2.6;
+  var KARIRS_GAIT_EXHAUSTED_BREATH_AMPLITUDE = 0.05;
+  var KARIRS_GAIT_POSE_EASE_RATE = 4;
+  var KARIRS_RACER_TORSO_Y = 0.82;
+  function buildKarirsRacerRig(scene, color) {
+    const group = new Group();
+    group.rotation.y = Math.PI;
+    const torsoMaterial = new MeshStandardMaterial({ color });
+    const torso = new Mesh(new RoundedBoxGeometry(0.7, 0.9, 0.46, 3, 0.09), torsoMaterial);
+    const torsoTop = KARIRS_RACER_TORSO_Y + 0.9 / 2;
+    torso.position.y = KARIRS_RACER_TORSO_Y;
+    torso.castShadow = true;
+    group.add(torso);
+    const headMaterial = new MeshStandardMaterial({ color });
+    const headSize = 0.62;
+    const headBaseY = torsoTop + headSize / 2 - torso.position.y;
+    const head = new Mesh(new RoundedBoxGeometry(headSize, headSize, headSize, 3, 0.07), headMaterial);
+    head.position.y = headBaseY;
+    head.castShadow = true;
+    torso.add(head);
+    const eyeMaterial = new MeshBasicMaterial({ color: "#171717" });
+    const eyeGeometry = new SphereGeometry(0.05, 8, 8);
+    const leftEye = new Mesh(eyeGeometry, eyeMaterial);
+    leftEye.position.set(-0.13, 0.03, headSize / 2 + 0.01);
+    const rightEye = new Mesh(eyeGeometry, eyeMaterial);
+    rightEye.position.set(0.13, 0.03, headSize / 2 + 0.01);
+    head.add(leftEye, rightEye);
+    const limbMaterial = new MeshStandardMaterial({ color: "#262626" });
+    const shoeMaterial = new MeshStandardMaterial({ color: "#f5f5f5" });
+    const handMaterial = new MeshStandardMaterial({ color });
+    function limb(w, h, d, x, y, cap) {
+      const mesh = new Mesh(new RoundedBoxGeometry(w, h, d, 2, Math.min(w, d) * 0.25), limbMaterial);
+      mesh.position.set(x, y, 0);
+      mesh.geometry.translate(0, -h / 2, 0);
+      mesh.castShadow = true;
+      const capMesh = cap === "shoe" ? new Mesh(new RoundedBoxGeometry(w * 1.2, h * 0.22, d * 1.5, 2, 0.03), shoeMaterial) : new Mesh(new SphereGeometry(w * 0.62, 10, 8), handMaterial);
+      capMesh.position.set(0, cap === "shoe" ? -h + h * 0.22 / 2 : -h, cap === "shoe" ? d * 0.18 : 0);
+      capMesh.castShadow = true;
+      mesh.add(capMesh);
+      return mesh;
+    }
+    const leftLeg = limb(0.22, 0.56, 0.22, -0.18, 0.38, "shoe");
+    const rightLeg = limb(0.22, 0.56, 0.22, 0.18, 0.38, "shoe");
+    const leftArm = limb(0.16, 0.46, 0.16, -0.43, 1.2, "hand");
+    const rightArm = limb(0.16, 0.46, 0.16, 0.43, 1.2, "hand");
+    group.add(leftLeg, rightLeg, leftArm, rightArm);
+    const canvas = document.createElement("canvas");
+    canvas.width = 256;
+    canvas.height = 64;
+    const ctx2d = canvas.getContext("2d");
+    const texture = new CanvasTexture(canvas);
+    texture.minFilter = LinearFilter;
+    const labelMaterial = new SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+    const label = new Sprite(labelMaterial);
+    label.renderOrder = 999;
+    label.scale.set(1.6, 0.4, 1);
+    label.position.y = 2.15;
+    group.add(label);
+    group.position.set(KARIRS_FIELD_X, 0, KARIRS_TRACK_START_Z);
+    scene.add(group);
+    return {
+      group,
+      torso,
+      torsoMaterial,
+      head,
+      headBaseY,
+      leftLeg,
+      rightLeg,
+      leftArm,
+      rightArm,
+      canvas,
+      ctx: ctx2d,
+      texture,
+      label,
+      currentName: null,
+      z: KARIRS_TRACK_START_Z,
+      // Gait state — see updateKarirsTrackVisual's own per-frame block,
+      // ported from render3d.js's update() almost line-for-line.
+      prevPos: NaN,
+      gaitPhase: 0,
+      exhaustedBlend: 0
+    };
+  }
+  function updateKarirsRacerLabel(marker, name) {
+    const { canvas, ctx: ctx2d, texture } = marker;
+    ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+    ctx2d.fillStyle = "rgba(0,0,0,0.6)";
+    ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+    ctx2d.fillStyle = "#ffffff";
+    ctx2d.font = "bold 28px sans-serif";
+    ctx2d.textAlign = "center";
+    ctx2d.textBaseline = "middle";
+    ctx2d.fillText(name, canvas.width / 2, canvas.height / 2);
+    texture.needsUpdate = true;
+  }
   function buildLubaArea(scene, wallSegments) {
     buildAreaWalls(scene, LUBA_X, LUBA_Z, LUBA_HALF, wallSegments);
     const plaza = new Mesh(
@@ -31776,6 +33017,7 @@ void main() {
     const sign2 = buildTownSign(LUBA_NAME);
     sign2.position.set(LUBA_X, TOWN_WALL_HEIGHT + 1.3, LUBA_Z);
     scene.add(sign2);
+    return { sign: sign2 };
   }
   function buildChessBoardTexture() {
     const canvas = document.createElement("canvas");
@@ -31861,7 +33103,15 @@ void main() {
     scene.add(sign2);
     const board1 = buildChessTable(scene, CHESS_BOARD_1_X, CHESS_BOARD_1_Z, 0);
     const board2 = buildChessTable(scene, CHESS_BOARD_2_X, CHESS_BOARD_2_Z, 0);
-    return { board1Group: board1.group, board1StatusSign: board1.statusSign, board2Group: board2.group, board2StatusSign: board2.statusSign };
+    const board3 = buildChessTable(scene, CHESS_BOARD_3_X, CHESS_BOARD_3_Z, 0);
+    return {
+      board1Group: board1.group,
+      board1StatusSign: board1.statusSign,
+      board2Group: board2.group,
+      board2StatusSign: board2.statusSign,
+      board3Group: board3.group,
+      board3StatusSign: board3.statusSign
+    };
   }
   function createScene(canvas) {
     const renderer = new WebGLRenderer({ canvas, antialias: true });
@@ -31947,16 +33197,29 @@ void main() {
     const canvasWrapEl = document.createElement("div");
     canvasWrapEl.style.position = "relative";
     canvasWrapEl.style.width = "100%";
-    canvasWrapEl.style.maxWidth = "720px";
+    canvasWrapEl.style.maxWidth = "1400px";
     wrap.appendChild(canvasWrapEl);
     const canvas = document.createElement("canvas");
     canvas.width = 640;
     canvas.height = 360;
     canvas.style.width = "100%";
-    canvas.style.maxWidth = "720px";
+    canvas.style.maxWidth = "1400px";
     canvas.style.display = "block";
     canvas.style.borderRadius = "4px";
     canvasWrapEl.appendChild(canvas);
+    const cssRenderer = new CSS3DRenderer();
+    cssRenderer.domElement.style.position = "absolute";
+    cssRenderer.domElement.style.top = "0";
+    cssRenderer.domElement.style.left = "0";
+    cssRenderer.domElement.style.pointerEvents = "none";
+    cssRenderer.setSize(canvas.width, canvas.height);
+    canvasWrapEl.appendChild(cssRenderer.domElement);
+    const cssScene = new Scene();
+    const cinemaScreen = buildCinemaScreenObject();
+    cssScene.add(cinemaScreen.cssObject);
+    let cinemaScreenShown = true;
+    let cinemaScreenUrl = CINEMA_YOUTUBE_EMBED_URL;
+    let cinemaProjectionist = null;
     const minimapCanvas = document.createElement("canvas");
     minimapCanvas.width = MINIMAP_SIZE;
     minimapCanvas.height = MINIMAP_SIZE;
@@ -31968,6 +33231,20 @@ void main() {
     minimapCanvas.style.zIndex = "15";
     canvasWrapEl.appendChild(minimapCanvas);
     const minimapCtx = minimapCanvas.getContext("2d");
+    const minimapAreaLabelEl = document.createElement("div");
+    minimapAreaLabelEl.style.position = "absolute";
+    minimapAreaLabelEl.style.top = "6px";
+    minimapAreaLabelEl.style.left = `${MINIMAP_SIZE + 6 + 6}px`;
+    minimapAreaLabelEl.style.padding = "3px 8px";
+    minimapAreaLabelEl.style.borderRadius = "4px";
+    minimapAreaLabelEl.style.background = "#00000066";
+    minimapAreaLabelEl.style.color = "#ffffffcc";
+    minimapAreaLabelEl.style.fontSize = "11px";
+    minimapAreaLabelEl.style.fontFamily = "inherit";
+    minimapAreaLabelEl.style.pointerEvents = "none";
+    minimapAreaLabelEl.style.zIndex = "15";
+    minimapAreaLabelEl.textContent = "Plains";
+    canvasWrapEl.appendChild(minimapAreaLabelEl);
     const staminaBarWrapEl = document.createElement("div");
     staminaBarWrapEl.style.position = "absolute";
     staminaBarWrapEl.style.left = "6px";
@@ -32077,7 +33354,9 @@ void main() {
         entity.chatBubble = null;
         return;
       }
-      entity.chatBubble.visible = Math.hypot(local.x - entity.x, local.z - entity.z) <= LABEL_VISIBLE_DISTANCE;
+      const entityFloor = entity.floor ?? local.currentFloor;
+      const sameArea = getAreaKey(entity.x, entity.z) === getAreaKey(local.x, local.z);
+      entity.chatBubble.visible = sameArea && entityFloor === local.currentFloor && Math.hypot(local.x - entity.x, local.z - entity.z) <= LABEL_VISIBLE_DISTANCE;
       if (!entity.chatBubble.visible) return;
       const anchor = computeBubbleAnchorWorld(entity);
       scaleChatBubble(anchor, entity.chatBubble, camera, lastHeight || canvas.height);
@@ -32109,7 +33388,7 @@ void main() {
       minimapCtx.strokeStyle = TOWN_WALL_COLOR;
       minimapCtx.lineWidth = 1.5;
       minimapCtx.strokeRect(tl.mx, tl.my, br.mx - tl.mx, br.my - tl.my);
-      minimapCtx.fillStyle = "#2b2b2b";
+      minimapCtx.fillStyle = "#ffffff";
       minimapCtx.font = "bold 8px sans-serif";
       minimapCtx.textAlign = "center";
       minimapCtx.textBaseline = "bottom";
@@ -32135,7 +33414,7 @@ void main() {
         vertices.reduce((sum, [, z]) => sum + z, 0) / vertices.length
       );
       const topMy = Math.min(...vertices.map(([x, z]) => worldToMinimap(x, z).my));
-      minimapCtx.fillStyle = "#2b2b2b";
+      minimapCtx.fillStyle = "#ffffff";
       minimapCtx.font = "bold 8px sans-serif";
       minimapCtx.textAlign = "center";
       minimapCtx.textBaseline = "bottom";
@@ -32160,7 +33439,9 @@ void main() {
       drawMinimapDot(KARRA_X, KARRA_Z, 3, KARRA_COLORS.body);
       drawMinimapDot(JARED_X, JARED_Z, 3, JARED_COLORS.body);
       drawMinimapDot(BOSS_RICK_X, BOSS_RICK_Z, 3, BOSS_RICK_COLORS.body);
+      drawMinimapDot(USHER_X, USHER_Z, 3, USHER_COLORS.body);
       for (const spawn of wildSpawns.values()) {
+        if (Math.hypot(local.x - spawn.x, local.z - spawn.z) > LABEL_VISIBLE_DISTANCE) continue;
         drawMinimapDot(spawn.x, spawn.z, 2.5, spawn.difficulty === "hard" ? WILD_LABEL_COLOR_HARD : WILD_LABEL_COLOR_EASY);
       }
       for (const peer of peers.values()) {
@@ -32487,6 +33768,17 @@ void main() {
     karraClaimBtn.style.marginBottom = "6px";
     karraClaimSectionEl.appendChild(karraClaimBtn);
     karraMenuEl.appendChild(karraClaimSectionEl);
+    const karraPracticeSectionEl = document.createElement("div");
+    const karraPracticeMsgEl = document.createElement("p");
+    karraPracticeMsgEl.style.margin = "0 0 6px 0";
+    karraPracticeMsgEl.style.display = "none";
+    karraPracticeSectionEl.appendChild(karraPracticeMsgEl);
+    const karraPracticeBtn = document.createElement("button");
+    karraPracticeBtn.textContent = "Practice Race";
+    karraPracticeBtn.style.fontSize = "11px";
+    karraPracticeBtn.style.marginBottom = "6px";
+    karraPracticeSectionEl.appendChild(karraPracticeBtn);
+    karraMenuEl.appendChild(karraPracticeSectionEl);
     const karraCancelBtn = document.createElement("button");
     karraCancelBtn.textContent = "Cancel";
     karraCancelBtn.style.fontSize = "11px";
@@ -32571,6 +33863,24 @@ void main() {
     const playerOptionsMenuBodyEl = document.createElement("div");
     playerOptionsMenuEl.appendChild(playerOptionsMenuBodyEl);
     wrap.appendChild(playerOptionsMenuEl);
+    const usherMenuEl = document.createElement("div");
+    usherMenuEl.style.position = "absolute";
+    usherMenuEl.style.display = "none";
+    usherMenuEl.style.background = "#1a1a1aee";
+    usherMenuEl.style.border = "1px solid #3333334d";
+    usherMenuEl.style.borderRadius = "4px";
+    usherMenuEl.style.padding = "6px";
+    usherMenuEl.style.zIndex = "10";
+    usherMenuEl.style.fontSize = "12px";
+    usherMenuEl.style.width = "220px";
+    const usherMenuLabel = document.createElement("strong");
+    usherMenuLabel.textContent = USHER_NAME;
+    usherMenuLabel.style.display = "block";
+    usherMenuLabel.style.marginBottom = "4px";
+    usherMenuEl.appendChild(usherMenuLabel);
+    const usherMenuBodyEl = document.createElement("div");
+    usherMenuEl.appendChild(usherMenuBodyEl);
+    wrap.appendChild(usherMenuEl);
     const pvpInviteBannerEl = document.createElement("div");
     pvpInviteBannerEl.style.position = "absolute";
     pvpInviteBannerEl.style.display = "none";
@@ -32695,6 +34005,81 @@ void main() {
     chessLeaveWarningTextEl.style.margin = "0";
     chessLeaveWarningEl.appendChild(chessLeaveWarningTextEl);
     wrap.appendChild(chessLeaveWarningEl);
+    const boardHostChoiceMenuEl = document.createElement("div");
+    boardHostChoiceMenuEl.style.position = "absolute";
+    boardHostChoiceMenuEl.style.display = "none";
+    boardHostChoiceMenuEl.style.background = "#1a1a1aee";
+    boardHostChoiceMenuEl.style.border = "1px solid #3333334d";
+    boardHostChoiceMenuEl.style.borderRadius = "4px";
+    boardHostChoiceMenuEl.style.padding = "6px";
+    boardHostChoiceMenuEl.style.zIndex = "10";
+    boardHostChoiceMenuEl.style.fontSize = "12px";
+    boardHostChoiceMenuEl.style.width = "180px";
+    const boardHostChoiceLabel = document.createElement("strong");
+    boardHostChoiceLabel.textContent = "Host a game here";
+    boardHostChoiceLabel.style.display = "block";
+    boardHostChoiceLabel.style.marginBottom = "4px";
+    boardHostChoiceMenuEl.appendChild(boardHostChoiceLabel);
+    const boardHostChoiceBodyEl = document.createElement("div");
+    boardHostChoiceMenuEl.appendChild(boardHostChoiceBodyEl);
+    wrap.appendChild(boardHostChoiceMenuEl);
+    const damaJoinMenuEl = document.createElement("div");
+    damaJoinMenuEl.style.position = "absolute";
+    damaJoinMenuEl.style.display = "none";
+    damaJoinMenuEl.style.background = "#1a1a1aee";
+    damaJoinMenuEl.style.border = "1px solid #3333334d";
+    damaJoinMenuEl.style.borderRadius = "4px";
+    damaJoinMenuEl.style.padding = "6px";
+    damaJoinMenuEl.style.zIndex = "10";
+    damaJoinMenuEl.style.fontSize = "12px";
+    damaJoinMenuEl.style.width = "180px";
+    const damaJoinMenuLabel = document.createElement("strong");
+    damaJoinMenuLabel.textContent = "Dama Table";
+    damaJoinMenuLabel.style.display = "block";
+    damaJoinMenuLabel.style.marginBottom = "4px";
+    damaJoinMenuEl.appendChild(damaJoinMenuLabel);
+    const damaJoinMenuBodyEl = document.createElement("div");
+    damaJoinMenuEl.appendChild(damaJoinMenuBodyEl);
+    wrap.appendChild(damaJoinMenuEl);
+    const damaWaitingModalEl = document.createElement("div");
+    damaWaitingModalEl.style.position = "absolute";
+    damaWaitingModalEl.style.display = "none";
+    damaWaitingModalEl.style.bottom = "8px";
+    damaWaitingModalEl.style.left = "8px";
+    damaWaitingModalEl.style.width = "200px";
+    damaWaitingModalEl.style.background = "#1a1a1aee";
+    damaWaitingModalEl.style.border = "1px solid #3333334d";
+    damaWaitingModalEl.style.borderRadius = "4px";
+    damaWaitingModalEl.style.padding = "6px 8px";
+    damaWaitingModalEl.style.zIndex = "20";
+    damaWaitingModalEl.style.fontSize = "12px";
+    wrap.appendChild(damaWaitingModalEl);
+    const { heading: damaWaitingHeadingEl, closeBtn: damaWaitingCloseBtn, body: damaWaitingBodyEl } = setupModalCard(damaWaitingModalEl, "50%");
+    damaWaitingHeadingEl.textContent = "Dama";
+    damaWaitingCloseBtn.addEventListener("click", () => {
+      if (myHostedDamaBoardId != null) socket.sendDamaCancelHost(myHostedDamaBoardId);
+    });
+    const damaMatchModalEl = document.createElement("div");
+    damaMatchModalEl.style.position = "absolute";
+    damaMatchModalEl.style.display = "none";
+    damaMatchModalEl.style.inset = "0";
+    damaMatchModalEl.style.background = "#000000b3";
+    damaMatchModalEl.style.zIndex = "26";
+    damaMatchModalEl.style.alignItems = "center";
+    damaMatchModalEl.style.justifyContent = "center";
+    const damaMatchCardEl = document.createElement("div");
+    damaMatchCardEl.style.background = "#1a1a1aee";
+    damaMatchCardEl.style.border = "1px solid #3333334d";
+    damaMatchCardEl.style.borderRadius = "6px";
+    damaMatchCardEl.style.padding = "10px";
+    damaMatchCardEl.style.width = "300px";
+    damaMatchCardEl.style.fontSize = "12px";
+    damaMatchCardEl.style.display = "flex";
+    damaMatchModalEl.appendChild(damaMatchCardEl);
+    wrap.appendChild(damaMatchModalEl);
+    const { heading: damaMatchHeadingEl, closeBtn: damaMatchCloseBtn, body: damaMatchBodyEl } = setupModalCard(damaMatchCardEl, "80%");
+    damaMatchHeadingEl.textContent = "Dama";
+    damaMatchCloseBtn.addEventListener("click", () => hideDamaMatchModal());
     const lubaLobbyModalEl = document.createElement("div");
     lubaLobbyModalEl.style.position = "absolute";
     lubaLobbyModalEl.style.display = "none";
@@ -32846,6 +34231,38 @@ void main() {
     devMenuPanelEl.appendChild(devVisionLabel);
     devMenuPanelEl.appendChild(battleButton);
     devMenuPanelEl.appendChild(teamBattleButton);
+    const charMovementsButton = document.createElement("button");
+    charMovementsButton.textContent = "\u{1F57A} Character Movements";
+    charMovementsButton.style.fontSize = "11px";
+    charMovementsButton.style.display = "block";
+    charMovementsButton.style.width = "100%";
+    charMovementsButton.style.marginTop = "4px";
+    charMovementsButton.style.cursor = "pointer";
+    devMenuPanelEl.appendChild(charMovementsButton);
+    const poseDesignerButton = document.createElement("button");
+    poseDesignerButton.textContent = "\u{1F3A8} Pose Designer";
+    poseDesignerButton.style.fontSize = "11px";
+    poseDesignerButton.style.display = "block";
+    poseDesignerButton.style.width = "100%";
+    poseDesignerButton.style.marginTop = "4px";
+    poseDesignerButton.style.cursor = "pointer";
+    devMenuPanelEl.appendChild(poseDesignerButton);
+    const cameraDesignerButton = document.createElement("button");
+    cameraDesignerButton.textContent = "\u{1F3A5} Camera Designer";
+    cameraDesignerButton.style.fontSize = "11px";
+    cameraDesignerButton.style.display = "block";
+    cameraDesignerButton.style.width = "100%";
+    cameraDesignerButton.style.marginTop = "4px";
+    cameraDesignerButton.style.cursor = "pointer";
+    devMenuPanelEl.appendChild(cameraDesignerButton);
+    const damaTestButton = document.createElement("button");
+    damaTestButton.textContent = "\u{1F004} Test Dama";
+    damaTestButton.style.fontSize = "11px";
+    damaTestButton.style.display = "block";
+    damaTestButton.style.width = "100%";
+    damaTestButton.style.marginTop = "4px";
+    damaTestButton.style.cursor = "pointer";
+    devMenuPanelEl.appendChild(damaTestButton);
     wrap.appendChild(devMenuPanelEl);
     devMenuButton.addEventListener("click", () => {
       devMenuPanelEl.style.display = devMenuPanelEl.style.display === "none" ? "block" : "none";
@@ -32853,29 +34270,965 @@ void main() {
     devVisionToggle.addEventListener("change", () => {
       showWildVisionRange = devVisionToggle.checked;
     });
+    const CHARACTER_MOVEMENTS = [
+      { id: "idle", label: "Idle" },
+      { id: "walk", label: "Walk" },
+      { id: "ready", label: "Ready" },
+      { id: "attack", label: "Attack" },
+      { id: "defend", label: "Defend" },
+      { id: "cast", label: "Cast" }
+    ];
+    const charMovementsModalEl = document.createElement("div");
+    charMovementsModalEl.style.position = "absolute";
+    charMovementsModalEl.style.display = "none";
+    charMovementsModalEl.style.inset = "0";
+    charMovementsModalEl.style.background = "#000000b3";
+    charMovementsModalEl.style.zIndex = "26";
+    charMovementsModalEl.style.alignItems = "center";
+    charMovementsModalEl.style.justifyContent = "center";
+    const charMovementsCardEl = document.createElement("div");
+    charMovementsCardEl.style.background = "#1a1a1aee";
+    charMovementsCardEl.style.border = "1px solid #3333334d";
+    charMovementsCardEl.style.borderRadius = "6px";
+    charMovementsCardEl.style.padding = "10px";
+    charMovementsCardEl.style.width = "340px";
+    charMovementsCardEl.style.fontSize = "12px";
+    charMovementsCardEl.style.display = "flex";
+    charMovementsModalEl.appendChild(charMovementsCardEl);
+    wrap.appendChild(charMovementsModalEl);
+    const { heading: charMovementsHeadingEl, closeBtn: charMovementsCloseBtn, body: charMovementsBodyEl } = setupModalCard(charMovementsCardEl, "80%");
+    charMovementsHeadingEl.textContent = "Character Movements";
+    const charMovementsPreviewEl = document.createElement("div");
+    charMovementsBodyEl.appendChild(charMovementsPreviewEl);
+    const charMovementsButtonsRowEl = document.createElement("div");
+    charMovementsButtonsRowEl.style.display = "flex";
+    charMovementsButtonsRowEl.style.flexWrap = "wrap";
+    charMovementsButtonsRowEl.style.gap = "4px";
+    charMovementsButtonsRowEl.style.marginTop = "8px";
+    charMovementsBodyEl.appendChild(charMovementsButtonsRowEl);
+    let charMovementsPreview = null;
+    const charMovementButtonEls = [];
+    function setActiveMovementButton(activeId) {
+      for (const { id, btn } of charMovementButtonEls) {
+        btn.style.background = id === activeId ? "#0080ba6a" : "#c4c4c454";
+      }
+    }
+    for (const movement of CHARACTER_MOVEMENTS) {
+      const btn = document.createElement("button");
+      btn.textContent = movement.label;
+      btn.style.fontSize = "11px";
+      btn.style.color = "#ffffffaa";
+      btn.style.border = "unset";
+      btn.style.padding = "2px 10px";
+      btn.style.cursor = "pointer";
+      btn.addEventListener("click", () => {
+        charMovementsPreview?.setPose(movement.id);
+        setActiveMovementButton(movement.id);
+      });
+      charMovementsButtonsRowEl.appendChild(btn);
+      charMovementButtonEls.push({ id: movement.id, btn });
+    }
+    function hideCharMovementsModal() {
+      charMovementsModalEl.style.display = "none";
+      charMovementsPreview?.dispose();
+      charMovementsPreview = null;
+    }
+    charMovementsCloseBtn.addEventListener("click", hideCharMovementsModal);
+    charMovementsButton.addEventListener("click", () => {
+      devMenuPanelEl.style.display = "none";
+      charMovementsModalEl.style.display = "flex";
+      charMovementsPreview = mountPreview(charMovementsPreviewEl, localColors);
+      setActiveMovementButton("idle");
+    });
+    const poseDesignerValues = poseDesignerDefaultValues();
+    let poseDesignerKeyframes = [];
+    let poseDesignerPlaying = false;
+    let poseDesignerPlaybackMs = 0;
+    let poseDesignerPreview = null;
+    function poseDesignerFrame(rig, dt) {
+      if (poseDesignerPlaying && poseDesignerKeyframes.length > 0) {
+        poseDesignerPlaybackMs += dt * 1e3;
+        playPoseKeyframes(rig, poseDesignerKeyframes, poseDesignerPlaybackMs);
+      } else {
+        applyPoseDesignerValues(rig, poseDesignerValues);
+      }
+    }
+    const poseDesignerModalEl = document.createElement("div");
+    poseDesignerModalEl.style.position = "absolute";
+    poseDesignerModalEl.style.display = "none";
+    poseDesignerModalEl.style.inset = "0";
+    poseDesignerModalEl.style.background = "#000000b3";
+    poseDesignerModalEl.style.zIndex = "26";
+    poseDesignerModalEl.style.alignItems = "center";
+    poseDesignerModalEl.style.justifyContent = "center";
+    const poseDesignerCardEl = document.createElement("div");
+    poseDesignerCardEl.style.background = "#1a1a1aee";
+    poseDesignerCardEl.style.border = "1px solid #3333334d";
+    poseDesignerCardEl.style.borderRadius = "6px";
+    poseDesignerCardEl.style.padding = "10px";
+    poseDesignerCardEl.style.width = "min(94vw, 760px)";
+    poseDesignerCardEl.style.fontSize = "11px";
+    poseDesignerCardEl.style.display = "flex";
+    poseDesignerModalEl.appendChild(poseDesignerCardEl);
+    wrap.appendChild(poseDesignerModalEl);
+    const { heading: poseDesignerHeadingEl, closeBtn: poseDesignerCloseBtn, body: poseDesignerBodyEl } = setupModalCard(poseDesignerCardEl, "85%");
+    poseDesignerHeadingEl.textContent = "Pose Designer";
+    poseDesignerBodyEl.style.overflow = "hidden";
+    const poseDesignerLayoutEl = document.createElement("div");
+    poseDesignerLayoutEl.style.display = "flex";
+    poseDesignerLayoutEl.style.flexWrap = "wrap";
+    poseDesignerLayoutEl.style.gap = "10px";
+    poseDesignerBodyEl.appendChild(poseDesignerLayoutEl);
+    const poseDesignerPreviewColEl = document.createElement("div");
+    poseDesignerPreviewColEl.style.flex = "0 0 320px";
+    poseDesignerPreviewColEl.style.maxHeight = "70vh";
+    poseDesignerPreviewColEl.style.overflowY = "auto";
+    poseDesignerLayoutEl.appendChild(poseDesignerPreviewColEl);
+    const poseDesignerControlsColEl = document.createElement("div");
+    poseDesignerControlsColEl.style.flex = "1 1 280px";
+    poseDesignerControlsColEl.style.minWidth = "260px";
+    poseDesignerControlsColEl.style.maxHeight = "70vh";
+    poseDesignerControlsColEl.style.overflowY = "auto";
+    poseDesignerLayoutEl.appendChild(poseDesignerControlsColEl);
+    const poseDesignerPreviewEl = document.createElement("div");
+    poseDesignerPreviewColEl.appendChild(poseDesignerPreviewEl);
+    const poseDesignerNameLabel = document.createElement("label");
+    poseDesignerNameLabel.style.display = "flex";
+    poseDesignerNameLabel.style.gap = "6px";
+    poseDesignerNameLabel.style.alignItems = "center";
+    poseDesignerNameLabel.style.margin = "8px 0 4px 0";
+    const poseDesignerNameInput = document.createElement("input");
+    poseDesignerNameInput.type = "text";
+    poseDesignerNameInput.placeholder = "e.g. wave, bow, taunt";
+    poseDesignerNameInput.style.flex = "1";
+    poseDesignerNameLabel.append(document.createTextNode("Name"), poseDesignerNameInput);
+    poseDesignerControlsColEl.appendChild(poseDesignerNameLabel);
+    const POSE_OVERRIDE_SLOTS = [
+      { id: "idle", label: "Idle" },
+      { id: "walk", label: "Walk" },
+      { id: "ready", label: "Ready" },
+      { id: "attack", label: "Attack" },
+      { id: "defend", label: "Defend" },
+      { id: "cast", label: "Cast" }
+    ];
+    const poseDesignerSlotLabel = document.createElement("label");
+    poseDesignerSlotLabel.style.display = "flex";
+    poseDesignerSlotLabel.style.gap = "6px";
+    poseDesignerSlotLabel.style.alignItems = "center";
+    poseDesignerSlotLabel.style.margin = "0 0 4px 0";
+    const poseDesignerSlotSelect = document.createElement("select");
+    poseDesignerSlotSelect.style.flex = "1";
+    const poseDesignerNoSlotOpt = document.createElement("option");
+    poseDesignerNoSlotOpt.value = "";
+    poseDesignerNoSlotOpt.textContent = "(not saved to the game \u2014 export/import only)";
+    poseDesignerSlotSelect.appendChild(poseDesignerNoSlotOpt);
+    for (const slot of POSE_OVERRIDE_SLOTS) {
+      const opt = document.createElement("option");
+      opt.value = slot.id;
+      opt.textContent = slot.label;
+      poseDesignerSlotSelect.appendChild(opt);
+    }
+    poseDesignerSlotLabel.append(document.createTextNode("Pose slot"), poseDesignerSlotSelect);
+    poseDesignerControlsColEl.appendChild(poseDesignerSlotLabel);
+    const poseDesignerSlotBtnsRowEl = document.createElement("div");
+    poseDesignerSlotBtnsRowEl.style.display = "flex";
+    poseDesignerSlotBtnsRowEl.style.gap = "4px";
+    poseDesignerSlotBtnsRowEl.style.marginBottom = "4px";
+    const poseDesignerSaveToGameBtn = document.createElement("button");
+    poseDesignerSaveToGameBtn.textContent = "Save to Game";
+    poseDesignerSaveToGameBtn.style.fontSize = "11px";
+    poseDesignerSaveToGameBtn.style.flex = "1";
+    poseDesignerSaveToGameBtn.style.cursor = "pointer";
+    const poseDesignerResetToDefaultBtn = document.createElement("button");
+    poseDesignerResetToDefaultBtn.textContent = "Reset to Default";
+    poseDesignerResetToDefaultBtn.style.fontSize = "11px";
+    poseDesignerResetToDefaultBtn.style.flex = "1";
+    poseDesignerResetToDefaultBtn.style.cursor = "pointer";
+    poseDesignerSlotBtnsRowEl.append(poseDesignerSaveToGameBtn, poseDesignerResetToDefaultBtn);
+    poseDesignerControlsColEl.appendChild(poseDesignerSlotBtnsRowEl);
+    const poseDesignerRecreateBtn = document.createElement("button");
+    poseDesignerRecreateBtn.textContent = "Recreate Built-in as Keyframes";
+    poseDesignerRecreateBtn.style.fontSize = "11px";
+    poseDesignerRecreateBtn.style.display = "block";
+    poseDesignerRecreateBtn.style.width = "100%";
+    poseDesignerRecreateBtn.style.marginBottom = "4px";
+    poseDesignerRecreateBtn.style.cursor = "pointer";
+    poseDesignerControlsColEl.appendChild(poseDesignerRecreateBtn);
+    poseDesignerRecreateBtn.addEventListener("click", () => {
+      const slotId = poseDesignerSlotSelect.value;
+      if (!slotId) {
+        poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+        poseDesignerSlotStatusEl.textContent = "Pick a pose slot above first.";
+        return;
+      }
+      poseDesignerKeyframes = sampleBuiltinPoseKeyframes(slotId);
+      loadPoseDesignerValues(poseDesignerKeyframes[0].values);
+      poseDesignerPlaying = poseDesignerKeyframes.length > 1;
+      poseDesignerPlaybackMs = 0;
+      poseDesignerPlayBtn.textContent = poseDesignerPlaying ? "\u23F9 Stop" : "\u25B6 Play";
+      renderPoseDesignerKeyframes();
+      poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+      poseDesignerSlotStatusEl.textContent = "Loaded the built-in animation \u2014 edit freely, then Save to Game when ready.";
+    });
+    const poseDesignerSlotStatusEl = document.createElement("p");
+    poseDesignerSlotStatusEl.style.fontSize = "10px";
+    poseDesignerSlotStatusEl.style.margin = "0 0 6px 0";
+    poseDesignerControlsColEl.appendChild(poseDesignerSlotStatusEl);
+    poseDesignerSlotSelect.addEventListener("change", () => {
+      poseDesignerSlotStatusEl.textContent = "";
+      const slotId = poseDesignerSlotSelect.value;
+      const existing = slotId ? poseOverrides[slotId] : null;
+      if (existing && existing.keyframes && existing.keyframes.length > 0) {
+        poseDesignerKeyframes = existing.keyframes.map((kf) => ({
+          values: { ...poseDesignerDefaultValues(), ...kf.values },
+          transitionMs: kf.transitionMs
+        }));
+        loadPoseDesignerValues(poseDesignerKeyframes[0].values);
+        poseDesignerPlaying = true;
+        poseDesignerPlaybackMs = 0;
+        poseDesignerPlayBtn.textContent = "\u23F9 Stop";
+      } else if (slotId) {
+        poseDesignerKeyframes = sampleBuiltinPoseKeyframes(slotId);
+        loadPoseDesignerValues(poseDesignerKeyframes[0].values);
+        poseDesignerPlaying = poseDesignerKeyframes.length > 1;
+        poseDesignerPlaybackMs = 0;
+        poseDesignerPlayBtn.textContent = poseDesignerPlaying ? "\u23F9 Stop" : "\u25B6 Play";
+      } else {
+        poseDesignerKeyframes = [];
+        loadPoseDesignerValues(poseDesignerDefaultValues());
+        poseDesignerPlaying = false;
+        poseDesignerPlayBtn.textContent = "\u25B6 Play";
+      }
+      poseDesignerNameInput.value = slotId ? POSE_OVERRIDE_SLOTS.find((s) => s.id === slotId).label : "";
+      renderPoseDesignerKeyframes();
+    });
+    poseDesignerSaveToGameBtn.addEventListener("click", async () => {
+      const slotId = poseDesignerSlotSelect.value;
+      if (!slotId) {
+        poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+        poseDesignerSlotStatusEl.textContent = "Pick a pose slot above first.";
+        return;
+      }
+      if (poseDesignerKeyframes.length === 0) {
+        poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+        poseDesignerSlotStatusEl.textContent = "Add at least one keyframe first.";
+        return;
+      }
+      poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+      poseDesignerSlotStatusEl.textContent = "Saving\u2026";
+      const keyframes = poseDesignerKeyframes.map((kf) => ({ values: { ...kf.values }, transitionMs: kf.transitionMs }));
+      const result = await ctx.onSavePoseOverride?.(slotId, keyframes);
+      if (result && result.ok) {
+        poseOverrides = result.poseOverrides || {};
+        poseDesignerSlotStatusEl.style.color = "#4ade80";
+        const label = POSE_OVERRIDE_SLOTS.find((s) => s.id === slotId).label;
+        poseDesignerSlotStatusEl.textContent = `Saved \u2014 your ${label} will use this now.`;
+      } else {
+        poseDesignerSlotStatusEl.style.color = "#ef4444";
+        poseDesignerSlotStatusEl.textContent = "Could not save \u2014 try again?";
+      }
+    });
+    poseDesignerResetToDefaultBtn.addEventListener("click", async () => {
+      const slotId = poseDesignerSlotSelect.value;
+      if (!slotId) {
+        poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+        poseDesignerSlotStatusEl.textContent = "Pick a pose slot above first.";
+        return;
+      }
+      poseDesignerSlotStatusEl.style.color = "#a3a3a3";
+      poseDesignerSlotStatusEl.textContent = "Resetting\u2026";
+      const result = await ctx.onResetPoseOverride?.(slotId);
+      if (result && result.ok) {
+        poseOverrides = result.poseOverrides || {};
+        poseDesignerKeyframes = [];
+        loadPoseDesignerValues(poseDesignerDefaultValues());
+        renderPoseDesignerKeyframes();
+        poseDesignerSlotStatusEl.style.color = "#4ade80";
+        const label = POSE_OVERRIDE_SLOTS.find((s) => s.id === slotId).label;
+        poseDesignerSlotStatusEl.textContent = `Reset \u2014 your ${label} is back to the built-in animation.`;
+      } else {
+        poseDesignerSlotStatusEl.style.color = "#ef4444";
+        poseDesignerSlotStatusEl.textContent = "Could not reset \u2014 try again?";
+      }
+    });
+    const poseDesignerSlidersEl = document.createElement("div");
+    poseDesignerSlidersEl.style.display = "flex";
+    poseDesignerSlidersEl.style.flexDirection = "column";
+    poseDesignerSlidersEl.style.gap = "3px";
+    poseDesignerControlsColEl.appendChild(poseDesignerSlidersEl);
+    const poseDesignerSliderEls = {};
+    for (const spec of POSE_DESIGNER_PARTS) {
+      const row = document.createElement("div");
+      const topRow = document.createElement("div");
+      topRow.style.display = "flex";
+      topRow.style.justifyContent = "space-between";
+      const labelEl = document.createElement("span");
+      labelEl.textContent = spec.label;
+      const valueEl = document.createElement("span");
+      valueEl.style.color = "#a3a3a3";
+      valueEl.textContent = "0.00";
+      topRow.append(labelEl, valueEl);
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.min = String(spec.min);
+      slider.max = String(spec.max);
+      slider.step = String(spec.step);
+      slider.value = "0";
+      slider.style.width = "100%";
+      slider.addEventListener("input", () => {
+        const v = parseFloat(slider.value);
+        poseDesignerValues[spec.key] = v;
+        valueEl.textContent = v.toFixed(2);
+      });
+      row.append(topRow, slider);
+      poseDesignerSlidersEl.appendChild(row);
+      poseDesignerSliderEls[spec.key] = { slider, valueEl };
+    }
+    function loadPoseDesignerValues(values) {
+      for (const spec of POSE_DESIGNER_PARTS) {
+        const v = values[spec.key] ?? 0;
+        poseDesignerValues[spec.key] = v;
+        const { slider, valueEl } = poseDesignerSliderEls[spec.key];
+        slider.value = String(v);
+        valueEl.textContent = v.toFixed(2);
+      }
+    }
+    const poseDesignerActionsRowEl = document.createElement("div");
+    poseDesignerActionsRowEl.style.display = "flex";
+    poseDesignerActionsRowEl.style.gap = "4px";
+    poseDesignerActionsRowEl.style.margin = "8px 0 4px 0";
+    const poseDesignerAddBtn = document.createElement("button");
+    poseDesignerAddBtn.textContent = "+ Keyframe";
+    poseDesignerAddBtn.style.fontSize = "11px";
+    poseDesignerAddBtn.style.cursor = "pointer";
+    const poseDesignerPlayBtn = document.createElement("button");
+    poseDesignerPlayBtn.textContent = "\u25B6 Play";
+    poseDesignerPlayBtn.style.fontSize = "11px";
+    poseDesignerPlayBtn.style.cursor = "pointer";
+    const poseDesignerClearBtn = document.createElement("button");
+    poseDesignerClearBtn.textContent = "Clear";
+    poseDesignerClearBtn.style.fontSize = "11px";
+    poseDesignerClearBtn.style.cursor = "pointer";
+    poseDesignerActionsRowEl.append(poseDesignerAddBtn, poseDesignerPlayBtn, poseDesignerClearBtn);
+    poseDesignerControlsColEl.appendChild(poseDesignerActionsRowEl);
+    const poseDesignerKeyframesEl = document.createElement("div");
+    poseDesignerKeyframesEl.style.display = "flex";
+    poseDesignerKeyframesEl.style.flexDirection = "column";
+    poseDesignerKeyframesEl.style.gap = "2px";
+    poseDesignerKeyframesEl.style.margin = "4px 0";
+    poseDesignerControlsColEl.appendChild(poseDesignerKeyframesEl);
+    function renderPoseDesignerKeyframes() {
+      poseDesignerKeyframesEl.innerHTML = "";
+      poseDesignerKeyframes.forEach((kf, i) => {
+        const row = document.createElement("div");
+        row.style.display = "flex";
+        row.style.alignItems = "center";
+        row.style.gap = "4px";
+        const label = document.createElement("span");
+        label.textContent = `${i + 1}.`;
+        const msInput = document.createElement("input");
+        msInput.type = "number";
+        msInput.min = "1";
+        msInput.step = "50";
+        msInput.value = String(kf.transitionMs);
+        msInput.style.width = "60px";
+        msInput.addEventListener("input", () => {
+          kf.transitionMs = Math.max(1, parseInt(msInput.value, 10) || 1);
+        });
+        const msSuffix = document.createElement("span");
+        msSuffix.textContent = "ms";
+        const loadBtn = document.createElement("button");
+        loadBtn.textContent = "Load";
+        loadBtn.style.fontSize = "10px";
+        loadBtn.style.cursor = "pointer";
+        loadBtn.addEventListener("click", () => loadPoseDesignerValues(kf.values));
+        const saveBtn = document.createElement("button");
+        saveBtn.textContent = "Save";
+        saveBtn.style.fontSize = "10px";
+        saveBtn.style.cursor = "pointer";
+        saveBtn.addEventListener("click", () => {
+          kf.values = { ...poseDesignerValues };
+        });
+        const delBtn = document.createElement("button");
+        delBtn.textContent = "\u2715";
+        delBtn.style.fontSize = "10px";
+        delBtn.style.cursor = "pointer";
+        delBtn.addEventListener("click", () => {
+          poseDesignerKeyframes.splice(i, 1);
+          renderPoseDesignerKeyframes();
+        });
+        row.append(label, msInput, msSuffix, loadBtn, saveBtn, delBtn);
+        poseDesignerKeyframesEl.appendChild(row);
+      });
+    }
+    poseDesignerAddBtn.addEventListener("click", () => {
+      poseDesignerKeyframes.push({ values: { ...poseDesignerValues }, transitionMs: 400 });
+      renderPoseDesignerKeyframes();
+    });
+    poseDesignerPlayBtn.addEventListener("click", () => {
+      poseDesignerPlaying = !poseDesignerPlaying;
+      poseDesignerPlaybackMs = 0;
+      poseDesignerPlayBtn.textContent = poseDesignerPlaying ? "\u23F9 Stop" : "\u25B6 Play";
+    });
+    poseDesignerClearBtn.addEventListener("click", () => {
+      poseDesignerPlaying = false;
+      poseDesignerPlayBtn.textContent = "\u25B6 Play";
+      poseDesignerKeyframes = [];
+      poseDesignerNameInput.value = "";
+      loadPoseDesignerValues(poseDesignerDefaultValues());
+      renderPoseDesignerKeyframes();
+    });
+    const poseDesignerIoRowEl = document.createElement("div");
+    poseDesignerIoRowEl.style.display = "flex";
+    poseDesignerIoRowEl.style.gap = "4px";
+    poseDesignerIoRowEl.style.marginTop = "6px";
+    const poseDesignerExportBtn = document.createElement("button");
+    poseDesignerExportBtn.textContent = "Export";
+    poseDesignerExportBtn.style.fontSize = "11px";
+    poseDesignerExportBtn.style.flex = "1";
+    poseDesignerExportBtn.style.cursor = "pointer";
+    const poseDesignerImportBtn = document.createElement("button");
+    poseDesignerImportBtn.textContent = "Import";
+    poseDesignerImportBtn.style.fontSize = "11px";
+    poseDesignerImportBtn.style.flex = "1";
+    poseDesignerImportBtn.style.cursor = "pointer";
+    poseDesignerIoRowEl.append(poseDesignerExportBtn, poseDesignerImportBtn);
+    poseDesignerControlsColEl.appendChild(poseDesignerIoRowEl);
+    const poseDesignerExportEl = document.createElement("textarea");
+    poseDesignerExportEl.placeholder = "Export writes here \u2014 or paste a previously exported pose here and hit Import.";
+    poseDesignerExportEl.style.width = "100%";
+    poseDesignerExportEl.style.height = "70px";
+    poseDesignerExportEl.style.marginTop = "4px";
+    poseDesignerExportEl.style.fontSize = "10px";
+    poseDesignerControlsColEl.appendChild(poseDesignerExportEl);
+    const poseDesignerIoErrorEl = document.createElement("p");
+    poseDesignerIoErrorEl.style.color = "#ef4444";
+    poseDesignerIoErrorEl.style.fontSize = "10px";
+    poseDesignerIoErrorEl.style.margin = "4px 0 0 0";
+    poseDesignerIoErrorEl.style.display = "none";
+    poseDesignerControlsColEl.appendChild(poseDesignerIoErrorEl);
+    poseDesignerExportBtn.addEventListener("click", () => {
+      poseDesignerIoErrorEl.style.display = "none";
+      const payload = {
+        name: poseDesignerNameInput.value.trim() || "untitled",
+        keyframes: poseDesignerKeyframes.map((kf) => ({ values: { ...kf.values }, transitionMs: kf.transitionMs }))
+      };
+      const json = JSON.stringify(payload, null, 2);
+      poseDesignerExportEl.value = json;
+      poseDesignerExportEl.focus();
+      poseDesignerExportEl.select();
+      navigator.clipboard?.writeText(json).catch(() => {
+      });
+    });
+    poseDesignerImportBtn.addEventListener("click", () => {
+      poseDesignerIoErrorEl.style.display = "none";
+      let payload;
+      try {
+        payload = JSON.parse(poseDesignerExportEl.value);
+      } catch {
+        poseDesignerIoErrorEl.textContent = "Not valid JSON \u2014 paste an export from this same tool.";
+        poseDesignerIoErrorEl.style.display = "block";
+        return;
+      }
+      if (!Array.isArray(payload?.keyframes)) {
+        poseDesignerIoErrorEl.textContent = 'Missing a "keyframes" array \u2014 paste an export from this same tool.';
+        poseDesignerIoErrorEl.style.display = "block";
+        return;
+      }
+      poseDesignerPlaying = false;
+      poseDesignerPlayBtn.textContent = "\u25B6 Play";
+      poseDesignerNameInput.value = typeof payload.name === "string" ? payload.name : "";
+      poseDesignerKeyframes = payload.keyframes.map((kf) => ({
+        values: { ...poseDesignerDefaultValues(), ...kf.values },
+        transitionMs: Math.max(1, parseInt(kf.transitionMs, 10) || 400)
+      }));
+      if (poseDesignerKeyframes.length > 0) loadPoseDesignerValues(poseDesignerKeyframes[0].values);
+      renderPoseDesignerKeyframes();
+    });
+    function hidePoseDesignerModal() {
+      poseDesignerModalEl.style.display = "none";
+      poseDesignerPreview?.dispose();
+      poseDesignerPreview = null;
+    }
+    poseDesignerCloseBtn.addEventListener("click", hidePoseDesignerModal);
+    poseDesignerButton.addEventListener("click", () => {
+      devMenuPanelEl.style.display = "none";
+      poseDesignerModalEl.style.display = "flex";
+      poseDesignerPreview = mountPreview(poseDesignerPreviewEl, localColors, { showFrontMarker: true });
+      poseDesignerPreview.setCustomPose(poseDesignerFrame);
+      renderPoseDesignerKeyframes();
+    });
+    const cameraDesignerModalEl = document.createElement("div");
+    cameraDesignerModalEl.style.position = "absolute";
+    cameraDesignerModalEl.style.display = "none";
+    cameraDesignerModalEl.style.inset = "0";
+    cameraDesignerModalEl.style.background = "#000000b3";
+    cameraDesignerModalEl.style.zIndex = "26";
+    cameraDesignerModalEl.style.alignItems = "center";
+    cameraDesignerModalEl.style.justifyContent = "center";
+    const cameraDesignerCardEl = document.createElement("div");
+    cameraDesignerCardEl.style.background = "#1a1a1aee";
+    cameraDesignerCardEl.style.border = "1px solid #3333334d";
+    cameraDesignerCardEl.style.borderRadius = "6px";
+    cameraDesignerCardEl.style.padding = "10px";
+    cameraDesignerCardEl.style.width = "min(94vw, 760px)";
+    cameraDesignerCardEl.style.fontSize = "11px";
+    cameraDesignerCardEl.style.display = "flex";
+    cameraDesignerModalEl.appendChild(cameraDesignerCardEl);
+    wrap.appendChild(cameraDesignerModalEl);
+    const { heading: cameraDesignerHeadingEl, closeBtn: cameraDesignerCloseBtn, body: cameraDesignerBodyEl } = setupModalCard(cameraDesignerCardEl, "85%");
+    cameraDesignerHeadingEl.textContent = "Camera Designer";
+    cameraDesignerBodyEl.style.overflow = "hidden";
+    const cameraDesignerLayoutEl = document.createElement("div");
+    cameraDesignerLayoutEl.style.display = "flex";
+    cameraDesignerLayoutEl.style.flexWrap = "wrap";
+    cameraDesignerLayoutEl.style.gap = "10px";
+    cameraDesignerBodyEl.appendChild(cameraDesignerLayoutEl);
+    const cameraDesignerPreviewColEl = document.createElement("div");
+    cameraDesignerPreviewColEl.style.flex = "0 0 320px";
+    cameraDesignerPreviewColEl.style.maxHeight = "70vh";
+    cameraDesignerPreviewColEl.style.overflowY = "auto";
+    cameraDesignerLayoutEl.appendChild(cameraDesignerPreviewColEl);
+    const cameraDesignerControlsColEl = document.createElement("div");
+    cameraDesignerControlsColEl.style.flex = "1 1 280px";
+    cameraDesignerControlsColEl.style.minWidth = "260px";
+    cameraDesignerControlsColEl.style.maxHeight = "70vh";
+    cameraDesignerControlsColEl.style.overflowY = "auto";
+    cameraDesignerLayoutEl.appendChild(cameraDesignerControlsColEl);
+    const cameraDesignerPreviewEl = document.createElement("div");
+    cameraDesignerPreviewColEl.appendChild(cameraDesignerPreviewEl);
+    const cameraDesignerSlotLabel = document.createElement("label");
+    cameraDesignerSlotLabel.style.display = "flex";
+    cameraDesignerSlotLabel.style.gap = "6px";
+    cameraDesignerSlotLabel.style.alignItems = "center";
+    cameraDesignerSlotLabel.style.margin = "0 0 4px 0";
+    const cameraDesignerSlotSelect = document.createElement("select");
+    cameraDesignerSlotSelect.style.flex = "1";
+    const cameraDesignerNoSlotOpt = document.createElement("option");
+    cameraDesignerNoSlotOpt.value = "";
+    cameraDesignerNoSlotOpt.textContent = "(pick a battle type below)";
+    cameraDesignerSlotSelect.appendChild(cameraDesignerNoSlotOpt);
+    for (const slot of CAMERA_OVERRIDE_SLOTS) {
+      const opt = document.createElement("option");
+      opt.value = slot.id;
+      opt.textContent = slot.label;
+      cameraDesignerSlotSelect.appendChild(opt);
+    }
+    cameraDesignerSlotLabel.append(document.createTextNode("Battle type"), cameraDesignerSlotSelect);
+    cameraDesignerControlsColEl.appendChild(cameraDesignerSlotLabel);
+    const cameraDesignerSlotBtnsRowEl = document.createElement("div");
+    cameraDesignerSlotBtnsRowEl.style.display = "flex";
+    cameraDesignerSlotBtnsRowEl.style.gap = "4px";
+    cameraDesignerSlotBtnsRowEl.style.marginBottom = "4px";
+    const cameraDesignerSaveToGameBtn = document.createElement("button");
+    cameraDesignerSaveToGameBtn.textContent = "Save to Game";
+    cameraDesignerSaveToGameBtn.style.fontSize = "11px";
+    cameraDesignerSaveToGameBtn.style.flex = "1";
+    cameraDesignerSaveToGameBtn.style.cursor = "pointer";
+    const cameraDesignerResetToDefaultBtn = document.createElement("button");
+    cameraDesignerResetToDefaultBtn.textContent = "Reset to Default";
+    cameraDesignerResetToDefaultBtn.style.fontSize = "11px";
+    cameraDesignerResetToDefaultBtn.style.flex = "1";
+    cameraDesignerResetToDefaultBtn.style.cursor = "pointer";
+    cameraDesignerSlotBtnsRowEl.append(cameraDesignerSaveToGameBtn, cameraDesignerResetToDefaultBtn);
+    cameraDesignerControlsColEl.appendChild(cameraDesignerSlotBtnsRowEl);
+    const cameraDesignerStatusEl = document.createElement("p");
+    cameraDesignerStatusEl.style.fontSize = "10px";
+    cameraDesignerStatusEl.style.margin = "0 0 6px 0";
+    cameraDesignerControlsColEl.appendChild(cameraDesignerStatusEl);
+    let cameraDesignerValues = cameraDesignerDefaultValues("wild");
+    let cameraDesignerFields = CAMERA_DESIGNER_FIELDS;
+    let cameraDesignerPreviewAngle = cameraDesignerValues.angle;
+    const cameraDesignerPreviewElevationState = { camElevation: cameraDesignerValues.elevation, camElevationDir: 1 };
+    let cameraDesignerFocusPreviewAngle = cameraDesignerValues.angle ?? 0;
+    const cameraDesignerFocusPreviewHeightState = { camElevation: TEAM_FOCUS_CAM_HEIGHT, camElevationDir: 1 };
+    let cameraDesignerPreview = null;
+    const cameraDesignerSlidersEl = document.createElement("div");
+    cameraDesignerSlidersEl.style.display = "flex";
+    cameraDesignerSlidersEl.style.flexDirection = "column";
+    cameraDesignerSlidersEl.style.gap = "3px";
+    cameraDesignerControlsColEl.appendChild(cameraDesignerSlidersEl);
+    let cameraDesignerSliderEls = {};
+    function renderCameraDesignerSliders(fields) {
+      cameraDesignerFields = fields;
+      cameraDesignerSlidersEl.innerHTML = "";
+      cameraDesignerSliderEls = {};
+      for (const spec of fields) {
+        const row = document.createElement("div");
+        const topRow = document.createElement("div");
+        topRow.style.display = "flex";
+        topRow.style.justifyContent = "space-between";
+        const labelEl = document.createElement("span");
+        labelEl.textContent = spec.label;
+        const valueEl = document.createElement("span");
+        valueEl.style.color = "#a3a3a3";
+        valueEl.textContent = "0.00";
+        topRow.append(labelEl, valueEl);
+        const slider = document.createElement("input");
+        slider.type = "range";
+        slider.min = String(spec.min);
+        slider.max = String(spec.max);
+        slider.step = String(spec.step);
+        slider.value = "0";
+        slider.style.width = "100%";
+        slider.addEventListener("input", () => {
+          const v = parseFloat(slider.value);
+          cameraDesignerValues[spec.key] = v;
+          valueEl.textContent = v.toFixed(2);
+          if (spec.key === "angle" && !cameraDesignerValues.autoRotate) {
+            if (cameraDesignerFields === CAMERA_DESIGNER_FIELDS) cameraDesignerPreviewAngle = v;
+            else cameraDesignerFocusPreviewAngle = v;
+          }
+        });
+        row.append(topRow, slider);
+        cameraDesignerSlidersEl.appendChild(row);
+        cameraDesignerSliderEls[spec.key] = { slider, valueEl };
+      }
+    }
+    renderCameraDesignerSliders(CAMERA_DESIGNER_FIELDS);
+    const cameraDesignerAutoRotateLabel = document.createElement("label");
+    cameraDesignerAutoRotateLabel.style.display = "flex";
+    cameraDesignerAutoRotateLabel.style.gap = "6px";
+    cameraDesignerAutoRotateLabel.style.alignItems = "center";
+    cameraDesignerAutoRotateLabel.style.margin = "6px 0 0 0";
+    const cameraDesignerAutoRotateToggle = document.createElement("input");
+    cameraDesignerAutoRotateToggle.type = "checkbox";
+    cameraDesignerAutoRotateLabel.append(cameraDesignerAutoRotateToggle, document.createTextNode("Auto-rotate (satellite drift)"));
+    cameraDesignerControlsColEl.appendChild(cameraDesignerAutoRotateLabel);
+    cameraDesignerAutoRotateToggle.addEventListener("change", () => {
+      cameraDesignerValues.autoRotate = cameraDesignerAutoRotateToggle.checked;
+      cameraDesignerSliderEls.rotateSpeed.slider.disabled = !cameraDesignerValues.autoRotate;
+      if (cameraDesignerValues.autoRotate) {
+        if (cameraDesignerFields === CAMERA_DESIGNER_FIELDS) {
+          cameraDesignerPreviewAngle = cameraDesignerValues.angle;
+        } else {
+          cameraDesignerFocusPreviewAngle = cameraDesignerValues.angle;
+          cameraDesignerFocusPreviewHeightState.camElevation = cameraDesignerValues.height;
+          cameraDesignerFocusPreviewHeightState.camElevationDir = 1;
+        }
+      }
+    });
+    function loadCameraDesignerValues(values) {
+      const next = {};
+      for (const spec of cameraDesignerFields) {
+        const v = values[spec.key] ?? 0;
+        next[spec.key] = v;
+        const { slider, valueEl } = cameraDesignerSliderEls[spec.key];
+        slider.value = String(v);
+        valueEl.textContent = v.toFixed(2);
+      }
+      next.autoRotate = values.autoRotate !== false;
+      cameraDesignerValues = next;
+      cameraDesignerAutoRotateToggle.checked = cameraDesignerValues.autoRotate;
+      cameraDesignerSliderEls.rotateSpeed.slider.disabled = !cameraDesignerValues.autoRotate;
+      if (cameraDesignerFields === CAMERA_DESIGNER_FIELDS) {
+        cameraDesignerPreviewAngle = cameraDesignerValues.angle;
+      } else {
+        cameraDesignerFocusPreviewAngle = cameraDesignerValues.angle;
+        cameraDesignerFocusPreviewHeightState.camElevation = cameraDesignerValues.height;
+        cameraDesignerFocusPreviewHeightState.camElevationDir = 1;
+      }
+    }
+    loadCameraDesignerValues(cameraDesignerValues);
+    cameraDesignerSlotSelect.addEventListener("change", () => {
+      cameraDesignerStatusEl.textContent = "";
+      const slotId = cameraDesignerSlotSelect.value;
+      const slot = CAMERA_OVERRIDE_SLOTS.find((s) => s.id === slotId) || CAMERA_OVERRIDE_SLOTS.find((s) => s.id === "wild");
+      renderCameraDesignerSliders(slot.kind === "focus" ? CAMERA_FOCUS_FIELDS : CAMERA_DESIGNER_FIELDS);
+      const defaults = cameraDesignerDefaultValues(slotId || "wild");
+      const existing = slotId ? cameraOverrides[slotId] : null;
+      loadCameraDesignerValues(existing ? { ...defaults, ...existing } : defaults);
+    });
+    cameraDesignerSaveToGameBtn.addEventListener("click", async () => {
+      const slotId = cameraDesignerSlotSelect.value;
+      if (!slotId) {
+        cameraDesignerStatusEl.style.color = "#a3a3a3";
+        cameraDesignerStatusEl.textContent = "Pick a battle type above first.";
+        return;
+      }
+      cameraDesignerStatusEl.style.color = "#a3a3a3";
+      cameraDesignerStatusEl.textContent = "Saving\u2026";
+      const values = { ...cameraDesignerValues };
+      const result = await ctx.onSaveCameraOverride?.(slotId, values);
+      if (result && result.ok) {
+        cameraOverrides = result.cameraOverrides || {};
+        cameraDesignerStatusEl.style.color = "#4ade80";
+        const label = CAMERA_OVERRIDE_SLOTS.find((s) => s.id === slotId).label;
+        cameraDesignerStatusEl.textContent = `Saved \u2014 ${label}'s camera will use this now.`;
+      } else {
+        cameraDesignerStatusEl.style.color = "#ef4444";
+        cameraDesignerStatusEl.textContent = "Could not save \u2014 try again?";
+      }
+    });
+    cameraDesignerResetToDefaultBtn.addEventListener("click", async () => {
+      const slotId = cameraDesignerSlotSelect.value;
+      if (!slotId) {
+        cameraDesignerStatusEl.style.color = "#a3a3a3";
+        cameraDesignerStatusEl.textContent = "Pick a battle type above first.";
+        return;
+      }
+      cameraDesignerStatusEl.style.color = "#a3a3a3";
+      cameraDesignerStatusEl.textContent = "Resetting\u2026";
+      const result = await ctx.onResetCameraOverride?.(slotId);
+      if (result && result.ok) {
+        cameraOverrides = result.cameraOverrides || {};
+        loadCameraDesignerValues(cameraDesignerDefaultValues(slotId));
+        cameraDesignerStatusEl.style.color = "#4ade80";
+        const label = CAMERA_OVERRIDE_SLOTS.find((s) => s.id === slotId).label;
+        cameraDesignerStatusEl.textContent = `Reset \u2014 ${label}'s camera is back to the built-in framing.`;
+      } else {
+        cameraDesignerStatusEl.style.color = "#ef4444";
+        cameraDesignerStatusEl.textContent = "Could not reset \u2014 try again?";
+      }
+    });
+    function cameraDesignerDriver(camera2, dt) {
+      const slotId = cameraDesignerSlotSelect.value;
+      const slot = CAMERA_OVERRIDE_SLOTS.find((s) => s.id === slotId);
+      if (slot && slot.kind === "focus") {
+        const playerPos = { x: 0, z: PREVIEW_BATTLE_PLAYER_Z };
+        const wildPos = { x: 0, z: PREVIEW_BATTLE_WILD_Z };
+        let anchorPos = playerPos;
+        let anchorFacing = 0;
+        let lookAtPos = wildPos;
+        if (slotId === "wild_defend_scene") {
+          anchorPos = wildPos;
+          anchorFacing = Math.PI;
+          lookAtPos = playerPos;
+        }
+        if (cameraDesignerValues.autoRotate) {
+          cameraDesignerFocusPreviewAngle += (cameraDesignerValues.rotateSpeed ?? 0) * dt;
+        }
+        const theta = cameraDesignerValues.autoRotate ? cameraDesignerFocusPreviewAngle : cameraDesignerValues.angle ?? 0;
+        const heightRotateSpeed = cameraDesignerValues.autoRotate ? cameraDesignerValues.heightRotateSpeed ?? 0 : 0;
+        const height = advanceOrbitElevation(cameraDesignerFocusPreviewHeightState, cameraDesignerValues.height, heightRotateSpeed, dt, FOCUS_CAM_HEIGHT_MIN, FOCUS_CAM_HEIGHT_MAX);
+        const frame2 = computeFocusCameraFrame(anchorPos, anchorFacing, lookAtPos, { ...cameraDesignerValues, height }, theta);
+        camera2.position.set(frame2.camX, frame2.camY, frame2.camZ);
+        camera2.lookAt(frame2.lookX, frame2.lookY, frame2.lookZ);
+        return;
+      }
+      if (cameraDesignerValues.autoRotate) {
+        cameraDesignerPreviewAngle += cameraDesignerValues.rotateSpeed * dt;
+      }
+      const angle = cameraDesignerValues.autoRotate ? cameraDesignerPreviewAngle : cameraDesignerValues.angle;
+      const radius = cameraDesignerValues.radius;
+      const elevationRotateSpeed = cameraDesignerValues.autoRotate ? cameraDesignerValues.elevationRotateSpeed ?? 0 : 0;
+      const elevation = advanceOrbitElevation(cameraDesignerPreviewElevationState, cameraDesignerValues.elevation, elevationRotateSpeed, dt, MIN_ELEVATION, MAX_ELEVATION);
+      camera2.position.set(
+        Math.sin(angle) * Math.cos(elevation) * radius,
+        PREVIEW_TARGET_Y + Math.sin(elevation) * radius,
+        Math.cos(angle) * Math.cos(elevation) * radius
+      );
+      camera2.lookAt(0, PREVIEW_TARGET_Y, 0);
+    }
+    function hideCameraDesignerModal() {
+      cameraDesignerModalEl.style.display = "none";
+      cameraDesignerPreview?.dispose();
+      cameraDesignerPreview = null;
+    }
+    cameraDesignerCloseBtn.addEventListener("click", hideCameraDesignerModal);
+    cameraDesignerButton.addEventListener("click", () => {
+      devMenuPanelEl.style.display = "none";
+      cameraDesignerModalEl.style.display = "flex";
+      cameraDesignerPreview = mountPreview(cameraDesignerPreviewEl, localColors, {
+        cameraDriver: cameraDesignerDriver,
+        battleScenePreview: true
+      });
+    });
+    let damaBoard = null;
+    let damaSideToMove = "white";
+    let damaSelectedSquare = null;
+    let damaLegalMoves = [];
+    let damaMidChain = false;
+    let damaWinner = null;
+    const damaModalEl = document.createElement("div");
+    damaModalEl.style.position = "absolute";
+    damaModalEl.style.display = "none";
+    damaModalEl.style.inset = "0";
+    damaModalEl.style.background = "#000000b3";
+    damaModalEl.style.zIndex = "26";
+    damaModalEl.style.alignItems = "center";
+    damaModalEl.style.justifyContent = "center";
+    const damaCardEl = document.createElement("div");
+    damaCardEl.style.background = "#1a1a1aee";
+    damaCardEl.style.border = "1px solid #3333334d";
+    damaCardEl.style.borderRadius = "6px";
+    damaCardEl.style.padding = "10px";
+    damaCardEl.style.width = "320px";
+    damaCardEl.style.fontSize = "12px";
+    damaCardEl.style.display = "flex";
+    damaModalEl.appendChild(damaCardEl);
+    wrap.appendChild(damaModalEl);
+    const { heading: damaHeadingEl, closeBtn: damaCloseBtn, body: damaBodyEl } = setupModalCard(damaCardEl, "85%");
+    damaHeadingEl.textContent = "Dama (test \u2014 self-play)";
+    const damaStatusEl = document.createElement("p");
+    damaStatusEl.style.fontSize = "11px";
+    damaStatusEl.style.margin = "0 0 6px 0";
+    damaBodyEl.appendChild(damaStatusEl);
+    const damaGridEl = document.createElement("div");
+    damaGridEl.style.display = "grid";
+    damaGridEl.style.gridTemplateColumns = "repeat(8, 36px)";
+    damaGridEl.style.gridTemplateRows = "repeat(8, 36px)";
+    damaGridEl.style.width = "288px";
+    damaBodyEl.appendChild(damaGridEl);
+    const damaNewGameBtn = document.createElement("button");
+    damaNewGameBtn.textContent = "New Game";
+    damaNewGameBtn.style.fontSize = "11px";
+    damaNewGameBtn.style.marginTop = "8px";
+    damaNewGameBtn.style.cursor = "pointer";
+    damaBodyEl.appendChild(damaNewGameBtn);
+    function resetDamaGame() {
+      damaBoard = createInitialDamaBoard();
+      damaSideToMove = "white";
+      damaSelectedSquare = null;
+      damaMidChain = false;
+      damaWinner = null;
+      damaLegalMoves = getAllLegalMoves(damaBoard, damaSideToMove);
+    }
+    function renderDamaModal() {
+      damaGridEl.innerHTML = "";
+      const destinations = damaSelectedSquare ? damaLegalMoves.filter((m) => m.from.row === damaSelectedSquare.row && m.from.col === damaSelectedSquare.col).map((m) => m.to) : [];
+      for (let row = 0; row < 8; row++) {
+        for (let col = 0; col < 8; col++) {
+          const sq = document.createElement("div");
+          sq.style.width = "36px";
+          sq.style.height = "36px";
+          sq.style.display = "flex";
+          sq.style.alignItems = "center";
+          sq.style.justifyContent = "center";
+          sq.style.position = "relative";
+          sq.style.cursor = "pointer";
+          const light = (row + col) % 2 === 0;
+          sq.style.background = light ? TAMBAYAN_BOARD_LIGHT : TAMBAYAN_BOARD_DARK;
+          const isSelected = damaSelectedSquare && damaSelectedSquare.row === row && damaSelectedSquare.col === col;
+          sq.style.boxShadow = isSelected ? "inset 0 0 0 2px orange" : "none";
+          const piece = damaBoard[row][col];
+          if (piece) {
+            const disc = document.createElement("div");
+            disc.style.width = "26px";
+            disc.style.height = "26px";
+            disc.style.borderRadius = "50%";
+            disc.style.display = "flex";
+            disc.style.alignItems = "center";
+            disc.style.justifyContent = "center";
+            disc.style.fontSize = "13px";
+            disc.style.background = piece.side === "white" ? "#f5f5f5" : "#1f2937";
+            disc.style.border = piece.side === "white" ? "2px solid #1f2937" : "2px solid #f5f5f5";
+            if (piece.king) {
+              disc.textContent = "\u2605";
+              disc.style.color = piece.side === "white" ? "#1f2937" : "#f5f5f5";
+            }
+            sq.appendChild(disc);
+          }
+          if (destinations.some((d) => d.row === row && d.col === col)) {
+            const dot = document.createElement("div");
+            dot.style.position = "absolute";
+            dot.style.width = "10px";
+            dot.style.height = "10px";
+            dot.style.borderRadius = "50%";
+            dot.style.background = "#4ade8099";
+            sq.appendChild(dot);
+          }
+          sq.addEventListener("click", () => onDamaSquareClick(row, col));
+          damaGridEl.appendChild(sq);
+        }
+      }
+      if (damaWinner) {
+        damaStatusEl.textContent = `${damaWinner === "white" ? "White" : "Black"} wins!`;
+      } else {
+        const mandatory = damaLegalMoves.length > 0 && damaLegalMoves[0].captured;
+        const turnText = `${damaSideToMove === "white" ? "White" : "Black"}'s turn`;
+        damaStatusEl.textContent = damaMidChain ? `${turnText} \u2014 continue capturing with the same piece` : mandatory ? `${turnText} \u2014 capture available (mandatory)` : turnText;
+      }
+    }
+    function onDamaSquareClick(row, col) {
+      if (!damaBoard || damaWinner) return;
+      const piece = damaBoard[row][col];
+      if (damaSelectedSquare) {
+        const move = damaLegalMoves.find(
+          (m) => m.from.row === damaSelectedSquare.row && m.from.col === damaSelectedSquare.col && m.to.row === row && m.to.col === col
+        );
+        if (move) {
+          const result = applyDamaMove(damaBoard, move);
+          damaBoard = result.board;
+          if (result.continuedCaptureFrom) {
+            damaMidChain = true;
+            damaSelectedSquare = result.continuedCaptureFrom;
+            damaLegalMoves = getAllLegalMoves(damaBoard, damaSideToMove, damaSelectedSquare);
+          } else {
+            damaMidChain = false;
+            damaSelectedSquare = null;
+            damaSideToMove = damaSideToMove === "white" ? "black" : "white";
+            damaLegalMoves = getAllLegalMoves(damaBoard, damaSideToMove);
+            if (damaLegalMoves.length === 0) damaWinner = damaSideToMove === "white" ? "black" : "white";
+          }
+          renderDamaModal();
+          return;
+        }
+        if (damaMidChain) return;
+        if (piece && piece.side === damaSideToMove && damaLegalMoves.some((m) => m.from.row === row && m.from.col === col)) {
+          damaSelectedSquare = { row, col };
+        } else {
+          damaSelectedSquare = null;
+        }
+        renderDamaModal();
+        return;
+      }
+      if (piece && piece.side === damaSideToMove && damaLegalMoves.some((m) => m.from.row === row && m.from.col === col)) {
+        damaSelectedSquare = { row, col };
+        renderDamaModal();
+      }
+    }
+    damaNewGameBtn.addEventListener("click", () => {
+      resetDamaGame();
+      renderDamaModal();
+    });
+    damaCloseBtn.addEventListener("click", () => {
+      damaModalEl.style.display = "none";
+    });
+    damaTestButton.addEventListener("click", () => {
+      devMenuPanelEl.style.display = "none";
+      damaModalEl.style.display = "flex";
+      resetDamaGame();
+      renderDamaModal();
+    });
     el.appendChild(wrap);
     const { renderer, scene, camera } = createScene(canvas);
     const skyDome = buildSkyDome(scene);
     const sunSprite = buildSunSprite(scene);
-    const townWallSegments = buildTown(scene);
-    buildJaredShop(scene);
-    const { board: karirsBoard, tvGroup: karirsTvGroup } = buildKarirsField(scene, townWallSegments);
-    buildLubaArea(scene, townWallSegments);
+    const { wallSegmentsByFloor: townWallSegmentsByFloor, glophicsFloorGroups, sign: townSign, cinemaUsherRig: usherRig } = buildTown(scene);
+    const groundWallSegments = townWallSegmentsByFloor[0];
+    const jaredSign = buildJaredShop(scene);
+    const { board: karirsBoard, tvGroup: karirsTvGroup } = buildKarirsField(scene, groundWallSegments);
+    buildKarirsTrack(scene);
+    const karirsRacerMarkers = KARIRS_TRACK_LANE_OFFSETS.map(
+      (_, i) => buildKarirsRacerRig(scene, KARIRS_RACER_COLORS[i % KARIRS_RACER_COLORS.length])
+    );
+    const { sign: lubaSign } = buildLubaArea(scene, groundWallSegments);
+    const AREA_LABELS = [
+      { name: TOWN_NAME, x: 0, z: 0, half: TOWN_HALF_X, sign: townSign },
+      { name: KARIRS_FIELD_NAME, x: KARIRS_FIELD_X, z: KARIRS_FIELD_Z, half: KARIRS_FIELD_HALF, sign: null },
+      { name: LUBA_NAME, x: LUBA_X, z: LUBA_Z, half: LUBA_HALF, sign: lubaSign }
+    ];
     const {
       board1Group: chessBoard1Group,
       board1StatusSign: chessBoard1StatusSign,
       board2Group: chessBoard2Group,
-      board2StatusSign: chessBoard2StatusSign
+      board2StatusSign: chessBoard2StatusSign,
+      board3Group: chessBoard3Group,
+      board3StatusSign: chessBoard3StatusSign
     } = buildTambayan(scene);
-    function isInsideTownWalls(x, z) {
-      for (const seg of townWallSegments) {
+    function isInsideTownWalls(x, z, floor = 0) {
+      const segs = townWallSegmentsByFloor[floor];
+      if (!segs) return false;
+      for (const seg of segs) {
         if (x >= seg.minX && x <= seg.maxX && z >= seg.minZ && z <= seg.maxZ) return true;
       }
       return false;
     }
-    function updateTownWallFade(dt, targetX = local.x, targetY = PAN_TARGET_Y, targetZ = local.z) {
+    function updateTownWallFade(dt, targetX = local.x, targetY = local.y + PAN_TARGET_Y, targetZ = local.z) {
       const ease = Math.min(1, TOWN_WALL_FADE_RATE * dt);
-      for (const seg of townWallSegments) {
+      const segs = Object.values(townWallSegmentsByFloor).flat();
+      for (const seg of segs) {
         const occluding = segmentIntersectsWallBox(
           camera.position.x,
           camera.position.y,
@@ -32908,6 +35261,11 @@ void main() {
       local.x = 0;
       local.z = 0;
       local.facingAngle = 0;
+      if (local.currentFloor !== 0) {
+        local.currentFloor = 0;
+        local.y = 0;
+        applyGlophicsFloorCutaway(0);
+      }
     }
     const localColors = {
       head: character.head_color,
@@ -32916,11 +35274,20 @@ void main() {
       leg: character.leg_color
     };
     const localRig = buildBlockyCharacter(localColors, character.display_name);
+    const initialFloor = character.floor ?? 0;
     const local = {
       x: character.x,
-      y: 0,
+      y: entityGroundY(initialFloor, character.x, character.z),
       z: character.z,
       facingAngle: character.facing,
+      // currentFloor is the FIRST piece of real vertical state in this whole
+      // codebase — 0 is the ground floor (identical to how every peer/NPC/
+      // wild spawn/battle rig has always implicitly lived), a positive index
+      // matches one of GLOPHICS_FLOORS' own `index` values. Everything that
+      // needs to know "what floor is the player on" (movement collision,
+      // the camera's own Y offset, cutaway transparency, the stairs, and the
+      // network position broadcast) reads this one field.
+      currentFloor: initialFloor,
       rig: localRig,
       isMoving: false,
       chatBubble: null,
@@ -32929,8 +35296,42 @@ void main() {
     local.rig.group.position.set(local.x, local.y, local.z);
     local.rig.group.rotation.y = local.facingAngle;
     scene.add(local.rig.group);
+    applyGlophicsFloorCutaway(local.currentFloor);
     let stamina = STAMINA_MAX;
     let staminaExhausted = false;
+    let poseOverrides = { ...ctx.poseOverrides || {} };
+    let cameraOverrides = { ...ctx.cameraOverrides || {} };
+    const poseOverrideElapsedMs = {};
+    let activePoseOverrideName = null;
+    function tryPlayLocalOverride(poseName, dt) {
+      const override = poseOverrides[poseName];
+      if (!override || !override.keyframes || override.keyframes.length === 0) return false;
+      if (activePoseOverrideName !== poseName) {
+        activePoseOverrideName = poseName;
+        poseOverrideElapsedMs[poseName] = 0;
+      }
+      poseOverrideElapsedMs[poseName] += dt * 1e3;
+      return playPoseKeyframes(local.rig, override.keyframes, poseOverrideElapsedMs[poseName]);
+    }
+    function poseOverrideTotalMs(keyframes) {
+      return keyframes.reduce((sum, kf) => sum + Math.max(1, kf.transitionMs), 0);
+    }
+    function tryPlayBattlePoseOverride(rig, poseName, elapsedMs, hold) {
+      const override = poseOverrides[poseName];
+      if (!override || !override.keyframes || override.keyframes.length === 0) return false;
+      let playElapsed = elapsedMs;
+      if (hold) {
+        playElapsed = Math.min(elapsedMs, poseOverrideTotalMs(override.keyframes) - 1);
+      }
+      return playPoseKeyframes(rig, override.keyframes, playElapsed);
+    }
+    function effectivePoseDurationMs(type) {
+      const override = poseOverrides[type];
+      if (override && override.keyframes && override.keyframes.length > 0) {
+        return poseOverrideTotalMs(override.keyframes);
+      }
+      return type === "attack" ? ATTACK_ANIM_MS : type === "cast" ? CAST_ANIM_MS : DEFEND_ANIM_MS;
+    }
     const rodzRig = buildBlockyCharacter(RODZ_COLORS, RODZ_NAME);
     rodzRig.group.position.set(RODZ_X, 0, RODZ_Z);
     scene.add(rodzRig.group);
@@ -32943,6 +35344,10 @@ void main() {
     const bossRickRig = buildBlockyCharacter(BOSS_RICK_COLORS, BOSS_RICK_NAME);
     bossRickRig.group.position.set(BOSS_RICK_X, 0, BOSS_RICK_Z);
     scene.add(bossRickRig.group);
+    const stockfishRig = buildBlockyCharacter(STOCKFISH_COLORS, STOCKFISH_NAME);
+    stockfishRig.group.position.set(STOCKFISH_X, 0, STOCKFISH_Z);
+    stockfishRig.group.rotation.y = Math.PI;
+    scene.add(stockfishRig.group);
     let rodzShoutBubble = null;
     let rodzShoutPhase = "hidden";
     let rodzShoutElapsedMs = 0;
@@ -32969,7 +35374,7 @@ void main() {
         }
         return;
       }
-      rodzShoutBubble.visible = Math.hypot(local.x - RODZ_X, local.z - RODZ_Z) <= LABEL_VISIBLE_DISTANCE;
+      rodzShoutBubble.visible = getAreaKey(local.x, local.z) === "town" && local.currentFloor === 0 && Math.hypot(local.x - RODZ_X, local.z - RODZ_Z) <= LABEL_VISIBLE_DISTANCE;
       if (rodzShoutBubble.visible) {
         const anchor = computeBubbleAnchorWorld({ x: RODZ_X, y: 0, z: RODZ_Z, rig: rodzRig });
         scaleChatBubble(anchor, rodzShoutBubble, camera, lastHeight || canvas.height);
@@ -33009,9 +35414,11 @@ void main() {
     const updateCarrinHighlight = createNpcHighlightUpdater(karraRig, () => [KARRA_X, KARRA_Z]);
     const updateJaredHighlight = createNpcHighlightUpdater(jaredRig, () => [JARED_X, JARED_Z]);
     const updateBossRickHighlight = createNpcHighlightUpdater(bossRickRig, () => [BOSS_RICK_X, BOSS_RICK_Z]);
+    const updateUsherHighlight = createNpcHighlightUpdater(usherRig, () => [USHER_X, USHER_Z]);
     const chessBoards = {
       1: { status: "empty" },
-      2: { status: "empty" }
+      2: { status: "empty" },
+      3: { status: "empty" }
     };
     const updateChessBoard1Highlight = createNpcHighlightUpdater(
       { group: chessBoard1Group },
@@ -33023,8 +35430,15 @@ void main() {
       () => [CHESS_BOARD_2_X, CHESS_BOARD_2_Z],
       () => chessBoards[2].status === "in_progress" && isInsideTambayan(local.x, local.z)
     );
+    const updateChessBoard3Highlight = createNpcHighlightUpdater(
+      { group: chessBoard3Group },
+      () => [CHESS_BOARD_3_X, CHESS_BOARD_3_Z],
+      () => chessBoards[3].status === "in_progress" && isInsideTambayan(local.x, local.z)
+    );
+    const CHESS_BOARD_SIGNS = { 1: chessBoard1StatusSign, 2: chessBoard2StatusSign, 3: chessBoard3StatusSign };
     const peers = /* @__PURE__ */ new Map();
-    function ensurePeer(userId, displayName, appearance, x, z, facing) {
+    const peerBattles = /* @__PURE__ */ new Map();
+    function ensurePeer(userId, displayName, appearance, x, z, facing, floor = 0) {
       let peer = peers.get(userId);
       if (!peer) {
         const rig = buildBlockyCharacter(
@@ -33036,18 +35450,26 @@ void main() {
           rig,
           displayName,
           x,
-          y: 0,
+          y: entityGroundY(floor, x, z),
           z,
           facingAngle: facing,
           targetX: x,
           targetZ: z,
           targetFacing: facing,
+          // Which Glophics floor this peer is currently on (see the api's
+          // own CharacterOut/position-message "floor" field) — defaults to 0
+          // defensively for a message predating this field, though every
+          // client should send it from here on. Kept up to date by
+          // onSocketMessage's own "position" handling below; used every
+          // frame (see the peers render loop in frame()) to hide this peer
+          // outright whenever it differs from local.currentFloor.
+          floor,
           isMoving: false,
           chatBubble: null,
           chatBubbleExpiresAt: 0
         };
         peer.updateHighlight = createNpcHighlightUpdater(rig, () => [peer.x, peer.z]);
-        peer.rig.group.position.set(x, 0, z);
+        peer.rig.group.position.set(x, peer.y, z);
         peer.rig.group.rotation.y = facing;
         peers.set(userId, peer);
       }
@@ -33068,16 +35490,48 @@ void main() {
       peer.rig.group.visible = !hidden;
     }
     function setRigTransparent(rig, on) {
-      rig.group.traverse((obj) => {
-        if (obj.isMesh) {
-          obj.material.transparent = true;
-          obj.material.opacity = on ? 0.3 : 1;
-          obj.material.needsUpdate = true;
-        }
-      });
+      setGroupTransparent(rig.group, on);
     }
     function setLocalTransparent(on) {
       setRigTransparent(local.rig, on);
+    }
+    function applyGlophicsFloorCutaway(currentFloor) {
+      for (const { index, group } of glophicsFloorGroups) {
+        setGroupHidden(group, index > currentFloor);
+      }
+    }
+    function isInsideGlophicsFootprint(x, z) {
+      return isInsideAreaFootprint(x, z, 0, 0, TOWN_HALF_X);
+    }
+    let lastCutawayFloor = local.currentFloor;
+    function updateGlophicsExteriorCutaway() {
+      const effectiveFloor = isInsideGlophicsFootprint(local.x, local.z) ? local.currentFloor : GLOPHICS_ROOF_INDEX;
+      if (effectiveFloor === lastCutawayFloor) return;
+      lastCutawayFloor = effectiveFloor;
+      applyGlophicsFloorCutaway(effectiveFloor);
+    }
+    const AREA_LABEL_SIGN_FADE_RATE = 1.5;
+    let lastAreaLabelName = "Plains";
+    function updateAreaLabels(dt) {
+      const current = AREA_LABELS.find((a) => isInsideAreaFootprint(local.x, local.z, a.x, a.z, a.half));
+      const ease = Math.min(1, AREA_LABEL_SIGN_FADE_RATE * dt);
+      for (const a of AREA_LABELS) {
+        if (!a.sign) continue;
+        const targetOpacity = a === current ? 0 : 1;
+        a.sign.material.opacity += (targetOpacity - a.sign.material.opacity) * ease;
+      }
+      const currentName = current?.name ?? "Plains";
+      if (currentName !== lastAreaLabelName) {
+        lastAreaLabelName = currentName;
+        minimapAreaLabelEl.textContent = currentName;
+      }
+      const signAreaKey = getAreaKey(local.x, local.z);
+      jaredSign.visible = signAreaKey === "town" && local.currentFloor === 0;
+      karirsBoard.sprite.visible = signAreaKey === "karirs";
+      for (const boardId of [1, 2, 3]) {
+        const sign2 = CHESS_BOARD_SIGNS[boardId];
+        sign2.sprite.visible = !!sign2.hasHost && signAreaKey === "tambayan";
+      }
     }
     const wildSpawns = /* @__PURE__ */ new Map();
     let showWildVisionRange = false;
@@ -33160,11 +35614,12 @@ void main() {
         spawn.facingAngle = spawn.targetFacing;
         if (spawn.isMoving) updateWalkCycle(spawn.rig, dt);
         else applyIdlePose(spawn.rig, dt);
-        spawn.rig.group.position.set(spawn.x, 0, spawn.z);
+        const spawnGroundY = terrainHeight(spawn.x, spawn.z);
+        spawn.rig.group.position.set(spawn.x, spawnGroundY, spawn.z);
         spawn.rig.group.rotation.y = spawn.facingAngle;
         syncNameLabel(spawn.rig);
         scaleNameLabel(spawn.rig, camera, lastHeight || canvas.height, Math.hypot(local.x - spawn.x, local.z - spawn.z) <= LABEL_VISIBLE_DISTANCE);
-        spawn.visionWedge.position.set(spawn.x, 0.02, spawn.z);
+        spawn.visionWedge.position.set(spawn.x, spawnGroundY + 0.02, spawn.z);
         spawn.visionWedge.rotation.y = spawn.facingAngle;
         spawn.visionWedge.visible = showWildVisionRange;
         if (battle) {
@@ -33198,6 +35653,31 @@ void main() {
             }
           });
           return;
+        }
+      }
+    }
+    let stairsCooldownUntil = 0;
+    function goToGlophicsFloor(floorIndex, y, nudgedZ) {
+      local.currentFloor = floorIndex;
+      local.y = y;
+      local.z = nudgedZ;
+      applyGlophicsFloorCutaway(floorIndex);
+      stairsCooldownUntil = performance.now() + STAIRS_COOLDOWN_MS;
+    }
+    function checkStairsContact() {
+      if (battle || teamBattle || pvpBattle) return;
+      if (performance.now() < stairsCooldownUntil) return;
+      for (const t of GLOPHICS_STAIR_TRANSITIONS) {
+        if (local.currentFloor === t.belowFloor) {
+          if (Math.hypot(local.x - t.x, local.z - t.z) <= STAIRS_CONTACT_RADIUS) {
+            goToGlophicsFloor(t.aboveFloor, t.aboveY, t.z - STAIRS_STEP_AWAY);
+            return;
+          }
+        } else if (local.currentFloor === t.aboveFloor) {
+          if (Math.hypot(local.x - t.x, local.z - t.z) <= STAIRS_CONTACT_RADIUS) {
+            goToGlophicsFloor(t.belowFloor, t.belowY, t.z - STAIRS_STEP_AWAY);
+            return;
+          }
         }
       }
     }
@@ -33245,6 +35725,107 @@ void main() {
     let karirsPreviousRace = null;
     let karirsTvShowingPreview = false;
     let karirsPreviewStartedAt = 0;
+    let karirsGaitTime = 0;
+    let karirsPracticeState = null;
+    function updateKarirsPracticeState() {
+      if (!karirsPracticeState) return;
+      const now = Date.now();
+      if (karirsPracticeState.phase === "countdown") {
+        if (now < karirsPracticeState.countdownEndsAt) return;
+        const { steps, winner } = simulateKarirsPracticeRace(karirsPracticeState.racerNames);
+        karirsPracticeState = {
+          phase: "racing",
+          race: {
+            racer_names: karirsPracticeState.racerNames,
+            steps,
+            winning_name: winner,
+            status: "racing",
+            // Matches the "${race.started_at}Z" parsing convention every
+            // real race's own started_at already relies on (a naive UTC
+            // string with no timezone suffix of its own) — toISOString()
+            // already ends in "Z", so that has to come off first or the
+            // parse would see a bogus trailing "ZZ".
+            started_at: (/* @__PURE__ */ new Date()).toISOString().replace(/Z$/, "")
+          },
+          revertAt: null
+        };
+        return;
+      }
+      const finished = now - (/* @__PURE__ */ new Date(`${karirsPracticeState.race.started_at}Z`)).getTime() >= karirsPracticeState.race.steps.length * KARIRS_STEP_DELAY_MS;
+      if (finished && karirsPracticeState.revertAt === null) {
+        karirsPracticeState.revertAt = now + KARIRS_PRACTICE_RESULT_HOLD_MS;
+      }
+      if (karirsPracticeState.revertAt !== null && now >= karirsPracticeState.revertAt) {
+        karirsPracticeState = null;
+        refreshKarraMenu();
+      }
+    }
+    function updateKarirsTrackVisual(dt) {
+      updateKarirsPracticeState();
+      const race = karirsPracticeState?.phase === "racing" ? karirsPracticeState.race : karirsPracticeState?.phase === "countdown" ? { racer_names: karirsPracticeState.racerNames, steps: null, status: "betting_open" } : karirsRace;
+      karirsGaitTime += dt;
+      const isResolved = race?.status === "resolved";
+      let startedAt = null;
+      if (race && race.status !== "betting_open" && race.steps && race.steps.length > 0) {
+        startedAt = (/* @__PURE__ */ new Date(`${race.started_at}Z`)).getTime();
+      }
+      for (let i = 0; i < karirsRacerMarkers.length; i++) {
+        const marker = karirsRacerMarkers[i];
+        const name = race?.racer_names?.[i];
+        marker.group.visible = !!name;
+        if (!name) continue;
+        if (marker.currentName !== name) {
+          marker.currentName = name;
+          updateKarirsRacerLabel(marker, name);
+          marker.prevPos = NaN;
+          marker.gaitPhase = i;
+        }
+        let pos = 0;
+        if (startedAt !== null) {
+          const elapsedMs = Math.max(0, Date.now() - startedAt);
+          const raw = elapsedMs / KARIRS_STEP_DELAY_MS;
+          const idx = Math.floor(raw);
+          if (idx >= race.steps.length) {
+            pos = race.steps[race.steps.length - 1].positions[name] ?? 0;
+          } else {
+            const frac = raw - idx;
+            const prevPositions = idx === 0 ? null : race.steps[idx - 1].positions;
+            const prevVal = prevPositions ? prevPositions[name] ?? 0 : 0;
+            const curVal = race.steps[idx].positions[name] ?? 0;
+            pos = prevVal + (curVal - prevVal) * frac;
+          }
+        }
+        pos = Math.max(0, Math.min(100, pos));
+        const speed = isResolved || Number.isNaN(marker.prevPos) ? 0 : Math.max(0, (pos - marker.prevPos) / dt);
+        marker.prevPos = pos;
+        const isMoving = speed > KARIRS_GAIT_STOP_SPEED_THRESHOLD;
+        const speedRatio = Math.min(1, speed / KARIRS_GAIT_SPRINT_SPEED);
+        const isExhausted = isMoving && speed < KARIRS_GAIT_EXHAUSTED_SPEED_THRESHOLD;
+        const easeStep = Math.min(1, dt * KARIRS_GAIT_POSE_EASE_RATE);
+        marker.exhaustedBlend += ((isExhausted ? 1 : 0) - marker.exhaustedBlend) * easeStep;
+        const eb = marker.exhaustedBlend;
+        if (isMoving) {
+          const frequency = (KARIRS_GAIT_WALK_FREQUENCY + (KARIRS_GAIT_SPRINT_FREQUENCY - KARIRS_GAIT_WALK_FREQUENCY) * speedRatio) * (1 - 0.5 * eb);
+          marker.gaitPhase += dt * frequency;
+        }
+        const strideScale = (isMoving ? Math.max(0.35, speedRatio) : 0) * (1 - 0.5 * eb);
+        const gait = Math.sin(marker.gaitPhase) * KARIRS_GAIT_SPRINT_STRIDE * strideScale;
+        marker.leftLeg.rotation.x = gait;
+        marker.rightLeg.rotation.x = -gait;
+        const exhaustedArmL = KARIRS_GAIT_EXHAUSTED_ARM_FORWARD + Math.sin(karirsGaitTime * 9) * KARIRS_GAIT_EXHAUSTED_TREMBLE;
+        const exhaustedArmR = KARIRS_GAIT_EXHAUSTED_ARM_FORWARD + Math.sin(karirsGaitTime * 9 + 1) * KARIRS_GAIT_EXHAUSTED_TREMBLE;
+        marker.leftArm.rotation.x = -gait + (exhaustedArmL - -gait) * eb;
+        marker.rightArm.rotation.x = gait + (exhaustedArmR - gait) * eb;
+        marker.torso.rotation.x = KARIRS_GAIT_EXHAUSTED_LEAN * eb;
+        marker.head.rotation.x = KARIRS_GAIT_EXHAUSTED_HEAD_DROOP * eb;
+        marker.torso.scale.y = 1 + Math.sin(karirsGaitTime * KARIRS_GAIT_EXHAUSTED_BREATH_FREQUENCY) * KARIRS_GAIT_EXHAUSTED_BREATH_AMPLITUDE * eb;
+        const bodyBounce = Math.abs(Math.sin(marker.gaitPhase)) * KARIRS_GAIT_SPRINT_BOUNCE * strideScale;
+        marker.z = KARIRS_TRACK_START_Z + (KARIRS_TRACK_FINISH_Z - KARIRS_TRACK_START_Z) * (pos / 100);
+        marker.group.position.set(KARIRS_FIELD_X + KARIRS_TRACK_LANE_OFFSETS[i], bodyBounce, marker.z);
+        marker.head.position.y = marker.headBaseY + Math.abs(Math.sin(marker.gaitPhase)) * KARIRS_GAIT_HEAD_BOB * strideScale;
+        marker.label.visible = Math.hypot(local.x - marker.group.position.x, local.z - marker.z) <= LABEL_VISIBLE_DISTANCE;
+      }
+    }
     let statsModalGlophimon = null;
     let releasingId = null;
     let actionsForId = null;
@@ -33260,6 +35841,11 @@ void main() {
     let myHostedChessBoardId = null;
     let activeChessMatch = null;
     let chessLeaveWarningIntervalId = null;
+    const damaBoards = { 1: { status: "empty" }, 2: { status: "empty" }, 3: { status: "empty" } };
+    let boardHostChoiceTargetBoardId = null;
+    let damaJoinTargetBoardId = null;
+    let myHostedDamaBoardId = null;
+    let activeDamaMatch = null;
     function getActiveLineup() {
       const owned = menuData.glophimon.filter((g) => g.active_slot !== null).sort((a, b) => a.active_slot - b.active_slot).slice(0, WILD_TEAM_MAX_SIZE);
       if (owned.length > 0) return owned;
@@ -33564,6 +36150,50 @@ void main() {
         ctx.onOpenMenu?.();
       }
     });
+    function battleAnimRank(anim) {
+      if (!anim) return 0;
+      if (anim.type === "attack" || anim.type === "cast") return 3;
+      if (anim.type === "ready") return 2;
+      return 1;
+    }
+    function buildBattleSnapshot() {
+      let activeAnim = null;
+      const animatingIndex = battle.playerTeam.findIndex((m) => m.anim);
+      const playerAnim = animatingIndex !== -1 ? battle.playerTeam[animatingIndex].anim : null;
+      if (battleAnimRank(playerAnim) >= battleAnimRank(battle.wildAnim) && playerAnim) {
+        activeAnim = { side: "player", type: playerAnim.type, member_index: animatingIndex };
+      } else if (battle.wildAnim) {
+        activeAnim = { side: "wild", type: battle.wildAnim.type, member_index: null };
+      }
+      return {
+        wild_id: battle.wildId,
+        wild_species_key: battle.wildSpecies.key,
+        wild_level: battle.wildLevel,
+        wild_hp: battle.wild.hp,
+        wild_max_hp: battle.wild.maxHp,
+        x: battle.centerX,
+        z: battle.centerZ,
+        // The battling player's own facing at the moment of this snapshot —
+        // movement is disabled entirely while `battle` is active (see
+        // frame()'s own movement gate), so in practice this is set once at
+        // battle start and never actually changes; sent on every call anyway
+        // rather than carved out as a one-time-only field, since a
+        // full-snapshot shape shouldn't need separate bookkeeping for
+        // "did this already go out." Lets a spectating client's own
+        // buildSpectatorBattleEntry lay its rigs out with the exact same
+        // forwardX/rightX math startWildBattle itself uses, just driven off
+        // this instead of that client's own `local`.
+        facing_angle: local.facingAngle,
+        player_team: battle.playerTeam.map((m) => ({
+          species_key: m.species.key,
+          name: m.combatant.name,
+          level: m.owned?.level ?? 1,
+          hp: m.combatant.hp,
+          max_hp: m.combatant.maxHp
+        })),
+        active_anim: activeAnim
+      };
+    }
     function startWildBattle(speciesOverride, levelOverride, wildId) {
       if (battle || teamBattle || pvpBattle) return;
       const lineup = getActiveLineup();
@@ -33641,11 +36271,27 @@ void main() {
         // engaged with the server at all. endBattle/finishCatchSequence
         // both guard on this before calling ctx.onReleaseWild/onWildCaught.
         wildId,
+        // Snapshot of "was this battle ever actually narrated to the server"
+        // (see startWildBattle's own sendWildBattleStart call, guarded the
+        // exact same way), captured once and never mutated — unlike wildId
+        // itself, which finishCatchSequence deliberately NULLS OUT on a
+        // successful catch (see its own comment) so endBattle's *other*
+        // wildId-guarded cleanup (release-back-to-the-world) doesn't
+        // double-fire for an already-caught wild. endBattle's own
+        // sendWildBattleEnd call needs to fire in EVERY outcome including a
+        // catch, so it can't reuse that same now-nulled field — this is the
+        // stable one it checks instead.
+        spectatable: wildId != null,
         centerX,
         centerZ,
         midX: (playerMonX + wildX) / 2,
         midZ: (playerMonZ + wildZ) / 2,
-        camAngle: local.facingAngle + BATTLE_CAM_ANGLE_OFFSET,
+        // A saved Camera Designer "Starting Angle" for this slot takes effect
+        // from the very first frame this battle renders, not just after
+        // frame()'s own reset-camera block has had a chance to increment it —
+        // see cameraOverrides.wild below. Falls back to the exact same
+        // facing-relative wide framing as always when nothing's been saved.
+        camAngle: cameraOverrides.wild?.angle ?? local.facingAngle + BATTLE_CAM_ANGLE_OFFSET,
         // fallback wide framing only — see frame()'s own comment
         focus: null,
         // set every round by beginRound/showWildDeclareStep (see focusWildCameraOnRig) — same camera-follow behavior as the 3v3 battle
@@ -33695,6 +36341,7 @@ void main() {
       updateHpBars();
       updateGlophiballCount();
       logBattle(`A wild ${wild.name} appeared!`);
+      if (wildId != null) socket.sendWildBattleStart(buildBattleSnapshot());
     }
     function updateIntroAnim(dt) {
       if (!battle || !battle.introAnim) return;
@@ -33728,8 +36375,6 @@ void main() {
           anim.elapsedMs = 0;
           battle.wildRig.group.visible = true;
           const representative = getPlayerRepresentative();
-          const fx = Math.sin(local.facingAngle);
-          const fz = Math.cos(local.facingAngle);
           const pos = representative.rig.group.position;
           anim.startCamX = camera.position.x;
           anim.startCamY = camera.position.y;
@@ -33738,12 +36383,16 @@ void main() {
           anim.startLookY = PAN_TARGET_Y;
           anim.startLookZ = battle.midZ;
           const wildPos = battle.wildRig.group.position;
-          anim.targetCamX = pos.x - fx * TEAM_FOCUS_CAM_BEHIND;
-          anim.targetCamY = TEAM_FOCUS_CAM_HEIGHT;
-          anim.targetCamZ = pos.z - fz * TEAM_FOCUS_CAM_BEHIND;
-          anim.targetLookX = battle.turnSide === "wild" ? wildPos.x : pos.x + fx * TEAM_FOCUS_CAM_LOOK_AHEAD;
-          anim.targetLookY = TEAM_FOCUS_CAM_LOOK_Y;
-          anim.targetLookZ = battle.turnSide === "wild" ? wildPos.z : pos.z + fz * TEAM_FOCUS_CAM_LOOK_AHEAD;
+          const introFocusSlot = battle.turnSide === "wild" ? "wild_decide_defend" : null;
+          const introLookAtPos = battle.turnSide === "wild" ? wildPos : null;
+          const introParams = resolveWildFocusParams(introFocusSlot);
+          const introFrame = computeFocusCameraFrame(pos, local.facingAngle, introLookAtPos, introParams, introParams.angle);
+          anim.targetCamX = introFrame.camX;
+          anim.targetCamY = introFrame.camY;
+          anim.targetCamZ = introFrame.camZ;
+          anim.targetLookX = introFrame.lookX;
+          anim.targetLookY = introFrame.lookY;
+          anim.targetLookZ = introFrame.lookZ;
         }
         return;
       }
@@ -33771,14 +36420,21 @@ void main() {
         return;
       }
       if (anim.type === "ready") {
-        applyReadyPose(rig, dt);
+        if (!tryPlayBattlePoseOverride(rig, "ready", anim.readyElapsedMs = (anim.readyElapsedMs || 0) + dt * 1e3, false)) {
+          applyReadyPose(rig, dt);
+        }
         return;
       }
       anim.elapsedMs += dt * 1e3;
-      const duration = anim.type === "attack" ? ATTACK_ANIM_MS : anim.type === "cast" ? CAST_ANIM_MS : DEFEND_ANIM_MS;
-      if (anim.type === "attack") applyAttackPose(rig, anim.elapsedMs, duration);
-      else if (anim.type === "cast") applyCastPose(rig, anim.elapsedMs, duration);
-      else applyDefendPose(rig, anim.elapsedMs, duration);
+      const override = poseOverrides[anim.type];
+      const hasOverride = !!(override && override.keyframes && override.keyframes.length > 0);
+      const duration = hasOverride ? poseOverrideTotalMs(override.keyframes) : anim.type === "attack" ? ATTACK_ANIM_MS : anim.type === "cast" ? CAST_ANIM_MS : DEFEND_ANIM_MS;
+      const usedOverride = hasOverride && tryPlayBattlePoseOverride(rig, anim.type, anim.elapsedMs, true);
+      if (!usedOverride) {
+        if (anim.type === "attack") applyAttackPose(rig, anim.elapsedMs, duration);
+        else if (anim.type === "cast") applyCastPose(rig, anim.elapsedMs, duration);
+        else applyDefendPose(rig, anim.elapsedMs, duration);
+      }
       if (anim.elapsedMs >= duration) battleState[key] = null;
     }
     function setWildFocusedRig(rig) {
@@ -33788,16 +36444,37 @@ void main() {
       battle.focusedRig = rig;
       if (rig) setRigTransparent(rig, true);
     }
-    function focusWildCameraOnRig(rig, facingAngle, lookAtPos) {
+    function resolveWildFocusParams(overrideSlotId) {
+      const o = overrideSlotId ? cameraOverrides[overrideSlotId] : null;
+      return {
+        behind: o?.behind ?? TEAM_FOCUS_CAM_BEHIND,
+        height: o?.height ?? TEAM_FOCUS_CAM_HEIGHT,
+        lookY: o?.lookY ?? TEAM_FOCUS_CAM_LOOK_Y,
+        lookAhead: o?.lookAhead ?? TEAM_FOCUS_CAM_LOOK_AHEAD,
+        // Orbit support for a focus shot (new — see CAMERA_FOCUS_FIELDS and
+        // advanceFocusOrbit below). angle is the static "start here" offset
+        // (0 = today's exact "directly behind" shot); rotateSpeed/
+        // heightRotateSpeed both default to 0 ("off"), unlike the 3 orbit
+        // slots' own rotateSpeed (which defaults to RESET_CAM_ORBIT_SPEED,
+        // on) — a focus shot never rotated at all before this, so "off until
+        // customized" is the byte-identical baseline here.
+        angle: o?.angle ?? 0,
+        autoRotate: o?.autoRotate !== false,
+        rotateSpeed: o?.rotateSpeed ?? 0,
+        heightRotateSpeed: o?.heightRotateSpeed ?? 0
+      };
+    }
+    function focusWildCameraOnRig(rig, facingAngle, lookAtPos, overrideSlotId) {
       setWildFocusedRig(rig);
-      const fx = Math.sin(facingAngle);
-      const fz = Math.cos(facingAngle);
-      const pos = rig.group.position;
+      const params = resolveWildFocusParams(overrideSlotId);
+      const frame2 = computeFocusCameraFrame(rig.group.position, facingAngle, lookAtPos, params, params.angle);
       battle.focus = {
-        camX: pos.x - fx * TEAM_FOCUS_CAM_BEHIND,
-        camZ: pos.z - fz * TEAM_FOCUS_CAM_BEHIND,
-        lookX: lookAtPos ? lookAtPos.x : pos.x + fx * TEAM_FOCUS_CAM_LOOK_AHEAD,
-        lookZ: lookAtPos ? lookAtPos.z : pos.z + fz * TEAM_FOCUS_CAM_LOOK_AHEAD
+        ...frame2,
+        anchorRig: rig,
+        facingAngle,
+        lookAtPos,
+        params,
+        slotId: overrideSlotId || null
       };
     }
     function unfocusWildCamera() {
@@ -33828,9 +36505,10 @@ void main() {
         battle.pendingRole = "player_defender";
         setActionButtons({ attack: false, escape: true, catchable: false });
         const representative = getPlayerRepresentative();
-        if (representative) focusWildCameraOnRig(representative.rig, local.facingAngle, battle.wildRig.group.position);
+        if (representative) focusWildCameraOnRig(representative.rig, local.facingAngle, battle.wildRig.group.position, "wild_decide_defend");
         else unfocusWildCamera();
         battle.wildAnim = { type: "ready", elapsedMs: 0 };
+        if (battle.wildId != null) socket.sendWildBattleUpdate(buildBattleSnapshot());
         showPlayerDefenderSelectionWild();
       }
     }
@@ -33863,7 +36541,7 @@ void main() {
         showWildDeclareStep();
         return;
       }
-      focusWildCameraOnRig(member.rig, local.facingAngle);
+      focusWildCameraOnRig(member.rig, local.facingAngle, null, "wild_declare");
       logBattle(`${member.combatant.name}, what will you do?`);
       dynamicActionsEl.innerHTML = "";
       dynamicActionsEl.style.display = "flex";
@@ -33972,6 +36650,7 @@ void main() {
         battle.pendingSteps = attackSteps;
         if (acting.length === 0) logBattle("You declare no attacks this round.");
         updateHpBars();
+        if (battle.wildId != null) socket.sendWildBattleUpdate(buildBattleSnapshot());
         battle.tickTimer = setTimeout(processNextStep, TEAM_STEP_MS);
       });
       dynamicActionsEl.appendChild(confirmBtn);
@@ -34042,7 +36721,9 @@ void main() {
     }
     function resolvePlayerAttack(attackerMember, move, wildDefends) {
       const attacker = attackerMember.combatant;
-      attackerMember.anim = { type: move.kind === "debuff" ? "cast" : "attack", elapsedMs: 0 };
+      const attackPoseType = move.kind === "debuff" ? "cast" : "attack";
+      attackerMember.anim = { type: attackPoseType, elapsedMs: 0 };
+      focusWildCameraOnRig(attackerMember.rig, local.facingAngle, battle.wildRig.group.position, "wild_attack_scene");
       battle.wildRig.targetAnim = { elapsedMs: 0 };
       const result = resolveMove({
         move,
@@ -34052,8 +36733,17 @@ void main() {
         ctx: { log: logBattle, onUndefendedDamage: () => {
         } }
       });
-      if (wildDefends && result?.hit && move.kind === "damage") battle.wildAnim = { type: "defend", elapsedMs: 0 };
+      if (wildDefends && result?.hit && move.kind === "damage") {
+        battle.wildAnim = { type: "defend", elapsedMs: 0 };
+        focusWildCameraOnRig(battle.wildRig, battle.wildRig.group.rotation.y, attackerMember.rig.group.position, "wild_defend_scene");
+      }
       updateHpBars();
+      if (battle.wildId != null) socket.sendWildBattleUpdate(buildBattleSnapshot());
+      let settleMs = effectivePoseDurationMs(attackPoseType);
+      if (wildDefends && result?.hit && move.kind === "damage") {
+        settleMs = Math.max(settleMs, effectivePoseDurationMs("defend"));
+      }
+      settleMs += ANIM_SETTLE_BUFFER_MS;
       battle.tickTimer = setTimeout(() => {
         if (!battle || battle.ended) return;
         if (battle.wild.hp <= 0) {
@@ -34063,7 +36753,7 @@ void main() {
           return;
         }
         processNextStep();
-      }, ANIM_SETTLE_MS);
+      }, settleMs);
     }
     function finishPlayerAttackRound() {
       if (!battle || battle.ended) return;
@@ -34106,6 +36796,8 @@ void main() {
     function resolveWildAttack(defenderMember) {
       dynamicActionsEl.style.display = "none";
       battle.wildAnim = { type: "attack", elapsedMs: 0 };
+      const attackLookAtRig = defenderMember ? defenderMember.rig : getPlayerRepresentative()?.rig;
+      if (attackLookAtRig) focusWildCameraOnRig(battle.wildRig, battle.wildRig.group.rotation.y, attackLookAtRig.group.position, "wild_attack_scene");
       const attacker = battle.wild;
       const result = resolveMove({
         move: ATTACK_MOVE,
@@ -34117,13 +36809,20 @@ void main() {
       if (result?.hit && defenderMember) {
         defenderMember.rig.targetAnim = { elapsedMs: 0 };
         defenderMember.anim = { type: "defend", elapsedMs: 0 };
+        focusWildCameraOnRig(defenderMember.rig, local.facingAngle, battle.wildRig.group.position, "wild_defend_scene");
         if (defenderMember.combatant.hp <= 0) {
           defenderMember.combatant.fainted = true;
           logBattle(`Your ${defenderMember.combatant.name} fainted!`);
         }
       }
       updateHpBars();
-      battle.tickTimer = setTimeout(advanceAfterWildAttack, ANIM_SETTLE_MS);
+      if (battle.wildId != null) socket.sendWildBattleUpdate(buildBattleSnapshot());
+      let settleMs = effectivePoseDurationMs("attack");
+      if (result?.hit && defenderMember) {
+        settleMs = Math.max(settleMs, effectivePoseDurationMs("defend"));
+      }
+      settleMs += ANIM_SETTLE_BUFFER_MS;
+      battle.tickTimer = setTimeout(advanceAfterWildAttack, settleMs);
     }
     function advanceAfterWildAttack() {
       if (!battle || battle.ended) return;
@@ -34300,6 +36999,7 @@ void main() {
     function endBattle() {
       if (!battle) return;
       battle.ended = true;
+      if (battle.spectatable) socket.sendWildBattleEnd();
       syncOwnedGlophimonHp(battle.playerTeam);
       battleCooldownUntil = performance.now() + POST_BATTLE_COOLDOWN_MS;
       if (battle.wildId != null) {
@@ -34337,7 +37037,7 @@ void main() {
       battle.domeMesh.geometry.dispose();
       battle.domeMesh.material.dispose();
       setLocalTransparent(false);
-      for (const peer of peers.values()) setPeerHidden(peer, false);
+      for (const [peerUserId, peer] of peers.entries()) setPeerHidden(peer, peerBattles.has(peerUserId));
       setActionButtons({ attack: false, escape: false, catchable: false });
       postCatchContinueBtn.style.display = "none";
       dynamicActionsEl.style.display = "none";
@@ -34346,6 +37046,99 @@ void main() {
       battleHudWildEl.style.display = "none";
       setBattleButtonsDisabled(false);
       battle = null;
+    }
+    function buildSpectatorBattleEntry(byUserId, snapshot) {
+      const wildSpecies = SPECIES_BY_KEY[snapshot.wild_species_key];
+      if (!wildSpecies) return null;
+      const facingAngle = snapshot.facing_angle || 0;
+      const forwardX = Math.sin(facingAngle);
+      const forwardZ = Math.cos(facingAngle);
+      const rightX = Math.cos(facingAngle);
+      const rightZ = -Math.sin(facingAngle);
+      const centerX = snapshot.x;
+      const centerZ = snapshot.z;
+      const playerMonX = centerX + forwardX * BATTLE_PLAYER_MON_OFFSET;
+      const playerMonZ = centerZ + forwardZ * BATTLE_PLAYER_MON_OFFSET;
+      const wildX = centerX + forwardX * BATTLE_WILD_OFFSET;
+      const wildZ = centerZ + forwardZ * BATTLE_WILD_OFFSET;
+      const roster = snapshot.player_team || [];
+      const memberCount = Math.max(1, roster.length);
+      const memberRigs = roster.map((member, i) => {
+        const species = SPECIES_BY_KEY[member.species_key];
+        const colors = species ? { head: species.head_color, body: species.body_color, arm: species.arm_color, leg: species.leg_color } : { head: "#888888", body: "#888888", arm: "#888888", leg: "#888888" };
+        const rig = buildBlockyCharacter(colors, member.name);
+        rig.group.scale.setScalar(CREATURE_SCALE);
+        const lateralOffset = (i - (memberCount - 1) / 2) * WILD_TEAM_MEMBER_SPACING;
+        rig.group.position.set(playerMonX + rightX * lateralOffset, 0, playerMonZ + rightZ * lateralOffset);
+        rig.group.rotation.y = facingAngle;
+        scene.add(rig.group);
+        return { rig, anim: null };
+      });
+      const wildRig = buildBlockyCharacter(
+        { head: wildSpecies.head_color, body: wildSpecies.body_color, arm: wildSpecies.arm_color, leg: wildSpecies.leg_color },
+        wildSpecies.name
+      );
+      wildRig.group.scale.setScalar(CREATURE_SCALE);
+      wildRig.group.position.set(wildX, 0, wildZ);
+      wildRig.group.rotation.y = facingAngle + Math.PI;
+      scene.add(wildRig.group);
+      const domeGeometry = new SphereGeometry(BATTLE_DOME_RADIUS, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2);
+      const domeMaterial = new MeshBasicMaterial({
+        color: "#bfe3ff",
+        transparent: true,
+        opacity: 0.12,
+        side: DoubleSide,
+        depthWrite: false
+      });
+      const domeMesh = new Mesh(domeGeometry, domeMaterial);
+      domeMesh.position.set(centerX, 0, centerZ);
+      scene.add(domeMesh);
+      const peer = peers.get(byUserId);
+      if (peer) setPeerHidden(peer, true);
+      return { memberRigs, wildRig, domeMesh, wildAnim: null };
+    }
+    function applySpectatorBattleSnapshot(byUserId, snapshot) {
+      if (byUserId === localUserId) return;
+      let entry = peerBattles.get(byUserId);
+      if (!entry) {
+        entry = buildSpectatorBattleEntry(byUserId, snapshot);
+        if (!entry) return;
+        peerBattles.set(byUserId, entry);
+      }
+      entry.wildHp = snapshot.wild_hp;
+      entry.wildMaxHp = snapshot.wild_max_hp;
+      const roster = snapshot.player_team || [];
+      for (let i = 0; i < entry.memberRigs.length; i++) {
+        const member = roster[i];
+        if (member) {
+          entry.memberRigs[i].hp = member.hp;
+          entry.memberRigs[i].maxHp = member.max_hp;
+        }
+      }
+      for (const memberRig of entry.memberRigs) memberRig.anim = null;
+      entry.wildAnim = null;
+      const anim = snapshot.active_anim;
+      if (anim && anim.side === "player" && entry.memberRigs[anim.member_index]) {
+        entry.memberRigs[anim.member_index].anim = { type: anim.type, elapsedMs: 0 };
+      } else if (anim && anim.side === "wild") {
+        entry.wildAnim = { type: anim.type, elapsedMs: 0 };
+      }
+    }
+    function teardownSpectatorBattleEntry(byUserId) {
+      const entry = peerBattles.get(byUserId);
+      if (!entry) return;
+      for (const memberRig of entry.memberRigs) {
+        scene.remove(memberRig.rig.group);
+        disposeRig(memberRig.rig);
+      }
+      scene.remove(entry.wildRig.group);
+      disposeRig(entry.wildRig);
+      scene.remove(entry.domeMesh);
+      entry.domeMesh.geometry.dispose();
+      entry.domeMesh.material.dispose();
+      peerBattles.delete(byUserId);
+      const peer = peers.get(byUserId);
+      if (peer) setPeerHidden(peer, false);
     }
     let teamBattle = null;
     function logTeamBattle(text) {
@@ -34448,7 +37241,9 @@ void main() {
       teamBattle = {
         centerX,
         centerZ,
-        camAngle: local.facingAngle + BATTLE_CAM_ANGLE_OFFSET,
+        // Same "saved Starting Angle takes effect immediately" reasoning as
+        // the wild battle's own camAngle init above — see cameraOverrides.team.
+        camAngle: cameraOverrides.team?.angle ?? local.facingAngle + BATTLE_CAM_ANGLE_OFFSET,
         domeMesh,
         npcTrainerRig,
         teams: [yourTeam, npcTeam],
@@ -34854,7 +37649,7 @@ void main() {
       teamBattle.domeMesh.geometry.dispose();
       teamBattle.domeMesh.material.dispose();
       setLocalTransparent(false);
-      for (const peer of peers.values()) setPeerHidden(peer, false);
+      for (const [peerUserId, peer] of peers.entries()) setPeerHidden(peer, peerBattles.has(peerUserId));
       teamBattlePanel.style.display = "none";
       setBattleButtonsDisabled(false);
       teamBattle = null;
@@ -34870,6 +37665,7 @@ void main() {
     let zoomRadius = CAMERA_RADIUS;
     let followX = local.x;
     let followZ = local.z;
+    let followY = local.y;
     let isDragging = false;
     let lastMouseX = 0;
     let lastMouseY = 0;
@@ -34991,7 +37787,7 @@ void main() {
       bossRickMenuEl.style.left = `${clientX - wrapRect.left}px`;
       bossRickMenuEl.style.top = `${clientY - wrapRect.top}px`;
       bossRickMenuEl.style.display = "block";
-      bossRickStep = "host_confirm";
+      bossRickStep = "choose_mode";
       renderBossRickMenu();
     }
     function renderBossRickMenu() {
@@ -35012,13 +37808,17 @@ void main() {
         p.textContent = text;
         bossRickMenuBodyEl.appendChild(p);
       }
-      if (bossRickStep === "host_confirm") {
-        addLabel("Host a Luba deathmatch?");
-        addBtn("Yes", () => {
+      if (bossRickStep === "choose_mode") {
+        addLabel("What'll it be?");
+        addBtn("Host a Luba deathmatch", () => {
           bossRickStep = "mode_confirm";
           renderBossRickMenu();
         });
-        addBtn("No", () => hideBossRickMenu());
+        addBtn("Practice Mode", () => {
+          hideBossRickMenu();
+          ctx.onLubaPracticeRequested?.();
+        });
+        addBtn("Cancel", () => hideBossRickMenu());
       } else if (bossRickStep === "mode_confirm") {
         addLabel("Mode: Deathmatch");
         addBtn("Confirm", () => {
@@ -35026,7 +37826,7 @@ void main() {
           renderBossRickMenu();
         });
         addBtn("Back", () => {
-          bossRickStep = "host_confirm";
+          bossRickStep = "choose_mode";
           renderBossRickMenu();
         });
       } else if (bossRickStep === "duration_select") {
@@ -35043,6 +37843,66 @@ void main() {
         });
       }
     }
+    function hideUsherMenu() {
+      usherMenuEl.style.display = "none";
+    }
+    function showUsherMenu(clientX, clientY) {
+      const wrapRect = wrap.getBoundingClientRect();
+      usherMenuEl.style.left = `${clientX - wrapRect.left}px`;
+      usherMenuEl.style.top = `${clientY - wrapRect.top}px`;
+      usherMenuEl.style.display = "block";
+      renderUsherMenu();
+    }
+    function showUsherError(reason) {
+      const p = document.createElement("p");
+      p.style.fontSize = "10px";
+      p.style.color = "#ef4444";
+      p.style.margin = "4px 0 0 0";
+      p.textContent = `Error: ${reason}`;
+      if (usherMenuEl.style.display !== "none") usherMenuBodyEl.appendChild(p);
+      else console.warn("[cinema]", reason);
+    }
+    function renderUsherMenu() {
+      usherMenuBodyEl.innerHTML = "";
+      function addBtn(label, onClick) {
+        const btn = document.createElement("button");
+        btn.textContent = label;
+        btn.style.fontSize = "11px";
+        btn.style.display = "block";
+        btn.style.width = "100%";
+        btn.style.margin = "2px 0";
+        btn.addEventListener("click", onClick);
+        usherMenuBodyEl.appendChild(btn);
+      }
+      function addLabel(text) {
+        const p = document.createElement("p");
+        p.style.margin = "0 0 4px 0";
+        p.textContent = text;
+        usherMenuBodyEl.appendChild(p);
+      }
+      if (cinemaProjectionist && cinemaProjectionist.user_id === localUserId) {
+        addLabel("You're our projectionist! What should we play?");
+        const urlInput = document.createElement("input");
+        urlInput.type = "text";
+        urlInput.placeholder = "https://...";
+        urlInput.style.width = "100%";
+        urlInput.style.marginBottom = "4px";
+        usherMenuBodyEl.appendChild(urlInput);
+        addBtn("Change what's playing", () => {
+          const url = urlInput.value.trim();
+          if (!url || !url.startsWith("http")) {
+            showUsherError("invalid_url");
+            return;
+          }
+          socket.sendCinemaSetUrl(url);
+        });
+      } else if (cinemaProjectionist) {
+        addLabel(`Sorry, ${cinemaProjectionist.display_name} is already our projectionist.`);
+      } else {
+        addLabel("We're hiring! Want to be our projectionist?");
+        addBtn("I'll do it!", () => socket.sendCinemaClaimProjectionist());
+      }
+    }
     function showChessError(reason) {
       const p = document.createElement("p");
       p.style.fontSize = "10px";
@@ -35052,6 +37912,16 @@ void main() {
       if (chessHostMenuEl.style.display !== "none") chessHostMenuBodyEl.appendChild(p);
       else if (chessJoinMenuEl.style.display !== "none") chessJoinMenuBodyEl.appendChild(p);
       else console.warn("[chess]", reason);
+    }
+    function showDamaError(reason) {
+      const p = document.createElement("p");
+      p.style.fontSize = "10px";
+      p.style.color = "#ef4444";
+      p.style.margin = "4px 0 0 0";
+      p.textContent = `Error: ${reason}`;
+      if (boardHostChoiceMenuEl.style.display !== "none") boardHostChoiceBodyEl.appendChild(p);
+      else if (damaJoinMenuEl.style.display !== "none") damaJoinMenuBodyEl.appendChild(p);
+      else console.warn("[dama]", reason);
     }
     function hideChessLeaveWarning() {
       chessLeaveWarningEl.style.display = "none";
@@ -35075,12 +37945,9 @@ void main() {
       }, 1e3);
     }
     function updateChessBoardSign(boardId, board) {
-      const sign2 = boardId === 1 ? chessBoard1StatusSign : chessBoard2StatusSign;
-      if (board.status === "empty") {
-        sign2.sprite.visible = false;
-        return;
-      }
-      sign2.sprite.visible = true;
+      const sign2 = CHESS_BOARD_SIGNS[boardId];
+      sign2.hasHost = board.status !== "empty";
+      if (!sign2.hasHost) return;
       if (board.status === "waiting") {
         updateKarirsBoardText(sign2, `Hosted by ${board.hostDisplayName} \u2014 waiting for opponent`);
       } else {
@@ -35129,10 +37996,17 @@ void main() {
       }
       const p = document.createElement("p");
       p.style.margin = "0 0 4px 0";
-      p.textContent = "Host a game of chess here?";
+      p.textContent = "Battle the AI \u2014 pick a game:";
       chessHostMenuBodyEl.appendChild(p);
-      addBtn("Yes", () => socket.sendChessHostRequest(chessHostTargetBoardId));
-      addBtn("No", () => hideChessHostMenu());
+      addBtn(`Chess (${STOCKFISH_NAME})`, () => {
+        socket.sendChessAiStart(chessHostTargetBoardId);
+        hideChessHostMenu();
+      });
+      addBtn(`Dama (${DAMA_AI_NAME})`, () => {
+        socket.sendDamaAiStart(chessHostTargetBoardId);
+        hideChessHostMenu();
+      });
+      addBtn("Cancel", () => hideChessHostMenu());
     }
     function hideChessJoinMenu() {
       chessJoinMenuEl.style.display = "none";
@@ -35256,13 +38130,19 @@ void main() {
           sq.style.justifyContent = "center";
           sq.style.fontSize = "22px";
           sq.style.cursor = activeChessMatch.isSpectator ? "default" : "pointer";
-          sq.style.background = activeChessMatch.selectedSquare === square ? "#4ade80" : light ? "#e8d3a2" : "#6b4423";
+          const isLastMove = board.lastMove && (square === board.lastMove.from || square === board.lastMove.to);
+          sq.style.background = isLastMove ? TAMBAYAN_LAST_MOVE_TINT : light ? TAMBAYAN_BOARD_LIGHT : TAMBAYAN_BOARD_DARK;
+          sq.style.boxShadow = activeChessMatch.selectedSquare === square ? "inset 0 0 0 2px orange" : "none";
           if (pieceChar) {
-            const isWhitePiece = pieceChar === pieceChar.toUpperCase();
             sq.textContent = CHESS_UNICODE[pieceChar] || "";
-            sq.style.color = isWhitePiece ? "#f8fafc" : "#111827";
-            sq.style.webkitTextStrokeWidth = "1px";
-            sq.style.webkitTextStrokeColor = isWhitePiece ? "#111827" : "#f8fafc";
+            const isWhitePiece = pieceChar === pieceChar.toUpperCase();
+            if (isWhitePiece) {
+              sq.style.color = "#f5f5f5";
+              sq.style.textShadow = "1px 0 0 #151515, -1px 0 0 #151515, 0 1px 0 #151515, 0 -1px 0 #151515";
+            } else {
+              sq.style.color = "#151515";
+              sq.style.textShadow = "1px 0 0 #e8e8e8, -1px 0 0 #e8e8e8, 0 1px 0 #e8e8e8, 0 -1px 0 #e8e8e8";
+            }
           }
           if (!activeChessMatch.isSpectator) {
             sq.addEventListener("click", () => onChessSquareClick(activeChessMatch.boardId, square, pieceChar));
@@ -35282,6 +38162,7 @@ void main() {
           checkmate: "Checkmate",
           stalemate: "Stalemate",
           draw: "Draw",
+          draw_agreed: "Draw by agreement",
           resignation: "Resignation",
           disconnect: "Opponent disconnected",
           auto_resign_away: "Auto resignation (left Tambayan)"
@@ -35300,19 +38181,433 @@ void main() {
           outcomeEl.textContent = `${winnerName} won \u2014 ${reasonText}.`;
         }
         chessMatchBodyEl.appendChild(outcomeEl);
+        if (!activeChessMatch.isSpectator) {
+          const newGameBtn = document.createElement("button");
+          newGameBtn.textContent = "New Game";
+          newGameBtn.style.fontSize = "11px";
+          newGameBtn.style.marginTop = "4px";
+          newGameBtn.addEventListener("click", () => {
+            if (activeChessMatch.boardId === AI_BOARD_ID) socket.sendChessAiStart(activeChessMatch.boardId);
+            else socket.sendChessHostRequest(activeChessMatch.boardId);
+          });
+          chessMatchBodyEl.appendChild(newGameBtn);
+        }
       } else if (!activeChessMatch.isSpectator) {
         const turnEl = document.createElement("p");
         turnEl.style.fontSize = "11px";
         turnEl.style.color = "#a3a3a3";
-        turnEl.textContent = board.turn === myColor ? "Your move." : "Waiting for opponent\u2026";
+        turnEl.textContent = board.turn === myColor ? "Your move." : activeChessMatch.boardId === AI_BOARD_ID ? `${STOCKFISH_NAME} is thinking\u2026` : "Waiting for opponent\u2026";
         chessMatchBodyEl.appendChild(turnEl);
       }
       if (!activeChessMatch.isSpectator && !board.outcome) {
+        if (board.undoRequestedBy != null) {
+          const p = document.createElement("p");
+          p.style.fontSize = "11px";
+          p.style.margin = "0 0 4px 0";
+          p.textContent = board.undoRequestedBy === localUserId ? "Undo request sent \u2014 waiting for response\u2026" : "Opponent requests to undo their last move.";
+          chessMatchBodyEl.appendChild(p);
+          if (board.undoRequestedBy !== localUserId) {
+            addRespondButtons(chessMatchBodyEl, (accept) => socket.sendChessUndoRespond(activeChessMatch.boardId, accept));
+          }
+        } else if (board.drawOfferedBy != null) {
+          const p = document.createElement("p");
+          p.style.fontSize = "11px";
+          p.style.margin = "0 0 4px 0";
+          p.textContent = board.drawOfferedBy === localUserId ? "Draw offer sent \u2014 waiting for response\u2026" : "Opponent offers a draw.";
+          chessMatchBodyEl.appendChild(p);
+          if (board.drawOfferedBy !== localUserId) {
+            addRespondButtons(chessMatchBodyEl, (accept) => socket.sendChessDrawRespond(activeChessMatch.boardId, accept));
+          }
+        } else if (activeChessMatch.boardId !== AI_BOARD_ID) {
+          const drawBtn = document.createElement("button");
+          drawBtn.textContent = "Offer Draw";
+          drawBtn.style.fontSize = "11px";
+          drawBtn.style.marginRight = "4px";
+          drawBtn.addEventListener("click", () => socket.sendChessDrawOffer(activeChessMatch.boardId));
+          chessMatchBodyEl.appendChild(drawBtn);
+          if (board.turn !== myColor && board.moveHistory && board.moveHistory.length > 0) {
+            const undoBtn = document.createElement("button");
+            undoBtn.textContent = "Request Undo";
+            undoBtn.style.fontSize = "11px";
+            undoBtn.style.marginRight = "4px";
+            undoBtn.addEventListener("click", () => socket.sendChessUndoRequest(activeChessMatch.boardId));
+            chessMatchBodyEl.appendChild(undoBtn);
+          }
+        }
         const resignBtn = document.createElement("button");
         resignBtn.textContent = "Resign";
         resignBtn.style.fontSize = "11px";
         resignBtn.addEventListener("click", () => socket.sendChessResign(activeChessMatch.boardId));
         chessMatchBodyEl.appendChild(resignBtn);
+      }
+    }
+    function addRespondButtons(container, onRespond) {
+      const acceptBtn = document.createElement("button");
+      acceptBtn.textContent = "Accept";
+      acceptBtn.style.fontSize = "11px";
+      acceptBtn.style.marginRight = "4px";
+      acceptBtn.addEventListener("click", () => onRespond(true));
+      container.appendChild(acceptBtn);
+      const declineBtn = document.createElement("button");
+      declineBtn.textContent = "Decline";
+      declineBtn.style.fontSize = "11px";
+      declineBtn.addEventListener("click", () => onRespond(false));
+      container.appendChild(declineBtn);
+    }
+    function updateDamaBoardSign(boardId, board) {
+      const sign2 = CHESS_BOARD_SIGNS[boardId];
+      sign2.hasHost = board.status !== "empty";
+      if (!sign2.hasHost) return;
+      if (board.status === "waiting") {
+        updateKarirsBoardText(sign2, `Hosted by ${board.hostDisplayName} \u2014 waiting for opponent (Dama)`);
+      } else {
+        updateKarirsBoardText(sign2, `${board.whiteDisplayName} vs ${board.blackDisplayName} \u2014 Dama In Progress`);
+      }
+    }
+    function onSharedBoardClick(boardId, clientX, clientY) {
+      if (chessBoards[boardId].status !== "empty") {
+        onChessBoardClick(boardId, clientX, clientY);
+        return;
+      }
+      if (damaBoards[boardId].status !== "empty") {
+        onDamaBoardClick(boardId, clientX, clientY);
+        return;
+      }
+      showBoardHostChoiceMenu(boardId, clientX, clientY);
+    }
+    function onAiBoardClick(boardId, clientX, clientY) {
+      if (chessBoards[boardId].status !== "empty") {
+        onChessBoardClick(boardId, clientX, clientY);
+        return;
+      }
+      if (damaBoards[boardId].status !== "empty") {
+        onDamaBoardClick(boardId, clientX, clientY);
+        return;
+      }
+      showChessHostMenu(boardId, clientX, clientY);
+    }
+    function hideBoardHostChoiceMenu() {
+      boardHostChoiceMenuEl.style.display = "none";
+      boardHostChoiceTargetBoardId = null;
+    }
+    function showBoardHostChoiceMenu(boardId, clientX, clientY) {
+      boardHostChoiceTargetBoardId = boardId;
+      const wrapRect = wrap.getBoundingClientRect();
+      boardHostChoiceMenuEl.style.left = `${clientX - wrapRect.left}px`;
+      boardHostChoiceMenuEl.style.top = `${clientY - wrapRect.top}px`;
+      boardHostChoiceMenuEl.style.display = "block";
+      renderBoardHostChoiceMenu();
+    }
+    function renderBoardHostChoiceMenu() {
+      if (boardHostChoiceTargetBoardId == null) return;
+      boardHostChoiceBodyEl.innerHTML = "";
+      function addBtn(label, onClick) {
+        const btn = document.createElement("button");
+        btn.textContent = label;
+        btn.style.fontSize = "11px";
+        btn.style.display = "block";
+        btn.style.width = "100%";
+        btn.style.margin = "2px 0";
+        btn.addEventListener("click", onClick);
+        boardHostChoiceBodyEl.appendChild(btn);
+      }
+      addBtn("Host Chess", () => {
+        socket.sendChessHostRequest(boardHostChoiceTargetBoardId);
+        hideBoardHostChoiceMenu();
+      });
+      addBtn("Host Dama", () => {
+        socket.sendDamaHostRequest(boardHostChoiceTargetBoardId);
+        hideBoardHostChoiceMenu();
+      });
+      addBtn("Cancel", () => hideBoardHostChoiceMenu());
+    }
+    function onDamaBoardClick(boardId, clientX, clientY) {
+      const board = damaBoards[boardId];
+      if (board.status === "waiting") {
+        if (board.hostId === localUserId) {
+          showDamaWaitingModal(boardId);
+        } else {
+          showDamaJoinMenu(boardId, clientX, clientY);
+        }
+      } else if (board.status === "in_progress") {
+        const isPlayer = board.whiteUserId === localUserId || board.blackUserId === localUserId;
+        showDamaMatchModal(boardId, !isPlayer);
+      }
+    }
+    function hideDamaJoinMenu() {
+      damaJoinMenuEl.style.display = "none";
+      damaJoinTargetBoardId = null;
+    }
+    function showDamaJoinMenu(boardId, clientX, clientY) {
+      damaJoinTargetBoardId = boardId;
+      const wrapRect = wrap.getBoundingClientRect();
+      damaJoinMenuEl.style.left = `${clientX - wrapRect.left}px`;
+      damaJoinMenuEl.style.top = `${clientY - wrapRect.top}px`;
+      damaJoinMenuEl.style.display = "block";
+      renderDamaJoinMenu();
+    }
+    function renderDamaJoinMenu() {
+      if (damaJoinTargetBoardId == null) return;
+      damaJoinMenuBodyEl.innerHTML = "";
+      function addBtn(label, onClick) {
+        const btn = document.createElement("button");
+        btn.textContent = label;
+        btn.style.fontSize = "11px";
+        btn.style.display = "block";
+        btn.style.width = "100%";
+        btn.style.margin = "2px 0";
+        btn.addEventListener("click", onClick);
+        damaJoinMenuBodyEl.appendChild(btn);
+      }
+      const board = damaBoards[damaJoinTargetBoardId];
+      const p = document.createElement("p");
+      p.style.margin = "0 0 4px 0";
+      p.textContent = `Play Dama with ${board.hostDisplayName}?`;
+      damaJoinMenuBodyEl.appendChild(p);
+      addBtn("Yes", () => socket.sendDamaJoinRequest(damaJoinTargetBoardId));
+      addBtn("No", () => hideDamaJoinMenu());
+    }
+    function showDamaWaitingModal(boardId) {
+      myHostedDamaBoardId = boardId;
+      damaWaitingModalEl.style.display = "flex";
+      renderDamaWaitingModal();
+    }
+    function hideDamaWaitingModal() {
+      damaWaitingModalEl.style.display = "none";
+    }
+    function renderDamaWaitingModal() {
+      if (myHostedDamaBoardId == null) return;
+      damaWaitingBodyEl.innerHTML = "";
+      const p = document.createElement("p");
+      p.style.margin = "0";
+      p.style.fontSize = "12px";
+      p.textContent = "Waiting for a player to join\u2026";
+      damaWaitingBodyEl.appendChild(p);
+    }
+    function showDamaMatchModal(boardId, isSpectator) {
+      hideBoardHostChoiceMenu();
+      hideDamaJoinMenu();
+      activeDamaMatch = { boardId, isSpectator, selectedSquare: null, midChain: false, lastTurnSnapshot: null, turnStartSquare: null };
+      damaMatchModalEl.style.display = "flex";
+      renderDamaMatchModal();
+    }
+    function hideDamaMatchModal() {
+      damaMatchModalEl.style.display = "none";
+      activeDamaMatch = null;
+    }
+    function onDamaMatchSquareClick(boardId, row, col) {
+      if (!activeDamaMatch || activeDamaMatch.boardId !== boardId || activeDamaMatch.isSpectator) return;
+      const board = damaBoards[boardId];
+      if (board.status !== "in_progress" || board.outcome) return;
+      const myColor = board.whiteUserId === localUserId ? "white" : board.blackUserId === localUserId ? "black" : null;
+      if (myColor == null || board.turn !== myColor) return;
+      const legalMoves = getAllLegalMoves(board.grid, myColor, activeDamaMatch.midChain ? activeDamaMatch.selectedSquare : void 0);
+      if (activeDamaMatch.selectedSquare == null) {
+        const piece2 = board.grid[row][col];
+        if (piece2 && piece2.side === myColor && legalMoves.some((m) => m.from.row === row && m.from.col === col)) {
+          activeDamaMatch.selectedSquare = { row, col };
+          renderDamaMatchModal();
+        }
+        return;
+      }
+      const move = legalMoves.find(
+        (m) => m.from.row === activeDamaMatch.selectedSquare.row && m.from.col === activeDamaMatch.selectedSquare.col && m.to.row === row && m.to.col === col
+      );
+      if (move) {
+        if (!activeDamaMatch.midChain) {
+          activeDamaMatch.lastTurnSnapshot = { board: board.grid, sideToMove: board.turn };
+          activeDamaMatch.turnStartSquare = { row: activeDamaMatch.selectedSquare.row, col: activeDamaMatch.selectedSquare.col };
+        }
+        const result = applyDamaMove(board.grid, move);
+        const continued = !!result.continuedCaptureFrom;
+        let outcome = null;
+        if (continued) {
+          activeDamaMatch.selectedSquare = result.continuedCaptureFrom;
+          activeDamaMatch.midChain = true;
+        } else {
+          activeDamaMatch.selectedSquare = null;
+          activeDamaMatch.midChain = false;
+          const otherSide = myColor === "white" ? "black" : "white";
+          if (hasNoLegalMoves(result.board, otherSide)) outcome = { winner_side: myColor, reason: "no_moves" };
+        }
+        board.grid = result.board;
+        board.turn = continued ? myColor : myColor === "white" ? "black" : "white";
+        board.lastMove = { from: [activeDamaMatch.turnStartSquare.row, activeDamaMatch.turnStartSquare.col], to: [row, col], by: myColor };
+        if (outcome) board.outcome = { winnerUserId: outcome.winner_side === "white" ? board.whiteUserId : board.blackUserId, reason: outcome.reason };
+        renderDamaMatchModal();
+        socket.sendDamaMove(boardId, result.board, { continued, outcome, lastMove: board.lastMove });
+        return;
+      }
+      if (activeDamaMatch.midChain) return;
+      const piece = board.grid[row][col];
+      if (piece && piece.side === myColor && legalMoves.some((m) => m.from.row === row && m.from.col === col)) {
+        activeDamaMatch.selectedSquare = { row, col };
+      } else {
+        activeDamaMatch.selectedSquare = null;
+      }
+      renderDamaMatchModal();
+    }
+    function renderDamaMatchModal() {
+      if (!activeDamaMatch) return;
+      const board = damaBoards[activeDamaMatch.boardId];
+      damaMatchBodyEl.innerHTML = "";
+      const myColor = board.whiteUserId === localUserId ? "white" : board.blackUserId === localUserId ? "black" : null;
+      const whiteName = board.whiteDisplayName || "?";
+      const blackName = board.blackDisplayName || "?";
+      const info = document.createElement("p");
+      info.style.margin = "0 0 6px 0";
+      info.style.fontSize = "11px";
+      info.textContent = activeDamaMatch.isSpectator ? `Spectating: ${whiteName} (White) vs ${blackName} (Black)` : `You are ${myColor === "white" ? "White" : "Black"} \u2014 vs ${myColor === "white" ? blackName : whiteName}`;
+      damaMatchBodyEl.appendChild(info);
+      if (board.lastMove && myColor != null) {
+        const legend = document.createElement("p");
+        legend.style.margin = "0 0 6px 0";
+        legend.style.fontSize = "10px";
+        legend.style.display = "flex";
+        legend.style.gap = "10px";
+        const swatch = (color) => `<span style="display:inline-block;width:9px;height:9px;background:${color};border-radius:2px;margin-right:3px;vertical-align:middle;"></span>`;
+        legend.innerHTML = `<span>${swatch(TAMBAYAN_LAST_MOVE_TINT)}Your last move</span><span>${swatch(TAMBAYAN_LAST_MOVE_OPPONENT_TINT)}Opponent's last move</span>`;
+        damaMatchBodyEl.appendChild(legend);
+      }
+      const flip = !activeDamaMatch.isSpectator && myColor === "black";
+      const legalMoves = !activeDamaMatch.isSpectator && !board.outcome && board.turn === myColor ? getAllLegalMoves(board.grid, myColor, activeDamaMatch.midChain ? activeDamaMatch.selectedSquare : void 0) : [];
+      const destinations = activeDamaMatch.selectedSquare ? legalMoves.filter((m) => m.from.row === activeDamaMatch.selectedSquare.row && m.from.col === activeDamaMatch.selectedSquare.col).map((m) => m.to) : [];
+      const gridEl = document.createElement("div");
+      gridEl.style.display = "grid";
+      gridEl.style.gridTemplateColumns = "repeat(8, 32px)";
+      gridEl.style.gridTemplateRows = "repeat(8, 32px)";
+      gridEl.style.margin = "0 0 6px 0";
+      for (let screenRow = 0; screenRow < 8; screenRow++) {
+        for (let screenCol = 0; screenCol < 8; screenCol++) {
+          const row = flip ? 7 - screenRow : screenRow;
+          const col = flip ? 7 - screenCol : screenCol;
+          const sq = document.createElement("div");
+          sq.style.width = "32px";
+          sq.style.height = "32px";
+          sq.style.display = "flex";
+          sq.style.alignItems = "center";
+          sq.style.justifyContent = "center";
+          sq.style.position = "relative";
+          sq.style.cursor = activeDamaMatch.isSpectator ? "default" : "pointer";
+          const light = (row + col) % 2 === 0;
+          const isLastMove = board.lastMove && (board.lastMove.from[0] === row && board.lastMove.from[1] === col || board.lastMove.to[0] === row && board.lastMove.to[1] === col);
+          const lastMoveTint = board.lastMove && myColor != null && board.lastMove.by !== myColor ? TAMBAYAN_LAST_MOVE_OPPONENT_TINT : TAMBAYAN_LAST_MOVE_TINT;
+          sq.style.background = isLastMove ? lastMoveTint : light ? TAMBAYAN_BOARD_LIGHT : TAMBAYAN_BOARD_DARK;
+          const isSelected = activeDamaMatch.selectedSquare && activeDamaMatch.selectedSquare.row === row && activeDamaMatch.selectedSquare.col === col;
+          sq.style.boxShadow = isSelected ? "inset 0 0 0 2px orange" : "none";
+          const piece = board.grid[row][col];
+          if (piece) {
+            const disc = document.createElement("div");
+            disc.style.width = "24px";
+            disc.style.height = "24px";
+            disc.style.borderRadius = "50%";
+            disc.style.display = "flex";
+            disc.style.alignItems = "center";
+            disc.style.justifyContent = "center";
+            disc.style.fontSize = "12px";
+            disc.style.background = piece.side === "white" ? "#f5f5f5" : "#1f2937";
+            disc.style.border = piece.side === "white" ? "2px solid #1f2937" : "2px solid #f5f5f5";
+            if (piece.king) {
+              disc.textContent = "\u2605";
+              disc.style.color = piece.side === "white" ? "#1f2937" : "#f5f5f5";
+            }
+            sq.appendChild(disc);
+          }
+          if (destinations.some((d) => d.row === row && d.col === col)) {
+            const dot = document.createElement("div");
+            dot.style.position = "absolute";
+            dot.style.width = "9px";
+            dot.style.height = "9px";
+            dot.style.borderRadius = "50%";
+            dot.style.background = "#4ade8099";
+            sq.appendChild(dot);
+          }
+          if (!activeDamaMatch.isSpectator) {
+            sq.addEventListener("click", () => onDamaMatchSquareClick(activeDamaMatch.boardId, row, col));
+          }
+          gridEl.appendChild(sq);
+        }
+      }
+      damaMatchBodyEl.appendChild(gridEl);
+      if (board.outcome) {
+        const reasonText = {
+          resignation: "Resignation",
+          disconnect: "Opponent disconnected",
+          no_moves: "No legal moves left",
+          draw_agreed: "Draw by agreement"
+        }[board.outcome.reason] || board.outcome.reason;
+        const outcomeEl = document.createElement("p");
+        outcomeEl.style.fontWeight = "bold";
+        outcomeEl.style.fontSize = "12px";
+        if (board.outcome.winnerUserId == null) {
+          outcomeEl.textContent = `Game over \u2014 ${reasonText}.`;
+        } else if (board.outcome.winnerUserId === localUserId) {
+          outcomeEl.textContent = `You won \u2014 ${reasonText}!`;
+        } else if (!activeDamaMatch.isSpectator) {
+          outcomeEl.textContent = `You lost \u2014 ${reasonText}.`;
+        } else {
+          const winnerName = board.outcome.winnerUserId === board.whiteUserId ? whiteName : blackName;
+          outcomeEl.textContent = `${winnerName} won \u2014 ${reasonText}.`;
+        }
+        damaMatchBodyEl.appendChild(outcomeEl);
+        if (!activeDamaMatch.isSpectator) {
+          const newGameBtn = document.createElement("button");
+          newGameBtn.textContent = "New Game";
+          newGameBtn.style.fontSize = "11px";
+          newGameBtn.style.marginTop = "4px";
+          newGameBtn.addEventListener("click", () => {
+            if (activeDamaMatch.boardId === AI_BOARD_ID) socket.sendDamaAiStart(activeDamaMatch.boardId);
+            else socket.sendDamaHostRequest(activeDamaMatch.boardId);
+          });
+          damaMatchBodyEl.appendChild(newGameBtn);
+        }
+      } else if (!activeDamaMatch.isSpectator) {
+        const turnEl = document.createElement("p");
+        turnEl.style.fontSize = "11px";
+        turnEl.style.color = "#a3a3a3";
+        turnEl.textContent = activeDamaMatch.midChain ? "Continue capturing with the same piece." : board.turn === myColor ? "Your move." : activeDamaMatch.boardId === AI_BOARD_ID ? `${DAMA_AI_NAME} is thinking\u2026` : "Waiting for opponent\u2026";
+        damaMatchBodyEl.appendChild(turnEl);
+      }
+      if (!activeDamaMatch.isSpectator && !board.outcome) {
+        if (board.undoRequestedBy != null) {
+          const p = document.createElement("p");
+          p.style.fontSize = "11px";
+          p.style.margin = "0 0 4px 0";
+          p.textContent = board.undoRequestedBy === localUserId ? "Undo request sent \u2014 waiting for response\u2026" : "Opponent requests to undo their last move.";
+          damaMatchBodyEl.appendChild(p);
+          if (board.undoRequestedBy !== localUserId) {
+            addRespondButtons(damaMatchBodyEl, (accept) => socket.sendDamaUndoRespond(activeDamaMatch.boardId, accept));
+          }
+        } else if (board.drawOfferedBy != null) {
+          const p = document.createElement("p");
+          p.style.fontSize = "11px";
+          p.style.margin = "0 0 4px 0";
+          p.textContent = board.drawOfferedBy === localUserId ? "Draw offer sent \u2014 waiting for response\u2026" : "Opponent offers a draw.";
+          damaMatchBodyEl.appendChild(p);
+          if (board.drawOfferedBy !== localUserId) {
+            addRespondButtons(damaMatchBodyEl, (accept) => socket.sendDamaDrawRespond(activeDamaMatch.boardId, accept));
+          }
+        } else if (activeDamaMatch.boardId !== AI_BOARD_ID) {
+          const drawBtn = document.createElement("button");
+          drawBtn.textContent = "Offer Draw";
+          drawBtn.style.fontSize = "11px";
+          drawBtn.style.marginRight = "4px";
+          drawBtn.addEventListener("click", () => socket.sendDamaDrawOffer(activeDamaMatch.boardId));
+          damaMatchBodyEl.appendChild(drawBtn);
+          if (board.turn !== myColor && board.lastMove != null) {
+            const undoBtn = document.createElement("button");
+            undoBtn.textContent = "Request Undo";
+            undoBtn.style.fontSize = "11px";
+            undoBtn.style.marginRight = "4px";
+            undoBtn.addEventListener("click", () => socket.sendDamaUndoRequest(activeDamaMatch.boardId));
+            damaMatchBodyEl.appendChild(undoBtn);
+          }
+        }
+        const resignBtn = document.createElement("button");
+        resignBtn.textContent = "Resign";
+        resignBtn.style.fontSize = "11px";
+        resignBtn.addEventListener("click", () => socket.sendDamaResign(activeDamaMatch.boardId));
+        damaMatchBodyEl.appendChild(resignBtn);
       }
     }
     function hidePlayerOptionsMenu() {
@@ -35477,7 +38772,9 @@ void main() {
         centerZ,
         midX: (selfMonX + opponentMonX) / 2,
         midZ: (selfMonZ + opponentMonZ) / 2,
-        camAngle: local.facingAngle + BATTLE_CAM_ANGLE_OFFSET,
+        // Same "saved Starting Angle takes effect immediately" reasoning as
+        // the wild/team battles' own camAngle init above — see cameraOverrides.pvp.
+        camAngle: cameraOverrides.pvp?.angle ?? local.facingAngle + BATTLE_CAM_ANGLE_OFFSET,
         hasSubmitted: false,
         opponentReady: false,
         ended: false
@@ -35678,6 +38975,8 @@ void main() {
       const canClaim = karirsUnclaimedTotal > 0;
       karraClaimSectionEl.style.display = canClaim ? "block" : "none";
       if (canClaim) karraClaimTextEl.textContent = `Claim ${karirsUnclaimedTotal} G?`;
+      karraPracticeBtn.disabled = !!karirsPracticeState;
+      karraPracticeBtn.textContent = karirsPracticeState ? "Practice already running" : "Practice Race";
     }
     function showKarraMenu(clientX, clientY) {
       const wrapRect = wrap.getBoundingClientRect();
@@ -35688,6 +38987,7 @@ void main() {
       karraBetSectionEl.style.display = "none";
       karraMyBetTextEl.style.display = "none";
       karraClaimSectionEl.style.display = "none";
+      karraPracticeMsgEl.style.display = "none";
       Promise.resolve(ctx.onKarirsFetchState?.()).then((state) => {
         if (!state || karraMenuEl.style.display === "none") return;
         karirsRace = state.race;
@@ -35842,20 +39142,38 @@ void main() {
         return;
       }
       hideBossRickMenu();
+      const usherHits = raycaster.intersectObject(usherRig.group, true);
+      const usherInRange = Math.hypot(local.x - USHER_X, local.z - USHER_Z) <= INTERACTION_RANGE;
+      if (usherHits.length > 0 && usherInRange) {
+        showUsherMenu(event.clientX, event.clientY);
+        return;
+      }
+      hideUsherMenu();
       const board1Hits = raycaster.intersectObject(chessBoard1Group, true);
-      const board1Clickable = chessBoards[1].status === "in_progress" ? isInsideTambayan(local.x, local.z) : Math.hypot(local.x - CHESS_BOARD_1_X, local.z - CHESS_BOARD_1_Z) <= INTERACTION_RANGE;
+      const board1AnyInProgress = chessBoards[1].status === "in_progress" || damaBoards[1].status === "in_progress";
+      const board1Clickable = board1AnyInProgress ? isInsideTambayan(local.x, local.z) : Math.hypot(local.x - CHESS_BOARD_1_X, local.z - CHESS_BOARD_1_Z) <= INTERACTION_RANGE;
       if (board1Hits.length > 0 && board1Clickable) {
-        onChessBoardClick(1, event.clientX, event.clientY);
+        onSharedBoardClick(1, event.clientX, event.clientY);
         return;
       }
       const board2Hits = raycaster.intersectObject(chessBoard2Group, true);
-      const board2Clickable = chessBoards[2].status === "in_progress" ? isInsideTambayan(local.x, local.z) : Math.hypot(local.x - CHESS_BOARD_2_X, local.z - CHESS_BOARD_2_Z) <= INTERACTION_RANGE;
+      const board2AnyInProgress = chessBoards[2].status === "in_progress" || damaBoards[2].status === "in_progress";
+      const board2Clickable = board2AnyInProgress ? isInsideTambayan(local.x, local.z) : Math.hypot(local.x - CHESS_BOARD_2_X, local.z - CHESS_BOARD_2_Z) <= INTERACTION_RANGE;
       if (board2Hits.length > 0 && board2Clickable) {
-        onChessBoardClick(2, event.clientX, event.clientY);
+        onSharedBoardClick(2, event.clientX, event.clientY);
+        return;
+      }
+      const board3Hits = raycaster.intersectObject(chessBoard3Group, true);
+      const board3AnyInProgress = chessBoards[3].status === "in_progress" || damaBoards[3].status === "in_progress";
+      const board3Clickable = board3AnyInProgress ? isInsideTambayan(local.x, local.z) : Math.hypot(local.x - CHESS_BOARD_3_X, local.z - CHESS_BOARD_3_Z) <= INTERACTION_RANGE;
+      if (board3Hits.length > 0 && board3Clickable) {
+        onAiBoardClick(3, event.clientX, event.clientY);
         return;
       }
       hideChessHostMenu();
       hideChessJoinMenu();
+      hideBoardHostChoiceMenu();
+      hideDamaJoinMenu();
       for (const [userId, peer] of peers.entries()) {
         const peerHits = raycaster.intersectObject(peer.rig.group, true);
         const peerInRange = Math.hypot(local.x - peer.x, local.z - peer.z) <= INTERACTION_RANGE;
@@ -35888,7 +39206,9 @@ void main() {
       }
       menuData.inventory.glophiballs += DAILY_CLAIM_GLOPHIBALLS;
       menuData.inventory.daily_claim_available = false;
-      hideRodzMenu();
+      const sendOff = RODZ_CLAIM_SEND_OFFS[Math.floor(Math.random() * RODZ_CLAIM_SEND_OFFS.length)];
+      rodzClaimTextEl.textContent = `Here's ${DAILY_CLAIM_GLOPHIBALLS} Glophiballs. ${sendOff}`;
+      rodzClaimTextEl.style.display = "block";
       ctx.onClaimDaily?.();
     });
     karraPlaceBetBtn.addEventListener("click", () => {
@@ -35914,6 +39234,21 @@ void main() {
         if (karirsMyBet) karirsMyBet.claimed = true;
         refreshKarraMenu();
       });
+    });
+    karraPracticeBtn.addEventListener("click", () => {
+      const race = karirsRace;
+      const now = Date.now();
+      const closesAt = race?.status === "betting_open" ? (/* @__PURE__ */ new Date(`${race.betting_closes_at}Z`)).getTime() : null;
+      const raceImminent = race?.status === "racing" || closesAt !== null && closesAt - now < KARIRS_PRACTICE_BLOCK_WINDOW_MS;
+      karraPracticeMsgEl.style.display = "block";
+      if (raceImminent) {
+        karraPracticeMsgEl.textContent = "The next race will run shortly, so I can't let you use the field right now.";
+        return;
+      }
+      const racerNames = race?.racer_names?.length ? race.racer_names : KARIRS_PRACTICE_FALLBACK_NAMES;
+      karirsPracticeState = { phase: "countdown", countdownEndsAt: now + KARIRS_PRACTICE_COUNTDOWN_MS, racerNames };
+      karraPracticeMsgEl.textContent = "Clear the track \u2014 the race will begin in a 10 second countdown!";
+      refreshKarraMenu();
     });
     karraCancelBtn.addEventListener("click", hideKarraMenu);
     karirsTvCloseBtn.addEventListener("click", hideKarirsTvMenu);
@@ -35970,10 +39305,10 @@ void main() {
       if (msg.type === "self") {
         localUserId = msg.user_id;
       } else if (msg.type === "roster") {
-        for (const p of msg.players) ensurePeer(p.user_id, p.display_name, p, p.x, p.z, p.facing);
+        for (const p of msg.players) ensurePeer(p.user_id, p.display_name, p, p.x, p.z, p.facing, p.floor ?? 0);
         status.textContent = `Connected as ${character.display_name}`;
       } else if (msg.type === "joined") {
-        ensurePeer(msg.user_id, msg.display_name, msg, msg.x, msg.z, msg.facing);
+        ensurePeer(msg.user_id, msg.display_name, msg, msg.x, msg.z, msg.facing, msg.floor ?? 0);
       } else if (msg.type === "position") {
         const peer = peers.get(msg.user_id);
         if (!peer) return;
@@ -35981,6 +39316,8 @@ void main() {
         peer.targetZ = msg.z;
         peer.targetFacing = msg.facing;
         peer.isMoving = Math.hypot(msg.x - peer.x, msg.z - peer.z) > 0.01;
+        peer.floor = msg.floor ?? 0;
+        peer.y = glophicsFloorY(peer.floor);
       } else if (msg.type === "left") {
         removePeer(msg.user_id);
       } else if (msg.type === "chat") {
@@ -36013,6 +39350,12 @@ void main() {
           spawn.engagedByOther = false;
           setRigTransparent(spawn.rig, false);
         }
+      } else if (msg.type === "wild_battle_state") {
+        applySpectatorBattleSnapshot(msg.by_user_id, msg);
+      } else if (msg.type === "wild_battle_roster") {
+        for (const entry of msg.battles) applySpectatorBattleSnapshot(entry.by_user_id, entry);
+      } else if (msg.type === "wild_battle_end") {
+        teardownSpectatorBattleEntry(msg.by_user_id);
       } else if (msg.type === "karirs_state") {
         karirsRace = msg.race;
         karirsPreviousRace = msg.previous_race ?? null;
@@ -36092,7 +39435,10 @@ void main() {
           fen: msg.fen,
           turn: msg.turn,
           moveHistory: msg.move_history,
-          outcome: msg.outcome ? { winnerUserId: msg.outcome.winner_user_id, reason: msg.outcome.reason } : null
+          outcome: msg.outcome ? { winnerUserId: msg.outcome.winner_user_id, reason: msg.outcome.reason } : null,
+          drawOfferedBy: msg.draw_offered_by,
+          undoRequestedBy: msg.undo_requested_by,
+          lastMove: msg.last_move
         };
         chessBoards[msg.board_id] = board;
         updateChessBoardSign(msg.board_id, board);
@@ -36109,7 +39455,7 @@ void main() {
         if (isNewActiveGameIAmIn && (!activeChessMatch || activeChessMatch.boardId !== msg.board_id)) {
           showChessMatchModal(msg.board_id, false);
         } else if (activeChessMatch && activeChessMatch.boardId === msg.board_id) {
-          if (board.status === "empty") {
+          if (board.status === "empty" || board.status === "waiting") {
             hideChessMatchModal();
           } else {
             activeChessMatch.selectedSquare = null;
@@ -36122,6 +39468,66 @@ void main() {
         showChessLeaveWarning(msg.seconds);
       } else if (msg.type === "chess_leave_cancelled") {
         hideChessLeaveWarning();
+      } else if (msg.type === "dama_state") {
+        const amMidChainActor = activeDamaMatch && activeDamaMatch.boardId === msg.board_id && activeDamaMatch.midChain && !activeDamaMatch.isSpectator;
+        const prevBoard = damaBoards[msg.board_id];
+        const board = {
+          status: msg.status,
+          hostId: msg.host_id,
+          hostDisplayName: msg.host_display_name,
+          whiteUserId: msg.white_user_id,
+          whiteDisplayName: msg.white_display_name,
+          blackUserId: msg.black_user_id,
+          blackDisplayName: msg.black_display_name,
+          grid: amMidChainActor && prevBoard ? prevBoard.grid : msg.board,
+          turn: amMidChainActor && prevBoard ? prevBoard.turn : msg.turn,
+          moveHistory: msg.move_history,
+          outcome: msg.outcome ? { winnerUserId: msg.outcome.winner_user_id, reason: msg.outcome.reason } : null,
+          drawOfferedBy: msg.draw_offered_by,
+          undoRequestedBy: msg.undo_requested_by,
+          undoAcceptPendingFor: msg.undo_accept_pending_for,
+          // Same "keep my own further-along local value" guard as grid/turn
+          // above — purely cosmetic here (unlike grid/turn, a stale value
+          // can't wedge the render), but there's no reason to let a
+          // network-delayed echo flicker the highlight backward mid-chain
+          // either.
+          lastMove: amMidChainActor && prevBoard ? prevBoard.lastMove : msg.last_move
+        };
+        damaBoards[msg.board_id] = board;
+        updateDamaBoardSign(msg.board_id, board);
+        if (board.undoAcceptPendingFor === localUserId && activeDamaMatch && activeDamaMatch.boardId === msg.board_id && activeDamaMatch.lastTurnSnapshot) {
+          const snap = activeDamaMatch.lastTurnSnapshot;
+          activeDamaMatch.lastTurnSnapshot = null;
+          socket.sendDamaUndoCommit(msg.board_id, snap.board, snap.sideToMove);
+        }
+        if (board.status === "waiting" && board.hostId === localUserId) {
+          myHostedDamaBoardId = msg.board_id;
+          damaWaitingModalEl.style.display = "flex";
+          renderDamaWaitingModal();
+        } else if (myHostedDamaBoardId === msg.board_id) {
+          myHostedDamaBoardId = null;
+          hideDamaWaitingModal();
+        }
+        const isNewActiveGameIAmIn = board.status === "in_progress" && !board.outcome && (board.whiteUserId === localUserId || board.blackUserId === localUserId);
+        if (isNewActiveGameIAmIn && (!activeDamaMatch || activeDamaMatch.boardId !== msg.board_id)) {
+          showDamaMatchModal(msg.board_id, false);
+        } else if (activeDamaMatch && activeDamaMatch.boardId === msg.board_id) {
+          if (board.status === "empty" || board.status === "waiting") {
+            hideDamaMatchModal();
+          } else {
+            renderDamaMatchModal();
+          }
+        }
+      } else if (msg.type === "dama_error") {
+        showDamaError(msg.reason);
+      } else if (msg.type === "cinema_projectionist_state") {
+        cinemaProjectionist = msg.projectionist ?? null;
+        if (usherMenuEl.style.display !== "none") renderUsherMenu();
+      } else if (msg.type === "cinema_screen_state") {
+        cinemaScreenUrl = msg.url;
+        cinemaScreen.iframe.src = cinemaScreenUrl;
+      } else if (msg.type === "cinema_error") {
+        showUsherError(msg.reason);
       } else if (msg.type === "rejected") {
         const reasons = {
           no_character: "No character found \u2014 create one first.",
@@ -36142,7 +39548,7 @@ void main() {
       lastFrameTime = now;
       if (battle || teamBattle || pvpBattle) {
         local.isMoving = false;
-        applyIdlePose(local.rig, dt);
+        if (!tryPlayLocalOverride("idle", dt)) applyIdlePose(local.rig, dt);
       } else {
         const forwardX = -Math.sin(camAngle);
         const forwardZ = -Math.cos(camAngle);
@@ -36166,12 +39572,12 @@ void main() {
           const step = MOVE_SPEED * speedMult * dt;
           const nextX = Math.min(ARENA_HALF_X, Math.max(-ARENA_HALF_X, local.x + moveX * step));
           const nextZ = Math.min(ARENA_HALF_Z, Math.max(-ARENA_HALF_Z, local.z + moveZ * step));
-          if (!isInsideTownWalls(nextX, local.z) && !isInsideTambayanWalls(nextX, local.z)) local.x = nextX;
-          if (!isInsideTownWalls(local.x, nextZ) && !isInsideTambayanWalls(local.x, nextZ)) local.z = nextZ;
+          if (!isInsideTownWalls(nextX, local.z, local.currentFloor) && !isInsideTambayanWalls(nextX, local.z) && !isInsideChessTables(nextX, local.z)) local.x = nextX;
+          if (!isInsideTownWalls(local.x, nextZ, local.currentFloor) && !isInsideTambayanWalls(local.x, nextZ) && !isInsideChessTables(local.x, nextZ)) local.z = nextZ;
           local.facingAngle = Math.atan2(moveX, moveZ);
-          updateWalkCycle(local.rig, dt, speedMult);
+          if (!tryPlayLocalOverride("walk", dt)) updateWalkCycle(local.rig, dt, speedMult);
         } else {
-          applyIdlePose(local.rig, dt);
+          if (!tryPlayLocalOverride("idle", dt)) applyIdlePose(local.rig, dt);
         }
         if (wantsSprint) {
           stamina = Math.max(0, stamina - STAMINA_DRAIN_PER_SEC * dt);
@@ -36183,6 +39589,7 @@ void main() {
       }
       updateStaminaBar();
       updateGCoinsHud();
+      local.y = entityGroundY(local.currentFloor, local.x, local.z);
       local.rig.group.position.set(local.x, local.y, local.z);
       local.rig.group.rotation.y = local.facingAngle;
       syncNameLabel(local.rig);
@@ -36201,32 +39608,56 @@ void main() {
       applyIdlePose(bossRickRig, dt);
       syncNameLabel(bossRickRig);
       updateBossRickHighlight(dt);
+      applyIdlePose(usherRig, dt);
+      syncNameLabel(usherRig);
+      updateUsherHighlight(dt);
       updateLubaLobbyLive(dt);
       updateChessBoard1Highlight(dt);
       updateChessBoard2Highlight(dt);
-      for (const peer of peers.values()) {
+      updateChessBoard3Highlight(dt);
+      applyIdlePose(stockfishRig, dt);
+      syncNameLabel(stockfishRig);
+      for (const [peerUserId, peer] of peers.entries()) {
         const ease = Math.min(1, 12 * dt);
         peer.x += (peer.targetX - peer.x) * ease;
         peer.z += (peer.targetZ - peer.z) * ease;
         peer.facingAngle = peer.targetFacing;
         if (peer.isMoving) updateWalkCycle(peer.rig, dt);
         else applyIdlePose(peer.rig, dt);
+        peer.y = entityGroundY(peer.floor, peer.x, peer.z);
         peer.rig.group.position.set(peer.x, peer.y, peer.z);
         peer.rig.group.rotation.y = peer.facingAngle;
         syncNameLabel(peer.rig);
         updateChatBubble(peer);
         peer.updateHighlight(dt);
+        const floorMismatch = peer.floor !== local.currentFloor;
         if (battle) {
           const dist = Math.hypot(peer.x - battle.centerX, peer.z - battle.centerZ);
-          setPeerHidden(peer, dist <= BATTLE_DOME_RADIUS);
+          setPeerHidden(peer, floorMismatch || dist <= BATTLE_DOME_RADIUS);
         } else if (teamBattle) {
           const dist = Math.hypot(peer.x - teamBattle.centerX, peer.z - teamBattle.centerZ);
-          setPeerHidden(peer, dist <= TEAM_DOME_RADIUS);
+          setPeerHidden(peer, floorMismatch || dist <= TEAM_DOME_RADIUS);
+        } else if (peerBattles.has(peerUserId)) {
+          setPeerHidden(peer, true);
+        } else {
+          setPeerHidden(peer, floorMismatch);
         }
       }
       updateWildSpawns(dt);
       checkWildContact();
+      checkStairsContact();
+      updateGlophicsExteriorCutaway();
+      updateAreaLabels(dt);
+      updateKarirsTrackVisual(dt);
       renderMinimap();
+      for (const entry of peerBattles.values()) {
+        for (const memberRig of entry.memberRigs) {
+          updateBattleRigAnim(memberRig, "anim", memberRig.rig, dt);
+          syncNameLabel(memberRig.rig);
+        }
+        updateBattleRigAnim(entry, "wildAnim", entry.wildRig, dt);
+        syncNameLabel(entry.wildRig);
+      }
       if (battle) {
         for (const member of battle.playerTeam) {
           updateBattleRigAnim(member, "anim", member.rig, dt);
@@ -36251,7 +39682,7 @@ void main() {
       }
       if (now - lastNetworkTickAt >= NETWORK_TICK_MS) {
         lastNetworkTickAt = now;
-        socket.sendPosition(local.x, local.z, local.facingAngle);
+        socket.sendPosition(local.x, local.z, local.facingAngle, local.currentFloor);
       }
       const width = canvas.clientWidth || canvas.getBoundingClientRect().width;
       const height = canvas.clientHeight || canvas.getBoundingClientRect().height;
@@ -36259,6 +39690,7 @@ void main() {
         renderer.setSize(width, height, false);
         camera.aspect = width / height;
         camera.updateProjectionMatrix();
+        cssRenderer.setSize(width, height);
         lastWidth = width;
         lastHeight = height;
       }
@@ -36270,14 +39702,22 @@ void main() {
           camera.position.set(battle.catchAnim.camX, battle.catchAnim.camY, battle.catchAnim.camZ);
           camera.lookAt(battle.catchAnim.lookX, battle.catchAnim.lookY, battle.catchAnim.lookZ);
         } else if (battle.focus) {
-          camera.position.set(battle.focus.camX, TEAM_FOCUS_CAM_HEIGHT, battle.focus.camZ);
-          camera.lookAt(battle.focus.lookX, TEAM_FOCUS_CAM_LOOK_Y, battle.focus.lookZ);
+          advanceFocusOrbit(battle, battle.focus, dt);
+          camera.position.set(battle.focus.camX, battle.focus.camY, battle.focus.camZ);
+          camera.lookAt(battle.focus.lookX, battle.focus.lookY, battle.focus.lookZ);
         } else {
-          battle.camAngle += RESET_CAM_ORBIT_SPEED * dt;
+          const wildCamOverride = cameraOverrides.wild;
+          const wildCamRadius = wildCamOverride?.radius ?? BATTLE_CAM_RADIUS;
+          const wildCamBaseElevation = wildCamOverride?.elevation ?? BATTLE_CAM_ELEVATION;
+          const wildCamAutoRotate = wildCamOverride?.autoRotate !== false;
+          const wildCamRotateSpeed = wildCamAutoRotate ? wildCamOverride?.rotateSpeed ?? RESET_CAM_ORBIT_SPEED : 0;
+          const wildCamElevationRotateSpeed = wildCamAutoRotate ? wildCamOverride?.elevationRotateSpeed ?? 0 : 0;
+          battle.camAngle += wildCamRotateSpeed * dt;
+          const wildCamElevation = advanceOrbitElevation(battle, wildCamBaseElevation, wildCamElevationRotateSpeed, dt, MIN_ELEVATION, MAX_ELEVATION);
           camera.position.set(
-            battle.midX + Math.sin(battle.camAngle) * Math.cos(BATTLE_CAM_ELEVATION) * BATTLE_CAM_RADIUS,
-            PAN_TARGET_Y + Math.sin(BATTLE_CAM_ELEVATION) * BATTLE_CAM_RADIUS,
-            battle.midZ + Math.cos(battle.camAngle) * Math.cos(BATTLE_CAM_ELEVATION) * BATTLE_CAM_RADIUS
+            battle.midX + Math.sin(battle.camAngle) * Math.cos(wildCamElevation) * wildCamRadius,
+            PAN_TARGET_Y + Math.sin(wildCamElevation) * wildCamRadius,
+            battle.midZ + Math.cos(battle.camAngle) * Math.cos(wildCamElevation) * wildCamRadius
           );
           camera.lookAt(battle.midX, PAN_TARGET_Y, battle.midZ);
         }
@@ -36287,20 +39727,34 @@ void main() {
           camera.position.set(teamBattle.focus.camX, TEAM_FOCUS_CAM_HEIGHT, teamBattle.focus.camZ);
           camera.lookAt(teamBattle.focus.lookX, TEAM_FOCUS_CAM_LOOK_Y, teamBattle.focus.lookZ);
         } else {
-          teamBattle.camAngle += RESET_CAM_ORBIT_SPEED * dt;
+          const teamCamOverride = cameraOverrides.team;
+          const teamCamRadius = teamCamOverride?.radius ?? TEAM_CAM_RADIUS;
+          const teamCamBaseElevation = teamCamOverride?.elevation ?? BATTLE_CAM_ELEVATION;
+          const teamCamAutoRotate = teamCamOverride?.autoRotate !== false;
+          const teamCamRotateSpeed = teamCamAutoRotate ? teamCamOverride?.rotateSpeed ?? RESET_CAM_ORBIT_SPEED : 0;
+          const teamCamElevationRotateSpeed = teamCamAutoRotate ? teamCamOverride?.elevationRotateSpeed ?? 0 : 0;
+          teamBattle.camAngle += teamCamRotateSpeed * dt;
+          const teamCamElevation = advanceOrbitElevation(teamBattle, teamCamBaseElevation, teamCamElevationRotateSpeed, dt, MIN_ELEVATION, MAX_ELEVATION);
           camera.position.set(
-            teamBattle.centerX + Math.sin(teamBattle.camAngle) * Math.cos(BATTLE_CAM_ELEVATION) * TEAM_CAM_RADIUS,
-            PAN_TARGET_Y + Math.sin(BATTLE_CAM_ELEVATION) * TEAM_CAM_RADIUS,
-            teamBattle.centerZ + Math.cos(teamBattle.camAngle) * Math.cos(BATTLE_CAM_ELEVATION) * TEAM_CAM_RADIUS
+            teamBattle.centerX + Math.sin(teamBattle.camAngle) * Math.cos(teamCamElevation) * teamCamRadius,
+            PAN_TARGET_Y + Math.sin(teamCamElevation) * teamCamRadius,
+            teamBattle.centerZ + Math.cos(teamBattle.camAngle) * Math.cos(teamCamElevation) * teamCamRadius
           );
           camera.lookAt(teamBattle.centerX, PAN_TARGET_Y, teamBattle.centerZ);
         }
       } else if (pvpBattle) {
-        pvpBattle.camAngle += RESET_CAM_ORBIT_SPEED * dt;
+        const pvpCamOverride = cameraOverrides.pvp;
+        const pvpCamRadius = pvpCamOverride?.radius ?? BATTLE_CAM_RADIUS;
+        const pvpCamBaseElevation = pvpCamOverride?.elevation ?? BATTLE_CAM_ELEVATION;
+        const pvpCamAutoRotate = pvpCamOverride?.autoRotate !== false;
+        const pvpCamRotateSpeed = pvpCamAutoRotate ? pvpCamOverride?.rotateSpeed ?? RESET_CAM_ORBIT_SPEED : 0;
+        const pvpCamElevationRotateSpeed = pvpCamAutoRotate ? pvpCamOverride?.elevationRotateSpeed ?? 0 : 0;
+        pvpBattle.camAngle += pvpCamRotateSpeed * dt;
+        const pvpCamElevation = advanceOrbitElevation(pvpBattle, pvpCamBaseElevation, pvpCamElevationRotateSpeed, dt, MIN_ELEVATION, MAX_ELEVATION);
         camera.position.set(
-          pvpBattle.midX + Math.sin(pvpBattle.camAngle) * Math.cos(BATTLE_CAM_ELEVATION) * BATTLE_CAM_RADIUS,
-          PAN_TARGET_Y + Math.sin(BATTLE_CAM_ELEVATION) * BATTLE_CAM_RADIUS,
-          pvpBattle.midZ + Math.cos(pvpBattle.camAngle) * Math.cos(BATTLE_CAM_ELEVATION) * BATTLE_CAM_RADIUS
+          pvpBattle.midX + Math.sin(pvpBattle.camAngle) * Math.cos(pvpCamElevation) * pvpCamRadius,
+          PAN_TARGET_Y + Math.sin(pvpCamElevation) * pvpCamRadius,
+          pvpBattle.midZ + Math.cos(pvpBattle.camAngle) * Math.cos(pvpCamElevation) * pvpCamRadius
         );
         camera.lookAt(pvpBattle.midX, PAN_TARGET_Y, pvpBattle.midZ);
         updateTownWallFade(dt, pvpBattle.centerX, PAN_TARGET_Y, pvpBattle.centerZ);
@@ -36308,21 +39762,27 @@ void main() {
         const followEase = Math.min(1, CAMERA_FOLLOW_LERP_SPEED * dt);
         followX += (local.x - followX) * followEase;
         followZ += (local.z - followZ) * followEase;
+        followY += (local.y - followY) * followEase;
         camera.position.set(
           followX + Math.sin(camAngle) * Math.cos(camElevation) * zoomRadius,
-          PAN_TARGET_Y + Math.sin(camElevation) * zoomRadius,
+          followY + PAN_TARGET_Y + Math.sin(camElevation) * zoomRadius,
           followZ + Math.cos(camAngle) * Math.cos(camElevation) * zoomRadius
         );
-        camera.lookAt(followX, PAN_TARGET_Y, followZ);
+        camera.lookAt(followX, followY + PAN_TARGET_Y, followZ);
         updateTownWallFade(dt);
       }
       scaleNameLabel(local.rig, camera, lastHeight || canvas.height, true);
-      scaleNameLabel(rodzRig, camera, lastHeight || canvas.height, Math.hypot(local.x - RODZ_X, local.z - RODZ_Z) <= LABEL_VISIBLE_DISTANCE);
-      scaleNameLabel(karraRig, camera, lastHeight || canvas.height, Math.hypot(local.x - KARRA_X, local.z - KARRA_Z) <= LABEL_VISIBLE_DISTANCE);
-      scaleNameLabel(jaredRig, camera, lastHeight || canvas.height, Math.hypot(local.x - JARED_X, local.z - JARED_Z) <= LABEL_VISIBLE_DISTANCE);
-      scaleNameLabel(bossRickRig, camera, lastHeight || canvas.height, Math.hypot(local.x - BOSS_RICK_X, local.z - BOSS_RICK_Z) <= LABEL_VISIBLE_DISTANCE);
+      const localAreaKey = getAreaKey(local.x, local.z);
+      const inTownGroundFloor = localAreaKey === "town" && local.currentFloor === 0;
+      scaleNameLabel(rodzRig, camera, lastHeight || canvas.height, inTownGroundFloor && Math.hypot(local.x - RODZ_X, local.z - RODZ_Z) <= LABEL_VISIBLE_DISTANCE);
+      scaleNameLabel(karraRig, camera, lastHeight || canvas.height, localAreaKey === "karirs" && Math.hypot(local.x - KARRA_X, local.z - KARRA_Z) <= LABEL_VISIBLE_DISTANCE);
+      scaleNameLabel(jaredRig, camera, lastHeight || canvas.height, inTownGroundFloor && Math.hypot(local.x - JARED_X, local.z - JARED_Z) <= LABEL_VISIBLE_DISTANCE);
+      scaleNameLabel(bossRickRig, camera, lastHeight || canvas.height, localAreaKey === "luba" && Math.hypot(local.x - BOSS_RICK_X, local.z - BOSS_RICK_Z) <= LABEL_VISIBLE_DISTANCE);
+      scaleNameLabel(usherRig, camera, lastHeight || canvas.height, localAreaKey === "town" && local.currentFloor === CINEMA_SCREEN_FLOOR_INDEX && Math.hypot(local.x - USHER_X, local.z - USHER_Z) <= LABEL_VISIBLE_DISTANCE);
+      scaleNameLabel(stockfishRig, camera, lastHeight || canvas.height, localAreaKey === "tambayan" && Math.hypot(local.x - STOCKFISH_X, local.z - STOCKFISH_Z) <= LABEL_VISIBLE_DISTANCE);
       for (const peer of peers.values()) {
-        scaleNameLabel(peer.rig, camera, lastHeight || canvas.height, Math.hypot(local.x - peer.x, local.z - peer.z) <= LABEL_VISIBLE_DISTANCE);
+        const peerVisible = getAreaKey(peer.x, peer.z) === localAreaKey && peer.floor === local.currentFloor && Math.hypot(local.x - peer.x, local.z - peer.z) <= LABEL_VISIBLE_DISTANCE;
+        scaleNameLabel(peer.rig, camera, lastHeight || canvas.height, peerVisible);
       }
       if (battle) {
         for (const member of battle.playerTeam) scaleNameLabel(member.rig, camera, lastHeight || canvas.height);
@@ -36336,8 +39796,21 @@ void main() {
         scaleNameLabel(pvpBattle.selfRig, camera, lastHeight || canvas.height);
         scaleNameLabel(pvpBattle.opponentRig, camera, lastHeight || canvas.height);
       }
+      for (const entry of peerBattles.values()) {
+        for (const memberRig of entry.memberRigs) scaleNameLabel(memberRig.rig, camera, lastHeight || canvas.height);
+        scaleNameLabel(entry.wildRig, camera, lastHeight || canvas.height);
+      }
       updateSkyFollowCamera(skyDome, sunSprite, camera);
       renderer.render(scene, camera);
+      const cinemaScreenVisible = local.currentFloor >= CINEMA_SCREEN_FLOOR_INDEX && isInsideGlophicsFootprint(local.x, local.z) && !battle && !teamBattle && !pvpBattle;
+      if (cinemaScreenVisible !== cinemaScreenShown) {
+        cinemaScreenShown = cinemaScreenVisible;
+        cssRenderer.domElement.style.display = cinemaScreenShown ? "" : "none";
+        if (isYoutubeEmbedUrl(cinemaScreenUrl)) {
+          sendCinemaScreenCommand(cinemaScreen.iframe, cinemaScreenShown ? "playVideo" : "pauseVideo");
+        }
+      }
+      if (cinemaScreenShown) cssRenderer.render(cssScene, camera);
       if (!disposed) rafId = requestAnimationFrame(frame);
     }
     rafId = requestAnimationFrame(frame);
@@ -36348,6 +39821,8 @@ void main() {
       if (teamBattle) endTeamBattle();
       if (pvpBattle) endPvpBattle();
       closeGlophimonStatsModal();
+      hideCharMovementsModal();
+      hidePoseDesignerModal();
       socket.dispose();
       canvas.removeEventListener("wheel", onWheel);
       canvas.removeEventListener("mousedown", onMouseDown);
@@ -36363,13 +39838,18 @@ void main() {
       disposeRig(karraRig);
       disposeRig(jaredRig);
       disposeRig(bossRickRig);
+      disposeRig(usherRig);
+      disposeRig(stockfishRig);
       karirsBoard.texture.dispose();
       karirsBoard.sprite.material.dispose();
       hideRodzShoutBubble();
       if (local.chatBubble) disposeChatBubble(local.chatBubble);
+      for (const userId of [...peerBattles.keys()]) teardownSpectatorBattleEntry(userId);
       for (const userId of [...peers.keys()]) removePeer(userId);
       for (const id of [...wildSpawns.keys()]) removeWildSpawn(id);
       renderer.dispose();
+      cinemaScreen.iframe.src = "";
+      cssRenderer.domElement.remove();
     };
     return {
       setMenuData(glophimonList, inventory) {
@@ -36390,6 +39870,202 @@ void main() {
       delete el._glophimonCleanup;
     }
   }
+  var POSE_DESIGNER_PARTS = [
+    // ±3.3 rad (~189°) rather than stopping at ±2.2 (~126°, short of even
+    // horizontal-behind) — a hanging arm is 0, so it takes a full ±π (~3.14)
+    // to swing all the way up to pointing straight overhead; the extra bit
+    // past π is just a little headroom past dead-vertical, confirmed
+    // visually rather than assumed.
+    { key: "leftArmX", label: "L Arm Swing", part: "leftArm", axis: "x", min: -3.3, max: 3.3, step: 0.05 },
+    { key: "leftArmZ", label: "L Arm Spread", part: "leftArm", axis: "z", min: -1.6, max: 1.6, step: 0.05 },
+    { key: "rightArmX", label: "R Arm Swing", part: "rightArm", axis: "x", min: -3.3, max: 3.3, step: 0.05 },
+    { key: "rightArmZ", label: "R Arm Spread", part: "rightArm", axis: "z", min: -1.6, max: 1.6, step: 0.05 },
+    { key: "leftLegX", label: "L Leg Swing", part: "leftLeg", axis: "x", min: -1.6, max: 1.6, step: 0.05 },
+    { key: "leftLegZ", label: "L Leg Spread", part: "leftLeg", axis: "z", min: -1.2, max: 1.2, step: 0.05 },
+    { key: "rightLegX", label: "R Leg Swing", part: "rightLeg", axis: "x", min: -1.6, max: 1.6, step: 0.05 },
+    { key: "rightLegZ", label: "R Leg Spread", part: "rightLeg", axis: "z", min: -1.2, max: 1.2, step: 0.05 },
+    { key: "bodyY", label: "Body Height", part: "visual", axis: "posY", min: -0.3, max: 0.5, step: 0.01 },
+    // Actually moving the whole body (a straight-line step/lunge), distinct
+    // from the Lean sliders just below (which tilt/pivot from the feet in
+    // place) — the two combine for things a lean alone can't do, e.g. a real
+    // sidestep or a forward lunge that also carries the feet with it.
+    { key: "bodyMoveForward", label: "Move Forward/Back", part: "visual", axis: "posZ", min: -0.6, max: 0.6, step: 0.02 },
+    { key: "bodyMoveSide", label: "Move Sideways", part: "visual", axis: "posX", min: -0.6, max: 0.6, step: 0.02 },
+    { key: "bodyLeanForward", label: "Lean Forward/Back", part: "visual", axis: "x", min: -0.6, max: 0.6, step: 0.02 },
+    { key: "bodyLeanSide", label: "Lean Sideways", part: "visual", axis: "z", min: -0.6, max: 0.6, step: 0.02 },
+    // Yaw — twisting the whole body (torso, arms, legs together) around the
+    // vertical axis, independent of both Lean (which tilts it, rotation.x/z)
+    // and the character's actual movement-facing (group.rotation.y, driven by
+    // input direction, untouched by anything in this designer). Full ±π so
+    // any orientation is reachable directly by the slider without wrapping.
+    { key: "bodyRotation", label: "Body Rotation", part: "visual", axis: "y", min: -3.14, max: 3.14, step: 0.02 },
+    { key: "headTurn", label: "Head Turn", part: "head", axis: "y", min: -1, max: 1, step: 0.02 },
+    { key: "headNod", label: "Head Nod", part: "head", axis: "x", min: -0.6, max: 0.6, step: 0.02 },
+    { key: "headTilt", label: "Head Tilt", part: "head", axis: "z", min: -0.6, max: 0.6, step: 0.02 }
+  ];
+  function poseDesignerDefaultValues() {
+    const values = {};
+    for (const spec of POSE_DESIGNER_PARTS) values[spec.key] = 0;
+    return values;
+  }
+  function applyPoseDesignerValues(rig, values) {
+    for (const spec of POSE_DESIGNER_PARTS) {
+      const obj = rig[spec.part];
+      const v = values[spec.key] ?? 0;
+      if (spec.axis === "x") obj.rotation.x = v;
+      else if (spec.axis === "y") obj.rotation.y = v;
+      else if (spec.axis === "z") obj.rotation.z = v;
+      else if (spec.axis === "posX") obj.position.x = v;
+      else if (spec.axis === "posY") obj.position.y = v;
+      else if (spec.axis === "posZ") obj.position.z = v;
+    }
+  }
+  function playPoseKeyframes(rig, keyframes, elapsedMs) {
+    if (!keyframes || keyframes.length === 0) return false;
+    const totalMs = keyframes.reduce((sum, kf) => sum + Math.max(1, kf.transitionMs), 0);
+    const t = elapsedMs % totalMs;
+    let prevValues = keyframes[keyframes.length - 1].values;
+    let acc = 0;
+    let segmentIdx = keyframes.length - 1;
+    for (let i = 0; i < keyframes.length; i++) {
+      const dur2 = Math.max(1, keyframes[i].transitionMs);
+      if (t < acc + dur2) {
+        segmentIdx = i;
+        break;
+      }
+      acc += dur2;
+      prevValues = keyframes[i].values;
+    }
+    const dur = Math.max(1, keyframes[segmentIdx].transitionMs);
+    const localT = Math.min(1, (t - acc) / dur);
+    const toValues = keyframes[segmentIdx].values;
+    const blended = {};
+    for (const spec of POSE_DESIGNER_PARTS) {
+      const a = prevValues[spec.key] ?? 0;
+      const b = toValues[spec.key] ?? 0;
+      blended[spec.key] = a + (b - a) * localT;
+    }
+    applyPoseDesignerValues(rig, blended);
+    return true;
+  }
+  function readPoseDesignerValues(rig) {
+    const values = {};
+    for (const spec of POSE_DESIGNER_PARTS) {
+      const obj = rig[spec.part];
+      if (spec.axis === "x") values[spec.key] = obj.rotation.x;
+      else if (spec.axis === "y") values[spec.key] = obj.rotation.y;
+      else if (spec.axis === "z") values[spec.key] = obj.rotation.z;
+      else if (spec.axis === "posX") values[spec.key] = obj.position.x;
+      else if (spec.axis === "posY") values[spec.key] = obj.position.y;
+      else if (spec.axis === "posZ") values[spec.key] = obj.position.z;
+    }
+    return values;
+  }
+  function sampleBuiltinPoseKeyframes(poseName) {
+    const scratchRig = buildBlockyCharacter({ head: "#ffffff", body: "#ffffff", arm: "#ffffff", leg: "#ffffff" }, null);
+    let keyframes = [];
+    if (poseName === "idle") {
+      applyIdlePose(scratchRig, 100);
+      keyframes = [{ values: readPoseDesignerValues(scratchRig), transitionMs: 500 }];
+    } else if (poseName === "ready") {
+      applyReadyPose(scratchRig, 100);
+      keyframes = [{ values: readPoseDesignerValues(scratchRig), transitionMs: 500 }];
+    } else if (poseName === "walk") {
+      const STEPS = 8;
+      const CYCLE_MS = 800;
+      for (let i = 0; i < STEPS; i++) {
+        scratchRig.walkPhase = i / STEPS * Math.PI * 2;
+        scratchRig.walkBlend = 1;
+        updateWalkCycle(scratchRig, 0, 1);
+        keyframes.push({ values: readPoseDesignerValues(scratchRig), transitionMs: CYCLE_MS / STEPS });
+      }
+    } else {
+      const fn = poseName === "attack" ? applyAttackPose : poseName === "cast" ? applyCastPose : applyDefendPose;
+      const totalMs = poseName === "attack" ? ATTACK_ANIM_MS : poseName === "cast" ? CAST_ANIM_MS : DEFEND_ANIM_MS;
+      const STEPS = 6;
+      for (let i = 0; i <= STEPS; i++) {
+        fn(scratchRig, i / STEPS * totalMs, totalMs);
+        keyframes.push({ values: readPoseDesignerValues(scratchRig), transitionMs: Math.max(1, Math.round(totalMs / STEPS)) });
+      }
+    }
+    disposeRig(scratchRig);
+    return keyframes;
+  }
+  var CAMERA_OVERRIDE_SLOTS = [
+    { id: "wild", label: "Wild: Reset / Orbit", kind: "orbit" },
+    { id: "team", label: "Team Battle (3v3)", kind: "orbit" },
+    { id: "pvp", label: "PvP Battle", kind: "orbit" },
+    { id: "wild_decide_defend", label: "Wild: Decide Defend", kind: "focus" },
+    { id: "wild_declare", label: "Wild: About to Attack", kind: "focus" },
+    { id: "wild_attack_scene", label: "Wild: Attack Scene", kind: "focus" },
+    { id: "wild_defend_scene", label: "Wild: Defend Scene", kind: "focus" }
+  ];
+  var CAMERA_DESIGNER_FIELDS = [
+    { key: "radius", label: "Distance", min: 2, max: 20, step: 0.5 },
+    { key: "elevation", label: "Pitch", min: MIN_ELEVATION, max: MAX_ELEVATION, step: 0.01 },
+    { key: "angle", label: "Starting Angle", min: 0, max: Math.PI * 2, step: 0.01 },
+    { key: "rotateSpeed", label: "Rotation Speed (Y axis)", min: 0, max: 1, step: 0.01 },
+    // Y-axis rotation (rotateSpeed above) is a full 360° orbit — it wraps for
+    // free via sin/cos periodicity, so it can spin forever in one direction.
+    // Pitch can't do that without eventually flipping the camera upside
+    // down, so this is a bounce between MIN_ELEVATION/MAX_ELEVATION instead
+    // of a spin (see advanceOrbitElevation) — a slow crane-up-crane-down
+    // sweep rather than a loop. 0 (the default) means "don't move," same
+    // "byte-identical until customized" contract every other field here
+    // already follows.
+    { key: "elevationRotateSpeed", label: "Rotation Speed (X axis)", min: 0, max: 0.5, step: 0.01 }
+  ];
+  var CAMERA_FOCUS_FIELDS = [
+    { key: "behind", label: "Distance Behind", min: 0.3, max: 3, step: 0.05 },
+    { key: "height", label: "Height", min: FOCUS_CAM_HEIGHT_MIN, max: FOCUS_CAM_HEIGHT_MAX, step: 0.05 },
+    { key: "lookY", label: "Look-At Height", min: -1, max: 2, step: 0.05 },
+    { key: "lookAhead", label: "Look-Ahead Distance", min: 0, max: 8, step: 0.1 },
+    { key: "angle", label: "Orbit Angle", min: 0, max: Math.PI * 2, step: 0.01 },
+    { key: "rotateSpeed", label: "Rotation Speed (Y axis)", min: 0, max: 1, step: 0.01 },
+    { key: "heightRotateSpeed", label: "Rotation Speed (Height)", min: 0, max: 0.5, step: 0.01 }
+  ];
+  function cameraDesignerDefaultValues(slotId) {
+    const slot = CAMERA_OVERRIDE_SLOTS.find((s) => s.id === slotId);
+    if (slot && slot.kind === "focus") {
+      return {
+        behind: TEAM_FOCUS_CAM_BEHIND,
+        height: TEAM_FOCUS_CAM_HEIGHT,
+        lookY: TEAM_FOCUS_CAM_LOOK_Y,
+        lookAhead: TEAM_FOCUS_CAM_LOOK_AHEAD,
+        angle: 0,
+        autoRotate: true,
+        rotateSpeed: 0,
+        heightRotateSpeed: 0
+      };
+    }
+    return {
+      radius: slotId === "team" ? TEAM_CAM_RADIUS : BATTLE_CAM_RADIUS,
+      elevation: BATTLE_CAM_ELEVATION,
+      angle: 0,
+      autoRotate: true,
+      rotateSpeed: RESET_CAM_ORBIT_SPEED,
+      elevationRotateSpeed: 0
+      // off by default — today's exact behavior (a fixed pitch) until a player turns it up
+    };
+  }
+  function advanceOrbitElevation(state, baseElevation, rotateSpeed, dt, min, max) {
+    if (rotateSpeed <= 0) {
+      state.camElevation = baseElevation;
+      state.camElevationDir = 1;
+      return state.camElevation;
+    }
+    if (state.camElevation == null) state.camElevation = baseElevation;
+    if (!state.camElevationDir) state.camElevationDir = 1;
+    state.camElevation += state.camElevationDir * rotateSpeed * dt;
+    if (state.camElevation >= max) {
+      state.camElevation = max;
+      state.camElevationDir = -1;
+    } else if (state.camElevation <= min) {
+      state.camElevation = min;
+      state.camElevationDir = 1;
+    }
+    return state.camElevation;
+  }
   var PREVIEW_TARGET_Y = 0.9;
   var PREVIEW_MIN_RADIUS = 1.4;
   var PREVIEW_MAX_RADIUS = 5;
@@ -36397,7 +40073,9 @@ void main() {
   var PREVIEW_DEFAULT_ELEVATION = 0.35;
   var PREVIEW_MIN_ELEVATION = -0.4;
   var PREVIEW_MAX_ELEVATION = 1.3;
-  function mountPreview(el, initialColors) {
+  var PREVIEW_BATTLE_WILD_Z = 1.6;
+  var PREVIEW_BATTLE_PLAYER_Z = -1.2;
+  function mountPreview(el, initialColors, options = {}) {
     el.innerHTML = "";
     const canvas = document.createElement("canvas");
     canvas.width = 320;
@@ -36409,8 +40087,33 @@ void main() {
     canvas.style.cursor = "grab";
     el.appendChild(canvas);
     const { renderer, scene, camera } = createScene(canvas);
-    const rig = buildBlockyCharacter(initialColors, null);
-    scene.add(rig.group);
+    const extraRigs = [];
+    let rig;
+    if (options.battleScenePreview) {
+      const wildSpecies = pickRandomSpeciesByRarity();
+      const wildRig = buildBlockyCharacter(
+        { head: wildSpecies.head_color, body: wildSpecies.body_color, arm: wildSpecies.arm_color, leg: wildSpecies.leg_color },
+        wildSpecies.name
+      );
+      wildRig.group.position.set(0, 0, PREVIEW_BATTLE_WILD_Z);
+      wildRig.group.rotation.y = Math.PI;
+      scene.add(wildRig.group);
+      extraRigs.push(wildRig);
+      const playerSpecies = pickRandomSpeciesByRarity();
+      rig = buildBlockyCharacter(
+        { head: playerSpecies.head_color, body: playerSpecies.body_color, arm: playerSpecies.arm_color, leg: playerSpecies.leg_color },
+        playerSpecies.name
+      );
+      rig.group.position.set(0, 0, PREVIEW_BATTLE_PLAYER_Z);
+      scene.add(rig.group);
+    } else {
+      rig = buildBlockyCharacter(initialColors, null);
+      scene.add(rig.group);
+    }
+    if (options.showFrontMarker) {
+      rig.head.add(buildFaceMarker());
+      rig.head.add(buildBackMarker());
+    }
     let camAngle = 0;
     let camElevation = PREVIEW_DEFAULT_ELEVATION;
     let zoomRadius = PREVIEW_DEFAULT_RADIUS;
@@ -36450,10 +40153,31 @@ void main() {
     let lastHeight = 0;
     let rafId = 0;
     let disposed = false;
+    let currentPose = "idle";
+    let poseElapsedMs = 0;
+    let customPoseFn = null;
+    const POSE_LOOP_PAUSE_MS = 400;
     function frame(now) {
       const dt = Math.min(0.1, (now - lastFrameTime) / 1e3);
       lastFrameTime = now;
-      applyIdlePose(rig, dt);
+      poseElapsedMs += dt * 1e3;
+      if (currentPose === "walk") {
+        updateWalkCycle(rig, dt);
+      } else if (currentPose === "ready") {
+        applyReadyPose(rig, dt);
+      } else if (currentPose === "attack" || currentPose === "defend" || currentPose === "cast") {
+        const totalMs = currentPose === "attack" ? ATTACK_ANIM_MS : currentPose === "cast" ? CAST_ANIM_MS : DEFEND_ANIM_MS;
+        const loopElapsedMs = poseElapsedMs % (totalMs + POSE_LOOP_PAUSE_MS);
+        const clamped = Math.min(loopElapsedMs, totalMs);
+        if (currentPose === "attack") applyAttackPose(rig, clamped, totalMs);
+        else if (currentPose === "cast") applyCastPose(rig, clamped, totalMs);
+        else applyDefendPose(rig, clamped, totalMs);
+      } else if (currentPose === "custom") {
+        customPoseFn?.(rig, dt);
+      } else {
+        applyIdlePose(rig, dt);
+      }
+      for (const extraRig of extraRigs) applyIdlePose(extraRig, dt);
       const width = canvas.clientWidth || canvas.getBoundingClientRect().width;
       const height = canvas.clientHeight || canvas.getBoundingClientRect().height;
       if (width > 0 && height > 0 && (width !== lastWidth || height !== lastHeight)) {
@@ -36463,12 +40187,16 @@ void main() {
         lastWidth = width;
         lastHeight = height;
       }
-      camera.position.set(
-        Math.sin(camAngle) * Math.cos(camElevation) * zoomRadius,
-        PREVIEW_TARGET_Y + Math.sin(camElevation) * zoomRadius,
-        Math.cos(camAngle) * Math.cos(camElevation) * zoomRadius
-      );
-      camera.lookAt(0, PREVIEW_TARGET_Y, 0);
+      if (options.cameraDriver) {
+        options.cameraDriver(camera, dt);
+      } else {
+        camera.position.set(
+          Math.sin(camAngle) * Math.cos(camElevation) * zoomRadius,
+          PREVIEW_TARGET_Y + Math.sin(camElevation) * zoomRadius,
+          Math.cos(camAngle) * Math.cos(camElevation) * zoomRadius
+        );
+        camera.lookAt(0, PREVIEW_TARGET_Y, 0);
+      }
       renderer.render(scene, camera);
       if (!disposed) rafId = requestAnimationFrame(frame);
     }
@@ -36481,11 +40209,22 @@ void main() {
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
       disposeRig(rig);
+      for (const extraRig of extraRigs) disposeRig(extraRig);
       renderer.dispose();
     };
     return {
       setColors(colors) {
         recolorRig(rig, colors);
+      },
+      setPose(pose) {
+        currentPose = pose;
+        poseElapsedMs = 0;
+        customPoseFn = null;
+      },
+      setCustomPose(fn) {
+        currentPose = "custom";
+        poseElapsedMs = 0;
+        customPoseFn = fn;
       },
       dispose() {
         if (el._glophimonPreviewCleanup) {

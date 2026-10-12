@@ -117,6 +117,54 @@ const RUN_ARM_TRAIL = 1.1;
 const RUN_ARM_OSC = 0.15; // small residual life on top of the trail, not a real swing
 const RUN_BODY_LEAN = 0.28;
 
+// Bow — the second weapon (see game.js's own KeyQ handling). Held in the
+// LEFT hand (off-hand), leaving the right arm free for a draw pose — the
+// opposite of the sword, which lives on the right arm and owns that arm's
+// rotation via the combo state machine (see tryAttack/updatePlayerVisual).
+// Built as a partial torus (an open "C" arc) rather than a proper curved
+// bow-limb model — this rig is all flat-shaded boxes/primitives already
+// (see limb() above), so a torus arc reads as "a bow" well enough at this
+// fidelity without needing real curve geometry.
+const BOW_RADIUS = 0.42;
+const BOW_TUBE_RADIUS = 0.025;
+const BOW_ARC = Math.PI * 1.15; // a bit more than a semicircle — reads as a strung bow's curve, not a full ring
+// Neutral (not drawn) vs. fully-drawn right-arm poses — same x/z rotation
+// convention as the sword's own POSE_* constants above (negative x swings
+// the arm forward, per that section's own sign-convention note). Drawn
+// pulls the arm back and slightly across the body, like nocking an arrow
+// back toward the cheek.
+const BOW_ARM_NEUTRAL = { x: -0.5, z: 0 };
+const BOW_ARM_DRAWN = { x: 0.35, z: 0.55 };
+// How long the LEFT arm/bow (and head) take to snap toward pointing at the
+// aim reticle once drawing starts — quick and decisive, not tied to how
+// long the draw is held (see BOW_MIN_DRAW_MS/BOW_MAX_DRAW_MS below, which
+// govern the much slower RIGHT-arm lift/charge instead). "The bow-holding
+// hand points directly at the target" reads as an immediate commitment,
+// not something that creeps in over the whole draw.
+const BOW_DRAW_EASE_MS = 220;
+// The right arm's own charge-tied lift — exported since game.js's
+// releaseBowDraw call sites need the exact same range to convert a draw's
+// hold duration into an arrow speed (see releaseBowDraw below), and the
+// HUD's own charge-percentage bar needs it too. A held draw below
+// BOW_MIN_DRAW_MS still fires (at minimum speed/lift), climbing to full
+// speed/full right-arm lift at BOW_MAX_DRAW_MS held — the right arm's own
+// visual rise IS the charge meter, just embodied instead of drawn as a bar.
+export const BOW_MIN_DRAW_MS = 120;
+export const BOW_MAX_DRAW_MS = 1200;
+// Release follow-through — see releaseBowDraw's own bowReleaseAt/
+// bowReleaseFromCharge fields. Deliberately much faster than the draw
+// itself: SNAP is an accelerating (ease-in) motion from wherever the
+// charge had reached up to full extension, then SETTLE eases the arm back
+// down to neutral once the string has "let go."
+const BOW_RELEASE_SNAP_MS = 100;
+const BOW_RELEASE_SETTLE_MS = 220;
+// The left arm's fixed "holding the bow up, aiming" pose — held steady
+// regardless of walking (see updatePlayerVisual's own weapon-gated arm
+// trail), the same simplification real-time games with a "run while
+// aiming" pose commonly make rather than a fully separate aim-walk cycle.
+// aimElevation (see updatePlayerVisual) tilts this further once drawing.
+const BOW_HOLD_POSE = { x: -1.1, z: -0.15 };
+
 // Sword-hand cooldown tint — the right arm reddens while comboState is
 // 'cooldown' (including a parry's forced cooldown via interruptToCooldown)
 // and eases back to the player's normal color once it ends. "A bit red",
@@ -206,6 +254,32 @@ export function buildPlayerRig(color) {
   swordPivot.add(blade, guard);
   rightArm.add(swordPivot);
 
+  // Bow — parented to the left arm's own hand point, same reasoning as
+  // swordPivot above. Both weapons exist on the rig at all times; only
+  // .visible is toggled on switch (see switchEquippedWeapon) — simpler and
+  // cheaper than re-parenting geometry at runtime, and avoids ever being
+  // caught mid-switch with neither weapon attached.
+  const bowPivot = new THREE.Group();
+  bowPivot.position.set(0, -ARM_H, 0);
+  const bowMaterial = new THREE.MeshStandardMaterial({ color: "#78350f", roughness: 0.6 });
+  const bowArc = new THREE.Mesh(
+    new THREE.TorusGeometry(BOW_RADIUS, BOW_TUBE_RADIUS, 8, 16, BOW_ARC),
+    bowMaterial,
+  );
+  // Torus arcs sweep in its own local XY plane starting along +X — rotated
+  // so the arc stands upright (running along the hand's local Y) and
+  // centered on the grip rather than starting there, and turned to face
+  // out and slightly forward like a real drawn bow's cant.
+  bowArc.rotation.z = Math.PI / 2 - BOW_ARC / 2;
+  bowArc.rotation.y = Math.PI / 2;
+  bowArc.castShadow = true;
+  const bowString = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.008, 0.008, BOW_RADIUS * 1.85, 6),
+    new THREE.MeshBasicMaterial({ color: "#e7e5e4" }),
+  );
+  bowPivot.add(bowArc, bowString);
+  leftArm.add(bowPivot);
+
   // Post-respawn "prepare" shield — a translucent bubble shown only while
   // the server has this player flagged invulnerable (see
   // games/luba/api/app/main.py's RESPAWN_INVULN_S), so both the player
@@ -222,6 +296,10 @@ export function buildPlayerRig(color) {
   shield.visible = false;
   group.add(shield);
 
+  // Sword equipped by default — every existing player (and the practice
+  // dummy) behaves exactly as before unless something actually presses Q.
+  bowPivot.visible = false;
+
   return {
     group,
     visual,
@@ -233,6 +311,15 @@ export function buildPlayerRig(color) {
     rightLeg,
     swordPivot,
     blade,
+    bowPivot,
+    equippedWeapon: "sword",
+    bowDrawing: false,
+    bowDrawStartAt: -Infinity,
+    // Set by releaseBowDraw at the exact moment of firing — drives the
+    // accelerated snap/settle follow-through in updatePlayerVisual's own
+    // bow-pose block once bowDrawing goes back to false.
+    bowReleaseAt: -Infinity,
+    bowReleaseFromCharge: 0,
     shield,
     // Swept-hit tracking (see getSwordWorldSamplePoints/isActiveSwing
     // below) — isActiveSwing is true only while the blade is actually
@@ -289,6 +376,74 @@ export function tryAttack(rig, nowMs) {
   return false;
 }
 
+// Sets which weapon is equipped outright (not a toggle) — used to mirror a
+// PEER's own equippedWeapon (see game.js's own peer_position handler),
+// where the local client is told the actual weapon, not asked to flip it.
+// switchEquippedWeapon below (the local player's own Q-key handler) is now
+// just this plus the toggle logic, so the two can never drift out of sync
+// with each other's own mesh-visibility/draw-cancel side effects.
+export function setEquippedWeapon(rig, weapon) {
+  if (rig.equippedWeapon === weapon) return;
+  rig.equippedWeapon = weapon;
+  rig.bowDrawing = false;
+  rig.swordPivot.visible = weapon === "sword";
+  rig.bowPivot.visible = weapon === "bow";
+}
+
+// Toggles which weapon is equipped — called from game.js on KeyQ. Does NOT
+// touch comboState; a sword swing already in progress finishes its own
+// animation/cooldown normally even if Q is pressed mid-swing (matching how
+// dash/smoke never interrupt a swing either), it just won't be able to
+// start a *new* one until switched back.
+export function switchEquippedWeapon(rig) {
+  setEquippedWeapon(rig, rig.equippedWeapon === "sword" ? "bow" : "sword");
+}
+
+// Opacity for the LOCAL player's own rig only, while aiming — a
+// zoomed-in, over-the-shoulder bow camera can put the character's own body
+// between the camera and whatever they're aiming at (see game.js's own
+// AIM_LOCAL_OPACITY); this is never applied to a peer's or the practice
+// dummy's rig, since another player's own body isn't blocking anything on
+// ITS OWN client's screen the same way. Only touches meshes with a
+// material — the invulnerability shield already manages its own opacity
+// independently and would otherwise get stomped by a blanket traversal.
+export function setRigOpacity(rig, opacity) {
+  rig.group.traverse((obj) => {
+    if (obj.isMesh && obj !== rig.shield) {
+      obj.material.transparent = opacity < 1;
+      obj.material.opacity = opacity;
+      obj.material.needsUpdate = true;
+    }
+  });
+}
+
+export function startBowDraw(rig, nowMs) {
+  rig.bowDrawing = true;
+  rig.bowDrawStartAt = nowMs;
+}
+
+// Ends the draw and reports how long it was held, mapped to an arrow
+// speed — minSpeed/maxSpeed come from game.js (kept there, not duplicated
+// here, since main.py's own MIN/MAX_ARROW_SPEED need to match whatever
+// game.js sends and this file has no reason to know networking constants);
+// BOW_MIN_DRAW_MS/BOW_MAX_DRAW_MS live here instead since
+// updatePlayerVisual's own right-arm lift needs the exact same range, not
+// just the speed calc. Always returns a fireable speed, even for a
+// near-instant tap (clamped to minSpeed) — holding decides *how fast*, not
+// *whether* it fires at all, per the feature's own spec. Also stamps
+// bowReleaseAt/bowReleaseFromCharge, which is what actually drives the
+// accelerated snap/settle follow-through (see updatePlayerVisual's own
+// bow-pose block) — without capturing the charge reached at THIS exact
+// moment, the follow-through would have no idea where to snap up *from*.
+export function releaseBowDraw(rig, nowMs, minSpeed, maxSpeed) {
+  const heldMs = Math.max(0, nowMs - rig.bowDrawStartAt);
+  const chargeFrac = Math.min(1, Math.max(0, (heldMs - BOW_MIN_DRAW_MS) / (BOW_MAX_DRAW_MS - BOW_MIN_DRAW_MS)));
+  rig.bowDrawing = false;
+  rig.bowReleaseAt = nowMs;
+  rig.bowReleaseFromCharge = chargeFrac;
+  return { speed: minSpeed + (maxSpeed - minSpeed) * chargeFrac, chargeFrac };
+}
+
 // Forces a combo straight into cooldown from wherever it currently is —
 // used for a parry (both swords clash mid-swing, interrupting whatever
 // either side was doing). Not part of the normal state machine's own
@@ -305,7 +460,16 @@ export function interruptToCooldown(rig, nowMs) {
 // `isMoving` drives the walk cycle; `dt` in seconds, `nowMs` for the
 // attack-swing timeline (a separate clock so it's unaffected by whatever
 // dt clamping the walk cycle uses).
-export function updatePlayerVisual(rig, nowMs, isMoving, dt) {
+// aimElevation: the local camera's own current vertical look angle in
+// radians (positive = looking up), used only to tilt the bow-holding arm
+// and nod the head to match while aiming — see game.js's own aimDir/
+// aimElevation. Only ever passed for the LOCAL player's own rig; every
+// other call site (peers, the practice dummy) omits it and gets the
+// default 0, since nothing here currently broadcasts a peer's own live
+// aim pitch the way it does their position/facing — a peer who switches to
+// a bow is visible to others (their fired arrows are real, networked
+// projectiles), but their rig doesn't yet show them visibly aiming one.
+export function updatePlayerVisual(rig, nowMs, isMoving, dt, aimElevation = 0) {
   const easeStep = Math.min(1, dt * BOB_EASE_RATE);
   rig.walkBlend += ((isMoving ? 1 : 0) - rig.walkBlend) * easeStep;
   if (isMoving) rig.walkPhase += dt * WALK_FREQUENCY;
@@ -318,10 +482,48 @@ export function updatePlayerVisual(rig, nowMs, isMoving, dt) {
   // — the "ninja run" look — with a small oscillation riding on top so
   // it doesn't read as a perfectly rigid held pose.
   const armTrail = RUN_ARM_TRAIL * rig.walkBlend + Math.sin(rig.walkPhase) * RUN_ARM_OSC * rig.walkBlend;
-  rig.leftArm.rotation.x = armTrail;
-  // Right arm's run pose only applies at rest — the combo state machine
-  // below owns that arm's rotation for every other state.
-  if (rig.comboState === "idle") {
+  const isBow = rig.equippedWeapon === "bow";
+  // The bow's own hold pose owns the left arm instead of the run trail
+  // while equipped — see BOW_HOLD_POSE's own comment on why this doesn't
+  // bother blending with walkBlend the way the sword-handed run trail does.
+  // leftArmT: how "committed" the bow-holding arm/head are to pointing
+  // directly at the aim reticle right now — quick (BOW_DRAW_EASE_MS) in
+  // both directions, ramping up from bowDrawStartAt while actively
+  // drawing, back down from bowReleaseAt once released. Deliberately much
+  // faster than the right arm's own chargeFrac below: "the left hand
+  // points directly at the target" reads as an immediate commitment the
+  // instant you start holding, not something that creeps in with draw
+  // strength the way the right arm's visible charge lift does.
+  let leftArmT = 0;
+  if (isBow) {
+    if (rig.bowDrawing) {
+      leftArmT = Math.min(1, (nowMs - rig.bowDrawStartAt) / BOW_DRAW_EASE_MS);
+    } else {
+      leftArmT = Math.max(0, 1 - (nowMs - rig.bowReleaseAt) / BOW_DRAW_EASE_MS);
+    }
+  }
+  if (isBow) {
+    // Subtracted, not added — same sign convention as every other
+    // rotation.x in this file (see the sword's own POSE_* comment): more
+    // negative x swings a hanging-limb's tip further forward/up, so
+    // tilting the bow to point higher as aimElevation rises needs to push
+    // this more negative, not less.
+    rig.leftArm.rotation.x = BOW_HOLD_POSE.x - aimElevation * leftArmT;
+    rig.leftArm.rotation.z = BOW_HOLD_POSE.z;
+    // Confirmed via the same rotation-about-X trig every other pose here
+    // already relies on: a point on the face (local +Z) moves toward -Y
+    // (down) under positive rotation.x, toward +Y (up) under negative —
+    // so nodding the head UP to match a positive (upward) aimElevation
+    // needs the negated angle here, not the raw value.
+    rig.head.rotation.x = -aimElevation * leftArmT;
+  } else {
+    rig.leftArm.rotation.x = armTrail;
+    rig.head.rotation.x = 0;
+  }
+  // Right arm's run pose only applies at rest, with the sword equipped —
+  // the combo state machine owns that arm the rest of the time, and the
+  // bow draw pose (below) owns it unconditionally whenever the bow is out.
+  if (!isBow && rig.comboState === "idle") {
     rig.rightArm.rotation.x = armTrail;
     // Body lean only applied here (not unconditionally) for the same
     // reason — combat states own rig.visual.rotation.x themselves once
@@ -412,6 +614,45 @@ export function updatePlayerVisual(rig, nowMs, isMoving, dt) {
       rig.comboState = "idle";
       rig.stateEnteredAt = nowMs;
     }
+  }
+
+  // Bow draw pose — unconditional whenever the bow is equipped (comboState
+  // stays "idle" the whole time the bow is out, since firing it never goes
+  // through tryAttack/the sword's own state machine), so this always runs
+  // after — and overrides — the idle branch above's right-arm rotation.
+  //
+  // chargeFrac is the right arm's own "how much draw power is built up"
+  // lift — the SAME formula releaseBowDraw uses for arrow speed (so the
+  // arm's visible height IS the charge meter, not a separate animation
+  // with its own timing), climbing from BOW_MIN_DRAW_MS to BOW_MAX_DRAW_MS
+  // held. Releasing plays a much faster, ACCELERATING (ease-in) snap from
+  // wherever the charge had reached up to full extension, then settles
+  // back down to neutral — rather than just freezing or instantly
+  // resetting the instant the string lets go.
+  if (isBow) {
+    let chargeFrac;
+    if (rig.bowDrawing) {
+      const heldMs = nowMs - rig.bowDrawStartAt;
+      chargeFrac = Math.min(1, Math.max(0, (heldMs - BOW_MIN_DRAW_MS) / (BOW_MAX_DRAW_MS - BOW_MIN_DRAW_MS)));
+    } else {
+      const releaseElapsed = nowMs - rig.bowReleaseAt;
+      if (releaseElapsed < BOW_RELEASE_SNAP_MS) {
+        const t = releaseElapsed / BOW_RELEASE_SNAP_MS;
+        chargeFrac = rig.bowReleaseFromCharge + (1 - rig.bowReleaseFromCharge) * (t * t); // ease-in — accelerating, not linear
+      } else if (releaseElapsed < BOW_RELEASE_SNAP_MS + BOW_RELEASE_SETTLE_MS) {
+        const t = (releaseElapsed - BOW_RELEASE_SNAP_MS) / BOW_RELEASE_SETTLE_MS;
+        chargeFrac = 1 - t;
+      } else {
+        chargeFrac = 0;
+      }
+    }
+    // The fully-drawn target itself tracks aimElevation too (same sign
+    // convention as the left arm/head above) — this is what makes "the
+    // highest lift" also mean "pointing at the reticle," not just "pulled
+    // back," converging with the bow's own aim as the draw completes.
+    const drawnX = BOW_ARM_DRAWN.x - aimElevation;
+    rig.rightArm.rotation.x = BOW_ARM_NEUTRAL.x + (drawnX - BOW_ARM_NEUTRAL.x) * chargeFrac;
+    rig.rightArm.rotation.z = BOW_ARM_NEUTRAL.z + (BOW_ARM_DRAWN.z - BOW_ARM_NEUTRAL.z) * chargeFrac;
   }
 
   const tintTarget = rig.comboState === "cooldown" ? 1 : 0;

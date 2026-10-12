@@ -18,6 +18,7 @@ GAMES=(
     "model_viewer:../games/modelviewer/client/dist"
     "glsimsworld:../games/glsimsworld/client/dist"
     "glophimon:../games/glophimon/client/dist"
+    "glophiworld:../games/glophiworld/client/dist"
 )
 
 DEST_ROOT="media/games"

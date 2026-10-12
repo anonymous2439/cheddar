@@ -13,7 +13,100 @@ class CharacterOut(BaseModel):
     x: float
     z: float
     facing: float
+    # Which Glophics floor this character is currently standing on (0 =
+    # ground) — see GlophimonCharacter.floor's own docstring and game.js's
+    # own GLOPHICS_FLOORS/local.currentFloor. Persisted/restored the exact
+    # same way x/z/facing already are, so a reconnecting client resumes on
+    # whatever floor it last left the tower on rather than always
+    # respawning on the ground floor.
+    floor: int = 0
     current_hp: int
+    # Keyed by pose name ("idle"/"walk"/"ready"/"attack"/"defend"/"cast") —
+    # see GlophimonCharacter.pose_overrides' own docstring and PUT/DELETE
+    # /me/pose-overrides/{pose_name}. Missing key = no override for that pose.
+    pose_overrides: dict = Field(default_factory=dict)
+    # Keyed by slot name — either one of the 3 reset/orbit camera slots
+    # ("wild"/"team"/"pvp") or one of the wild battle's 4 focus-camera
+    # slots ("wild_decide_defend"/"wild_declare"/"wild_attack_scene"/
+    # "wild_defend_scene") — see GlophimonCharacter.camera_overrides' own
+    # docstring and PUT/DELETE /me/camera-overrides/{slot_name}. Missing key
+    # = no override, use the built-in framing for that slot.
+    camera_overrides: dict = Field(default_factory=dict)
+
+
+# Deliberately not validating keyframe contents beyond "a list of dicts" —
+# this is a per-account cosmetic-only client rendering hint (see
+# POSE_DESIGNER_PARTS in game.js), server-trusted the same way every other
+# purely-visual client payload in this game already is (character colors,
+# display name). A malformed entry can only ever break its own owner's own
+# animation, never anyone else's, so there's nothing to defend server-side.
+class PoseOverrideUpdate(BaseModel):
+    keyframes: list[dict] = Field(min_length=1, max_length=64)
+
+
+# Unlike PoseOverrideUpdate above, this IS validated with real bounds — the
+# Camera Designer only ever exposes 5 well-understood numeric/boolean knobs
+# (not an open-ended keyframe blob), and each one has a meaningful physical
+# range the client's own sliders already enforce (see CAMERA_DESIGNER_FIELDS
+# in game.js): radius/elevation bounds mirror the game's own MIN_ELEVATION/
+# MAX_ELEVATION clamp and a sane distance range, angle is a full 0..2π
+# revolution, rotateSpeed matches the client slider's own 0..1.0 rad/sec cap.
+class CameraOverrideUpdate(BaseModel):
+    radius: float = Field(ge=2, le=20)
+    # Lower bound moved from 0.05 to -0.65 (5% of headroom below the
+    # client's own MIN_ELEVATION=-0.6) — game.js's own overworld camera now
+    # allows negative pitch (looking up from below the target) so tall
+    # spaces like the cinema room are actually viewable up close; this
+    # bound needs to allow the same range or a Camera Designer save using
+    # it would get rejected here even though the client's own slider let
+    # the player pick it.
+    elevation: float = Field(ge=-0.65, le=1.5)
+    angle: float = Field(ge=0, le=6.2832)
+    autoRotate: bool
+    rotateSpeed: float = Field(ge=0, le=1.0)
+    # Y-axis (heading) rotation above wraps for free via sin/cos, so it can
+    # spin forever — pitch can't do that without flipping the camera upside
+    # down, so game.js's own advanceOrbitElevation bounces it between
+    # MIN_ELEVATION/MAX_ELEVATION instead. Defaulted (not required) so an
+    # older saved override written before this field existed still
+    # validates as "no vertical rotation," matching the client's own
+    # cameraDesignerDefaultValues fallback.
+    elevationRotateSpeed: float = Field(ge=0, le=0.5, default=0.0)
+
+
+# The wild battle's own focus camera (see focusWildCameraOnRig/
+# TEAM_FOCUS_CAM_BEHIND/HEIGHT/LOOK_Y/LOOK_AHEAD in game.js) got 4
+# independently-tunable re-aim slots of its own alongside the 3 orbit slots
+# above — "wild_decide_defend"/"wild_declare"/"wild_attack_scene"/
+# "wild_defend_scene" (see main.py's own FOCUS_CAMERA_SLOTS). Bounds are
+# centered around those same shared defaults (behind=1.2, height=2.0,
+# lookY=0.2, lookAhead=3) with enough headroom for a genuinely different
+# shot (e.g. a lower, closer "attack scene") while still keeping the camera
+# from ending up inside a rig or aimed at empty sky/ground.
+#
+# angle/autoRotate/rotateSpeed/heightRotateSpeed (new) give a focus shot the
+# same orbit-around-the-subject capability CameraOverrideUpdate's own
+# angle/autoRotate/rotateSpeed/elevationRotateSpeed already give the 3 orbit
+# slots — see game.js's own computeFocusCameraFrame (theta parameter) and
+# advanceFocusOrbit. Bounds mirror CameraOverrideUpdate's own field-by-field
+# (angle: full 0..2π revolution, rotateSpeed: same 0..1.0 rad/sec cap),
+# except heightRotateSpeed, which bounces game.js's own FOCUS_CAM_HEIGHT_MIN/
+# MAX (0.5..5) instead of MIN_ELEVATION/MAX_ELEVATION — same 0..0.5 cap as
+# elevationRotateSpeed either way. All 4 are defaulted (not required), same
+# reasoning as elevationRotateSpeed's own default above — an older saved
+# focus override predating these fields must still validate, as "no
+# rotation," matching the client's own cameraDesignerDefaultValues fallback
+# (rotateSpeed/heightRotateSpeed default to 0 here, not RESET_CAM_ORBIT_SPEED
+# — a focus shot never rotated at all before this).
+class CameraFocusOverrideUpdate(BaseModel):
+    behind: float = Field(ge=0.2, le=4)
+    height: float = Field(ge=0.2, le=6)
+    lookY: float = Field(ge=-2, le=3)
+    lookAhead: float = Field(ge=0, le=10)
+    angle: float = Field(ge=0, le=6.2832, default=0.0)
+    autoRotate: bool = True
+    rotateSpeed: float = Field(ge=0, le=1.0, default=0.0)
+    heightRotateSpeed: float = Field(ge=0, le=0.5, default=0.0)
 
 
 class CharacterCreate(BaseModel):
